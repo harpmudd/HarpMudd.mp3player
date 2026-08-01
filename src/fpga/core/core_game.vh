@@ -16,9 +16,11 @@
 // =============================================================================
 
 // -- 1. PLL / clocks ----------------------------------------------------------
-// outclk_0 = 50 MHz  CPU/system.  Stage 0 measured 45.7 MHz as the worst-case
-//            requirement (320 kbps) at 0 wait states; 50 MHz covers typical
-//            content with margin and closes timing easily for bring-up.
+// outclk_0 = 60 MHz  CPU/system.  Stage 0 measured 45.7 MHz as the worst-case
+//            requirement (320 kbps) at 0 wait states. Bring-up ran at 50 MHz,
+//            which left too little headroom once UI drawing and SD reads shared
+//            the CPU with the decoder -- audible tics under load. 60 MHz is the
+//            shipping speed and still closes timing comfortably.
 // outclk_1 = 12 MHz  pixel clock: 500x400 total = exactly 60.000 Hz, driving
 //            a 400x360 active image -- an exact 4x integer scale of the
 //            Pocket's native 1600x1440 panel (confirmed via Analogue's own
