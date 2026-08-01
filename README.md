@@ -8,8 +8,8 @@ The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
 > **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, tags, album art and the UI all work on real hardware. It has not been
-> released — see [Known limitations](#known-limitations).
+> repeat, saved settings, tags, album art and the UI all work on real hardware.
+> It has not been released — see [Known limitations](#known-limitations).
 
 ## Installing
 
@@ -24,8 +24,9 @@ files into:
 They can live anywhere on the card, but keeping them there puts them next to
 the core and makes them quick to find in the file browser.
 
-`mp3player.rom` in that same folder is the core's firmware. It ships with the
-core and the core won't start without it — leave it alone.
+Two files in that folder ship with the core and aren't yours to edit:
+`mp3player.rom` is the firmware — the core won't start without it — and
+`settings.bin` is where your volume, colour and playback modes are saved.
 
 ## Playing
 
@@ -50,6 +51,10 @@ playlists at any time.
 Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
+
+Volume, accent colour, repeat, shuffle and the art panel are remembered between
+sessions — they're written to `settings.bin` beside the core a moment after you
+change them.
 
 Volume, accent colour, repeat and shuffle persist while the core is running;
 they reset on relaunch.
@@ -119,9 +124,6 @@ nothing.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II
   are not handled.
 - **JPEG album art only.** PNG cover art is detected and skipped.
-- **Nothing is saved between sessions.** Volume, accent colour, repeat, shuffle
-  and the art panel's state all reset to defaults on relaunch. Persistence is
-  planned.
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 
 ## Credits
