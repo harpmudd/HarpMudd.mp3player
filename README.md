@@ -38,14 +38,48 @@ as you select it.
 | Pocket | Action |
 |---|---|
 | **A** / **Start** | Play / pause |
-| **Left** / **Right** | Seek −5 s / +5 s |
+| **Left** / **Right** | *Tap* — seek −5 s / +5 s |
+| **Left** / **Right** | *Hold* — previous / next track |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent colour (12 shades) |
+| **Select** + **L** | Repeat: off → all → one |
+| **Select** + **R** | Shuffle on / off |
 
-Volume, accent colour and the art panel's state persist while the core is
-running; they reset on relaunch.
+Volume, accent colour, repeat and shuffle persist while the core is running;
+they reset on relaunch.
+
+## Playlists
+
+Make a plain text file with one track per line, save it as `.m3u` in
+`/Assets/mp3player/common/`, and the core will play through it:
+
+```text
+Feel Good Inc.mp3
+Rhinestone Eyes.mp3
+/Music/Albums/Demon Days/01 Intro.mp3
+```
+
+Paths without a leading `/` are relative to that same folder; a leading `/`
+means from the root of the card, so tracks can live anywhere. Lines starting
+with `#` are ignored — which also means the `#EXTM3U` and `#EXTINF` lines other
+players write are skipped, so a playlist exported from elsewhere works as-is.
+Up to 128 tracks.
+
+A starter `playlist.m3u` ships with the core, with the format written into it
+as comments. Edit it in any text editor.
+
+To switch playlists without leaving the core, press the **Analogue** button and
+choose **Load Playlist**. Playing a single file with **Load MP3** still works
+and simply ignores the playlist.
+
+**Repeat** governs only what happens when a track ends by itself — off stops at
+the end of the list, *all* loops back to the first track, *one* repeats the
+current track. Skipping by hand with **Left**/**Right** always wraps, so you can
+never get stuck at the end. **Shuffle** plays every track once before repeating
+any, and reshuffles each time it comes round; turning it on or off keeps the
+current track playing rather than jumping.
 
 ## What it shows
 
@@ -58,6 +92,8 @@ running; they reset on relaunch.
 - **A spectrum meter** driven by the decoder's own subband data, so it follows
   the actual audio.
 - **Elapsed and total time**, with a progress bar.
+- **Repeat and shuffle indicators** and the track position in the
+  playlist, when one is loaded.
 
 CBR and VBR MPEG-1 Layer III are supported at every standard bitrate and sample
 rate, mono or stereo.<br clear="right">
@@ -85,8 +121,6 @@ nothing. Fix and regression test:
 
 ## Known limitations
 
-- **No playlists.** One track at a time; use **Load MP3** to switch. Playlist
-  support is the next planned feature.
 - **Total track time can be wrong** on files with no Xing/Info/VBRI header. The
   fallback estimates from a measured byte rate, which is approximate for VBR.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II

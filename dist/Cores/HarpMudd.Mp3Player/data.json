@@ -17,6 +17,15 @@
                 "deferload": true,
                 "parameters": "0x1",
                 "extensions": ["mp3"]
+            },
+            {
+                "name": "Playlist",
+                "id": 3,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x1",
+                "filename": "playlist.m3u",
+                "extensions": ["m3u"]
             }
         ]
     }

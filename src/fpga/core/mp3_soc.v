@@ -272,6 +272,8 @@ module mp3_soc #(
     // by the time clk_sys detects the toggle edge, then compare against our
     // MP3 slot ID (2 -- must match data.json AND firmware's MP3_SLOT_ID).
     localparam [15:0] MP3_SLOT_ID = 16'd2;
+    // Playlist slot ID (3 -- must match data.json AND firmware's PL_SLOT_ID).
+    localparam [15:0] PL_SLOT_ID  = 16'd3;
 
     reg        upd_tgl_74 = 1'b0;
     reg [15:0] upd_id_74;
@@ -288,12 +290,27 @@ module mp3_soc #(
     always @(posedge clk) upd_sync <= {upd_sync[1:0], upd_tgl_74};
     wire mp3_reload_edge = (upd_sync[2] ^ upd_sync[1]) && (upd_id_74 == MP3_SLOT_ID);
 
-    reg mp3_reloaded;
-    wire ack_reload = d_req & d_is_mmio & dWE & (mmio_reg == R_RELOAD);
+    // The playlist slot raises 008A exactly as the MP3 slot does, but the edge
+    // above is gated on the MP3 id -- so without this a "Load Playlist" pick is
+    // invisible to firmware and silently does nothing. Polling slot 3 instead is
+    // NOT an option: touching a different slot makes APF drop its fragment cache
+    // for the MP3 slot, and every refill then re-walks the FAT cluster chain.
+    wire pl_reload_edge = (upd_sync[2] ^ upd_sync[1]) && (upd_id_74 == PL_SLOT_ID);
+
+    reg mp3_reloaded, pl_reloaded;
+    // Acked PER BIT rather than by any write, so clearing one flag cannot drop
+    // the other -- a track change and a playlist change can land together.
+    wire wr_reload  = d_req & d_is_mmio & dWE & (mmio_reg == R_RELOAD);
+    wire ack_reload = wr_reload & dDAT_MOSI[0];
+    wire ack_pl     = wr_reload & dDAT_MOSI[4];
     always @(posedge clk) begin
-        if (rst)               mp3_reloaded <= 1'b0;
+        if (rst)                  mp3_reloaded <= 1'b0;
         else if (mp3_reload_edge) mp3_reloaded <= 1'b1;
-        else if (ack_reload)   mp3_reloaded <= 1'b0;
+        else if (ack_reload)      mp3_reloaded <= 1'b0;
+
+        if (rst)                 pl_reloaded <= 1'b0;
+        else if (pl_reload_edge) pl_reloaded <= 1'b1;
+        else if (ack_pl)         pl_reloaded <= 1'b0;
     end
 
     // dataslot_allcomplete is a LEVEL in clk_74a (set by 008F, cleared by the
@@ -346,7 +363,7 @@ module mp3_soc #(
     // stale RTL. That has already happened three times here, each time looking
     // like a logic bug (dead peripheral, no audio, unresponsive buttons) rather
     // than what it was. BUMP THIS whenever the MMIO map changes.
-    localparam [31:0] CORE_VERSION = 32'h4D50330E;   // "MP3" + rev 14 (SDRAM copy op)
+    localparam [31:0] CORE_VERSION = 32'h4D50330F;   // "MP3" + rev 15 (playlist reload bit)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -457,8 +474,9 @@ module mp3_soc #(
             R_INPUT:   mmio_rdata = {15'd0, menu_s1, key_s1};
             R_VERSION: mmio_rdata = CORE_VERSION;
             //  bit0 reload pending, bit1 slot ready (allcomplete rose since),
-            //  bit2 allcomplete level now, bit3 allcomplete fell since reload
-            R_RELOAD:  mmio_rdata = {28'd0, slot_fell, ac_sync[2],
+            //  bit2 allcomplete level now, bit3 allcomplete fell since reload,
+            //  bit4 PLAYLIST slot reloaded
+            R_RELOAD:  mmio_rdata = {27'd0, pl_reloaded, slot_fell, ac_sync[2],
                                      slot_ready, mp3_reloaded};
             R_SLOT_SZ: mmio_rdata = slot_size;
             /* BRAM read is registered: firmware writes R_DT_ADDR, then reads

@@ -57,6 +57,7 @@
 
 /* R_RELOAD bits -- see mp3_soc.v */
 #define RL_PENDING   1u
+#define RL_PL_RELOAD 0x10u   /* the PLAYLIST slot was reloaded (bit 4) */
 #define RL_READY     2u   /* allcomplete rose since the reload notification   */
 #define RL_AC_NOW    4u   /* allcomplete level right now                      */
 #define RL_AC_FELL   8u   /* allcomplete fell since the reload notification   */
@@ -133,7 +134,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D50330Eu   /* rev 14: SDRAM copy op (art panel) */
+#define EXPECT_VERSION 0x4D50330Fu   /* rev 15: playlist slot reload bit  */
 
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */
@@ -355,6 +356,36 @@ static void vol_apply(void)
 {
     vol_gain = (int32_t)(volume * 256u / 100u);
 }
+/* ------------------------------------------------------------- playlist ----
+ * State only. The logic is in playlist.inc, which has to be included further
+ * down (it needs the target-command helpers), but the UI drawn above that point
+ * reads these -- so they are declared here where both can see them.
+ *
+ * pl_order[] is the PLAY order, pl_off[] the file order. Shuffle permutes
+ * pl_order and leaves pl_off alone, so "track 4 of 12" always means the same
+ * track whether shuffled or not, and turning shuffle off resumes the file
+ * order without reloading anything. */
+#define PL_MAX       128u        /* tracks; 128 * 6 bytes of index is cheap */
+#define PL_TEXT_MAX  8192u       /* the .m3u itself, names only after parsing */
+
+static char     pl_text[PL_TEXT_MAX];
+static uint16_t pl_off[PL_MAX];          /* byte offset of each name in pl_text */
+static uint16_t pl_order[PL_MAX];        /* play order -> file index            */
+static uint16_t pl_count;                /* 0 = no playlist loaded              */
+static uint16_t pl_pos;                  /* index INTO pl_order                 */
+
+enum { REP_OFF = 0, REP_ALL, REP_ONE };
+static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
+static uint8_t  shuffle_on;
+static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
+static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
+
+#define PL_HOLD_MS 400u                  /* Left/Right held this long = skip  */
+
+/* Defined in playlist.inc, called from the input handler above it. */
+static void pl_reorder(void);
+static void pl_resync(uint16_t file_idx);
+
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
 static uint32_t restart_req;       /* B button: full reload, re-reads the tag */
 static uint32_t soft_restart_req;  /* probe: reposition only, keeps the known-good tag */
@@ -619,6 +650,9 @@ static void ui_toast_set(const char *msg, uint32_t n, const char *suffix)
     ui_toast_step = 0xFFFFFFFFu;           /* force the first draw */
 }
 
+/* Plain text, no trailing number. */
+static void ui_toast_msg(const char *msg) { ui_toast_set(msg, 0xFFFFFFFFu, 0); }
+
 /* Bytes per second of AUDIO, which is what both the duration and the seek
  * distance depend on.
  *
@@ -784,6 +818,47 @@ static void ui_icon_arrow(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
         uint32_t ww = ((half - d) * w) / half;
         if (ww) fb_rect(x, y + i, ww, 1, c);
     }
+}
+
+/* ---- mode indicators -------------------------------------------------------
+ * Drawn from rects rather than added to the font atlas: BRAM is at 97% and a
+ * glyph costs a whole cell, while these are four rects each. They also need to
+ * dim to "mode off" rather than disappear -- an icon that vanishes gives no
+ * hint the mode exists, which is the usual complaint about hidden controls. */
+#define UI_MODE_W  11u
+#define UI_MODE_H  9u
+
+/* Repeat: a rounded rectangle loop with an arrowhead on the top-right. With
+ * `one` set, the middle is notched to read as "just this track". */
+static void ui_icon_repeat(uint32_t x, uint32_t y, uint16_t c, int one)
+{
+    fb_rect(x,               y,               UI_MODE_W,     1u,        c);
+    fb_rect(x,               y + UI_MODE_H-1, UI_MODE_W,     1u,        c);
+    fb_rect(x,               y + 1u,          1u,            UI_MODE_H-2, c);
+    fb_rect(x + UI_MODE_W-1, y + 1u,          1u,            UI_MODE_H-2, c);
+    /* Arrowhead, top-right, pointing along the loop. */
+    fb_rect(x + UI_MODE_W-4, y - 1u,          1u,            3u,        c);
+    fb_rect(x + UI_MODE_W-3, y - 2u,          1u,            5u,        c);
+    if (one) {
+        /* Break the bottom edge and drop a tick in the gap: unmistakably a
+         * different state at 1x, without needing a digit glyph. */
+        fb_rect(x + UI_MODE_W/2u - 1u, y + UI_MODE_H-1, 3u, 1u, UI_PANEL);
+        fb_rect(x + UI_MODE_W/2u,      y + UI_MODE_H-3, 1u, 3u, c);
+    }
+}
+
+/* Shuffle: two crossing paths with arrowheads, the conventional form. */
+static void ui_icon_shuffle(uint32_t x, uint32_t y, uint16_t c)
+{
+    for (uint32_t i = 0; i < UI_MODE_H; i++) {
+        uint32_t t = (i * (UI_MODE_W - 3u)) / (UI_MODE_H - 1u);
+        fb_rect(x + t,                    y + i,               1u, 1u, c);
+        fb_rect(x + (UI_MODE_W - 3u) - t, y + i,               1u, 1u, c);
+    }
+    fb_rect(x + UI_MODE_W - 3u, y,               3u, 1u, c);
+    fb_rect(x + UI_MODE_W - 3u, y + UI_MODE_H-1, 3u, 1u, c);
+    fb_rect(x + UI_MODE_W - 1u, y,               1u, 3u, c);
+    fb_rect(x + UI_MODE_W - 1u, y + UI_MODE_H-3, 1u, 3u, c);
 }
 
 static void ui_icon_pause(uint32_t x, uint32_t y, uint16_t c)
@@ -1007,6 +1082,7 @@ static void ui_draw_dynamic(void)
         ui_last_prog  = 0xFFFFFFFFu;    /* progress fill                   */
         ui_last_pause = 0xFFFFFFFFu;    /* PLAYING label                   */
         ui_icon_next  = cycles();       /* arrows, on the next tick        */
+        ui_mode_dirty = 1u;             /* repeat/shuffle icons, N-of-M    */
     }
 
     /* Frozen, not decaying, while paused: shifting the history along with a
@@ -1310,6 +1386,41 @@ static void ui_draw_dynamic(void)
                 }
             }
         }
+
+        /* Repeat / shuffle / position. Static between changes, so it is drawn
+         * only when something actually changed rather than every frame -- the
+         * same discipline the arrows needed, for the same reason. */
+        if (ui_mode_dirty) {
+            ui_mode_dirty = 0;
+
+            const uint32_t mx = ix + UI_ARR_SPAN + 14u;
+            const uint32_t my = iy + (UI_ICONBOX_H > UI_MODE_H
+                                    ? (UI_ICONBOX_H - UI_MODE_H) / 2u : 0u);
+
+            fb_rect(mx, iy, (UI_MODE_W + 10u) * 2u, UI_ICONBOX_H, tbg);
+            /* Inactive modes stay visible but recede, so the controls advertise
+             * themselves instead of only appearing once found. */
+            ui_icon_repeat(mx, my,
+                           rep_mode == REP_OFF ? UI_FAINT : ui_accent,
+                           rep_mode == REP_ONE);
+            ui_icon_shuffle(mx + UI_MODE_W + 10u, my,
+                            shuffle_on ? ui_accent : UI_FAINT);
+
+            /* "4 / 12", right-aligned so the numbers do not shuffle sideways as
+             * the track index gains a digit. */
+            if (pl_count) {
+                char pos[16]; char *q = pos;
+                q = ui_dec(q, (uint32_t)(pl_pos + 1u));
+                *q++ = ' '; *q++ = '/'; *q++ = ' ';
+                q = ui_dec(q, (uint32_t)pl_count);
+                *q = 0;
+                uint32_t pw = fb_text_width(pos, TS_1X);
+                uint32_t px = FB_W - UI_MARGIN - pw;
+                fb_rect(px - 4u, ly, pw + 8u, FB_CELL(TS_1X), tbg);
+                fb_set_color(UI_DIM, tbg);
+                fb_text_clipped(px, ly, pos, TS_1X, TS_1X, pw + 4u);
+            }
+        }
     }
 
     /* Only ever appears if the CPU actually blocked on a full draw FIFO. If
@@ -1393,34 +1504,103 @@ static uint32_t st0;
 static short pcm[MAX_NCHAN * MAX_NGRAN * MAX_NSAMP];
 
 /* ------------------------------------------------------------- controls --
- * A / Start : play-pause      Left / Right : seek -/+ ~5 s
- * Up / Down : volume          B            : full reload (re-reads the tag)
- * Select    : show/hide art   L / R        : cycle accent colour
+ * A / Start : play-pause          Left / Right      : tap  = seek -/+ ~5 s
+ * Up / Down : volume                                  hold = previous/next
+ * B         : full reload (re-reads the tag)
+ * Select    : show/hide art       Select + L        : cycle repeat off/all/one
+ * L / R     : accent colour       Select + R        : shuffle on/off
+ *
+ * Left/Right and Select both do one thing on a tap and another when held or
+ * combined. Both resolve on RELEASE, so the tap action cannot fire and then be
+ * followed by the hold action for the same press. A tap is tens of
+ * milliseconds, so deferring it that long is not perceptible.
  */
+static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
+static uint32_t pl_reload_pending;       /* user picked a different .m3u       */
+
 static void poll_input(void)
 {
     static uint32_t prev;
+    static uint32_t lr_t0[2];            /* when Left/Right went down          */
+    static uint8_t  lr_fired[2];         /* the hold already skipped           */
+    static uint8_t  sel_used;            /* Select was used as a modifier      */
     uint32_t in   = REG(R_INPUT);
     uint32_t keys = in & 0xFFFFu;
-    uint32_t edge = keys & ~prev;        /* rising edges only */
+    uint32_t edge = keys & ~prev;        /* rising edges only  */
+    uint32_t fall = prev & ~keys;        /* falling edges      */
     prev = keys;
 
     if (edge & (KEY_A | KEY_START)) paused ^= 1u;
     if (edge & KEY_B)               restart_req = 1u;
-    if (edge & KEY_SELECT)          art_toggle  = 1u;
-    if (edge & KEY_RIGHT)         { seek_req = 1u;
-                                    ui_toast_set("SEEK +5s", 0xFFFFFFFFu, 0); }
-    if (edge & KEY_LEFT)          { seek_req = (uint32_t)-1;
-                                    ui_toast_set("SEEK -5s", 0xFFFFFFFFu, 0); }
+
+    /* ---- Left/Right: tap seeks, hold skips track ---- */
+    {
+        const uint32_t kmask[2] = { KEY_LEFT, KEY_RIGHT };
+        const uint32_t hold_cy  = CLK_HZ / 1000u * PL_HOLD_MS;
+        for (int i = 0; i < 2; i++) {
+            if (edge & kmask[i]) { lr_t0[i] = cycles(); lr_fired[i] = 0; }
+
+            /* Fire the skip the moment the threshold passes rather than on
+             * release: holding a button and having nothing happen until you
+             * let go feels broken, and repeat-skip needs the same shape. */
+            if ((keys & kmask[i]) && !lr_fired[i] &&
+                (int32_t)(cycles() - lr_t0[i]) >= (int32_t)hold_cy) {
+                lr_fired[i] = 1;
+                if (pl_count) {
+                    skip_req = i ? 1u : (uint32_t)-1;
+                } else {
+                    ui_toast_msg("NO PLAYLIST");
+                }
+            }
+
+            if (fall & kmask[i]) {
+                if (!lr_fired[i]) {          /* a tap: the original seek */
+                    seek_req = i ? 1u : (uint32_t)-1;
+                    ui_toast_msg(i ? "SEEK +5s" : "SEEK -5s");
+                }
+                lr_fired[i] = 0;
+            }
+        }
+    }
+
     if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
                                   ? VOL_MAX : volume + VOL_STEP;
                            vol_apply(); ui_toast_set("VOLUME", volume, "%"); }
     if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
                            vol_apply(); ui_toast_set("VOLUME", volume, "%"); }
-    if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
-                         ui_accent_changed = 1u; }
-    if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
-                         ui_accent_changed = 1u; }
+
+    /* ---- Select as a modifier for L/R ---- */
+    if (edge & KEY_SELECT) sel_used = 0;
+
+    if (keys & KEY_SELECT) {
+        if (edge & KEY_L1) {
+            sel_used = 1;
+            rep_mode = (uint8_t)((rep_mode + 1u) % 3u);
+            ui_toast_msg(rep_mode == REP_OFF ? "REPEAT OFF"
+                       : rep_mode == REP_ALL ? "REPEAT ALL" : "REPEAT ONE");
+            ui_mode_dirty = 1u;
+        }
+        if (edge & KEY_R1) {
+            sel_used   = 1;
+            shuffle_on = (uint8_t)!shuffle_on;
+            if (shuffle_on) pl_rng = cycles() | 1u;
+            if (pl_count) {
+                uint16_t cur = pl_order[pl_pos];
+                pl_reorder();
+                pl_resync(cur);          /* keep playing what is playing */
+            }
+            ui_toast_msg(shuffle_on ? "SHUFFLE ON" : "SHUFFLE OFF");
+            ui_mode_dirty = 1u;
+        }
+    } else {
+        if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
+                             ui_accent_changed = 1u; }
+        if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
+                             ui_accent_changed = 1u; }
+    }
+
+    /* Only a Select that was NOT used as a modifier toggles the art panel. */
+    if ((fall & KEY_SELECT) && !sel_used) art_toggle = 1u;
 
     /* Pause while the OS menu ("Load MP3" etc) is open, without clobbering the
      * user's own A/Start pause -- bit 1 is the menu's, bit 0 is theirs. */
@@ -1430,6 +1610,7 @@ static void poll_input(void)
      * which is where the CPU spends most of its time when keeping up, so a
      * reload is noticed immediately instead of after the current frame. */
     if (REG(R_RELOAD) & RL_PENDING) reload_pending = 1u;
+    if (REG(R_RELOAD) & RL_PL_RELOAD) pl_reload_pending = 1u;
 }
 
 /* Drops every sample queued in the hardware FIFO. Required on any
@@ -1644,6 +1825,7 @@ static void target_flush_slot_cache(void)
 }
 
 #include "art.inc"
+#include "playlist.inc"
 
 /* Slide unconsumed bytes down and pull in ONE chunk. Compaction keeps Helix's
  * input pointer arithmetic simple -- it wants a flat span, not a wrap. */
@@ -2065,8 +2247,14 @@ int main(void)
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
 
     vol_apply();
+    /* Before the track, deliberately: reading the playlist slot makes APF drop
+     * its fragment cache for the MP3 slot, so doing it once here costs nothing
+     * while doing it mid-stream would make every refill re-walk the cluster
+     * chain. No playlist on the card simply leaves pl_count at 0. */
+    pl_load();
     tag_fix_budget = 2;
     if (!load_track()) ui_load_failed();
+    if (pl_count) ui_toast_set("PLAYLIST", pl_count, " TRACKS");
 
     for (;;) {
         poll_input();
@@ -2114,6 +2302,34 @@ int main(void)
                 if (!load_track()) ui_load_failed();
                 continue;
             }
+        }
+
+        /* The user picked a different playlist. Re-reading slot 3 flushes the
+         * MP3 slot's fragment cache, so this pauses briefly rather than doing
+         * it underneath a running stream. */
+        if (pl_reload_pending) {
+            pl_reload_pending = 0;
+            REG(R_RELOAD) = RL_PL_RELOAD;            /* ack just this bit */
+            pl_load();
+            if (pl_count) {
+                ui_toast_set("PLAYLIST", pl_count, " TRACKS");
+                pl_play_at(0);
+            } else {
+                ui_toast_msg("EMPTY PLAYLIST");
+            }
+            ui_mode_dirty = 1;
+            continue;
+        }
+
+        /* Track skip (Left/Right held). pl_play_at() issues 0192; APF then
+         * raises 008A and the ordinary reload path does the actual loading. */
+        if (skip_req) {
+            uint32_t d = skip_req; skip_req = 0;
+            if (pl_skip(d == 1u ? 1 : -1)) {
+                ui_toast_set("TRACK", (uint32_t)(pl_pos + 1u), 0);
+                ui_mode_dirty = 1;
+            }
+            continue;
         }
 
         if (art_toggle) {
@@ -2217,6 +2433,16 @@ int main(void)
              * and the ring is drained. Repeat -- with a playlist this is where
              * it advances instead, which is why it is a soft restart. */
             if (slot_size && file_pos >= slot_size && !rd_pending) {
+                /* With a playlist this advances; pl_advance_auto() returns 0
+                 * when it deliberately did not (repeat-one, or the end of a
+                 * non-repeating list), and the old replay-this-track behaviour
+                 * is the fallback -- so a single file still loops as before. */
+                if (pl_advance_auto()) { ui_mode_dirty = 1; continue; }
+                if (pl_count && rep_mode == REP_OFF &&
+                    pl_pos + 1u >= pl_count) {
+                    paused |= 1u;              /* end of the list: stop here */
+                    ui_toast_msg("END OF PLAYLIST");
+                }
                 soft_restart_req = 1;
                 continue;
             }
