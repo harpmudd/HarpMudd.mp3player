@@ -1,5 +1,9 @@
 # MP3 Player — Analogue Pocket
 
+<p align="center">
+  <img src="docs/screenshot.png" width="440" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right and a progress bar below">
+</p>
+
 An MP3 player for the Analogue Pocket. Pick a track and the core decodes and
 plays it straight off the SD card, with album art, ID3 tags, a spectrum meter
 and a progress bar.
@@ -48,10 +52,6 @@ Volume, accent colour and the art panel's state persist while the core is
 running; they reset on relaunch.
 
 ## What it shows
-
-<p align="center">
-  <img src="docs/screenshot.png" width="400" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right and a progress bar below">
-</p>
 
 - **Title and artist** from the ID3v2 tag, in a real proportional typeface with
   anti-aliased text.
