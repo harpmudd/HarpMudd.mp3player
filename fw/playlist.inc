@@ -154,7 +154,9 @@ static uint8_t pl_status;
  * depends on exactly that behaviour to binary-search a file's length. So asking
  * for a flat 4 KB, as this first did, fails outright on any playlist smaller
  * than 4 KB, which is essentially all of them: a 20-track .m3u is under 500
- * bytes. Halving down finds the largest read the tail will actually serve. */
+ * bytes. Halving down finds the largest read the tail will actually serve --
+ * all the way to a single byte, because stopping at 4 left the last 1-3 bytes
+ * of the file unread and silently truncated the final track's name. */
 static uint32_t pl_read_raw(void)
 {
     uint32_t got = 0;
@@ -165,12 +167,12 @@ static uint32_t pl_read_raw(void)
         if (want > TAG_SIZE) want = TAG_SIZE;
 
         uint32_t n = 0;
-        while (want >= 4u) {
+        while (want >= 1u) {
             /* Zero the landing zone first, then measure what actually arrived:
              * a read may also be CLAMPED rather than failed, and .m3u is text,
              * so a NUL reliably marks where the data stopped either way. */
-            volatile uint32_t *w32 = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
-            for (uint32_t k = 0; k < want / 4u; k++) w32[k] = 0u;
+            volatile uint8_t *z = (volatile uint8_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+            for (uint32_t k = 0; k < want; k++) z[k] = 0u;
 
             if (target_read_slot(PL_SLOT_ID, got, TAG_OFF, want)) {
                 while (n < want && tagbuf[n]) n++;
@@ -205,11 +207,21 @@ static void pl_parse(uint32_t len)
         while (i < len && pl_text[i] != '\n' && pl_text[i] != '\r') i++;
         uint32_t end = i;
 
+        /* Step PAST the line terminator BEFORE writing the NUL over it.
+         *
+         * Terminating first destroyed the very byte the next iteration's skip
+         * loop looks for, so that loop stopped skipping and every following
+         * line began at the NUL rather than at its first real character. A line
+         * starting with NUL is not '#', so EVERY COMMENT LINE COUNTED AS A
+         * TRACK -- a 23-line comment header parsed as 23 tracks. */
+        if (i < len && pl_text[i] == '\r') i++;
+        if (i < len && pl_text[i] == '\n') i++;
+
         /* Trailing whitespace, and the \r of a Windows line ending that a
          * hand-edited file will almost always have. */
         while (end > start && (pl_text[end-1] == ' ' || pl_text[end-1] == '\t'))
             end--;
-        pl_text[end] = 0;                    /* safe: this byte was a separator */
+        pl_text[end] = 0;
 
         if (end > start && pl_text[start] != '#')
             pl_off[pl_count++] = (uint16_t)start;
