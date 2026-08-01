@@ -460,7 +460,7 @@ static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone *
 
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
 #define UI_CARD_H  120u
-#define UI_SHOW_DIAG 1        /* temporary: A/S/T/F reload diagnostics */
+#define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -1323,7 +1323,7 @@ static void ui_draw_dynamic(void)
      *   F  slot identity from 0190, low byte -- 00 means it did not answer
      * These are exactly the inputs behind "started in the wrong place" and
      * "wrong total", so a bad load says which one is at fault instead of
-     * needing another round of inference. Set UI_SHOW_DIAG 0 to remove. */
+     * needing another round of inference. Set UI_SHOW_DIAG 1 to show it. */
 #if UI_SHOW_DIAG
     uint32_t diag = audio_start ^ slot_size ^ (track_secs << 3) ^ cur_file_id;
     if (diag != ui_last_stall) {
