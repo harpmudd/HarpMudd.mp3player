@@ -1517,6 +1517,8 @@ static short pcm[MAX_NCHAN * MAX_NGRAN * MAX_NSAMP];
  */
 static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
 static uint32_t pl_reload_pending;       /* user picked a different .m3u       */
+static uint32_t pl_dump_req;             /* Select+B: show the 0190 struct     */
+static uint32_t ui_dump_mode;            /* dump screen is up; drawing paused  */
 
 static void poll_input(void)
 {
@@ -1531,7 +1533,10 @@ static void poll_input(void)
     prev = keys;
 
     if (edge & (KEY_A | KEY_START)) paused ^= 1u;
-    if (edge & KEY_B)               restart_req = 1u;
+    if (edge & KEY_B) {
+        if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
+        else                     restart_req = 1u;
+    }
 
     /* ---- Left/Right: tap seeks, hold skips track ---- */
     {
@@ -2304,6 +2309,16 @@ int main(void)
             }
         }
 
+        /* Select+B: freeze on the raw 0190 struct. Press again to resume;
+         * decoding continues throughout, only drawing is suspended. */
+        if (pl_dump_req) {
+            pl_dump_req = 0;
+            ui_dump_mode ^= 1u;
+            if (ui_dump_mode) pl_dump_struct();
+            else              ui_draw_chrome();
+            continue;
+        }
+
         /* The user picked a different playlist. Re-reading slot 3 flushes the
          * MP3 slot's fragment cache, so this pauses briefly rather than doing
          * it underneath a running stream. */
@@ -2380,7 +2395,7 @@ int main(void)
                 }
                 ui_was_paused = 1;
                 ui_pause_next = cycles() + CLK_HZ / 30u;
-                ui_draw_dynamic();
+                if (!ui_dump_mode) ui_draw_dynamic();
             }
             continue;
         }
@@ -2535,7 +2550,7 @@ int main(void)
         st0 |= (1u << 3);
         REG(R_STAT0) = st0;
 
-        ui_draw_dynamic();
+        if (!ui_dump_mode) ui_draw_dynamic();
 
 next_outer: ;
     }

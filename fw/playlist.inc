@@ -111,8 +111,25 @@ static int pl_open_name(const char *name)
      *    than assumed, and only accepted in that one adjacent position -- a
      *    scan of the whole struct for "any word equal to the length" would
      *    eventually match something unrelated and corrupt it. */
-    uint32_t new_len = 0;
-    while (name[new_len]) new_len++;
+    /* The slot's current entry is a full PATH ("/Assets/mp3player/common/x.mp3"
+     * -- the 0190 work saw exactly that), while a playlist line is normally a
+     * bare filename. Replacing the whole path with a bare name asks APF to open
+     * a file that does not exist at the root, which is what result code 4 was
+     * reporting. So KEEP the directory the slot is already using and swap only
+     * the last component. An entry that starts with '/' is taken as absolute
+     * and replaces the path outright.
+     *
+     * The directory is read off the observed response rather than hardcoded --
+     * a playlist can live anywhere, and this way it follows the slot. */
+    uint32_t dir_len = 0;
+    if (name[0] != '/') {
+        for (uint32_t k = 0; k < best_len; k++)
+            if (buf[best + k] == '/') dir_len = k + 1u;
+    }
+
+    uint32_t nm_len = 0;
+    while (name[nm_len]) nm_len++;
+    uint32_t new_len = dir_len + nm_len;
     if (new_len >= sizeof(buf) - best) { pl_open_err = PLO_TOOLONG; return 0; }
 
     uint32_t len_w = (best >= 4u) ? ((best - 4u) / 4u) : 0xFFFFFFFFu;
@@ -125,9 +142,9 @@ static int pl_open_name(const char *name)
 
     /* 4. Overwrite the name, and clear the tail of the old one so a shorter
      *    name cannot leave the previous file's characters trailing behind it. */
-    for (uint32_t k = 0; k < best_len || k < new_len; k++) {
+    for (uint32_t k = dir_len; k < best_len || k < new_len; k++) {
         if (best + k >= sizeof(buf)) break;
-        buf[best + k] = (k < new_len) ? (uint8_t)name[k] : 0u;
+        buf[best + k] = (k < new_len) ? (uint8_t)name[k - dir_len] : 0u;
     }
     if (best + new_len < sizeof(buf)) buf[best + new_len] = 0u;
 
@@ -155,6 +172,53 @@ static int pl_open_name(const char *name)
         return 0;
     }
     return 1;
+}
+
+/* ---------------------------------------------------------------- diagnostic
+ * Put the raw 0190 response struct on screen, 16 bytes per row, hex on the left
+ * and printable ASCII on the right.
+ *
+ * Everything about the 0192 parameter struct here is inferred from this
+ * response -- its layout, where the name sits, whether a length field precedes
+ * it. If an open still fails, that inference is what is wrong, and no amount of
+ * reasoning from outside will settle it. One photograph of this screen shows
+ * the real layout. Bound to Select+B; harmless to leave in.
+ */
+static void pl_dump_struct(void)
+{
+    if (!pl_cmd(TGT_GETFILE, MP3_SLOT_ID, CLK_HZ)) { /* show what is there anyway */ }
+
+    fb_rect(0, 0, FB_W, FB_H, UI_BG);
+    fb_set_color(ui_accent, UI_BG);
+    fb_text_clipped(6, 4, "0190 RESPONSE STRUCT", TS_1X, TS_1X, FB_W);
+
+    for (uint32_t row = 0; row < 16u; row++) {
+        char line[64]; char *q = line;
+        uint8_t b[16];
+        for (uint32_t k = 0; k < 16u; k += 4u) {
+            uint32_t v = dt_read(DT_RESP_W + (row * 4u) + (k / 4u));
+            b[k+0] = (uint8_t)(v >> 24); b[k+1] = (uint8_t)(v >> 16);
+            b[k+2] = (uint8_t)(v >> 8);  b[k+3] = (uint8_t)v;
+        }
+        for (uint32_t k = 0; k < 16u; k++) {
+            q = ui_hex2(q, b[k]);
+            if ((k & 3u) == 3u) *q++ = ' ';
+        }
+        *q = 0;
+        fb_set_color(UI_DIM, UI_BG);
+        fb_text_clipped(6, 24u + row * 16u, line, TS_1X, TS_1X, FB_W - 90u);
+
+        q = line;
+        for (uint32_t k = 0; k < 16u; k++)
+            *q++ = (b[k] >= 0x20u && b[k] < 0x7Fu) ? (char)b[k] : '.';
+        *q = 0;
+        fb_set_color(UI_WHITE, UI_BG);
+        fb_text_clipped(FB_W - 86u, 24u + row * 16u, line, TS_1X, TS_1X, 84u);
+    }
+
+    fb_set_color(UI_FAINT, UI_BG);
+    fb_text_clipped(6, 24u + 16u * 16u + 4u, "SELECT+B AGAIN TO RESUME",
+                    TS_1X, TS_1X, FB_W);
 }
 
 /* ------------------------------------------------------------------ parsing */
