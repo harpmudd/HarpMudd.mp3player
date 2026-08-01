@@ -139,33 +139,54 @@ static int pl_open_name(const char *name)
 
 /* ------------------------------------------------------------------ parsing */
 
+/* Why a playlist load produced nothing -- so "no playlist" can say WHICH kind
+ * of nothing, instead of leaving the user to guess between an empty slot, an
+ * unreadable file and a file with no track lines in it. */
+enum { PL_OK = 0, PL_ERR_NOFILE, PL_ERR_EMPTY };
+static uint8_t pl_status;
+
 /* Read the playlist slot into pl_text. The landing zone is the ID3 probe
  * buffer -- 4 KB, already reserved as a DMA target and not in use during a
- * playlist load. The ring cannot be used: it holds audio being decoded. */
+ * playlist load. The ring cannot be used: it holds audio being decoded.
+ *
+ * The read size STEPS DOWN on failure. This host fails a read that extends past
+ * the end of the file rather than returning a short one -- probe_file_size()
+ * depends on exactly that behaviour to binary-search a file's length. So asking
+ * for a flat 4 KB, as this first did, fails outright on any playlist smaller
+ * than 4 KB, which is essentially all of them: a 20-track .m3u is under 500
+ * bytes. Halving down finds the largest read the tail will actually serve. */
 static uint32_t pl_read_raw(void)
 {
     uint32_t got = 0;
+    int any = 0;
+
     while (got < PL_TEXT_MAX) {
         uint32_t want = PL_TEXT_MAX - got;
         if (want > TAG_SIZE) want = TAG_SIZE;
 
-        /* Zero the landing zone first, then measure what actually arrived.
-         * A short read at the tail can still report success, and the file's
-         * true length is not known up front -- but .m3u is text, so a NUL
-         * byte reliably marks where the data stopped. */
-        volatile uint32_t *w32 = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
-        for (uint32_t k = 0; k < want / 4u; k++) w32[k] = 0u;
-
-        if (!target_read_slot(PL_SLOT_ID, got, TAG_OFF, want)) break;
-
         uint32_t n = 0;
-        while (n < want && tagbuf[n]) n++;
-        if (!n) break;                                  /* end of file */
+        while (want >= 4u) {
+            /* Zero the landing zone first, then measure what actually arrived:
+             * a read may also be CLAMPED rather than failed, and .m3u is text,
+             * so a NUL reliably marks where the data stopped either way. */
+            volatile uint32_t *w32 = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+            for (uint32_t k = 0; k < want / 4u; k++) w32[k] = 0u;
 
+            if (target_read_slot(PL_SLOT_ID, got, TAG_OFF, want)) {
+                while (n < want && tagbuf[n]) n++;
+                if (n) break;                  /* got real bytes at this size */
+            }
+            want >>= 1;                        /* too far past the end: shrink */
+        }
+        if (!n) break;
+
+        any = 1;
         for (uint32_t k = 0; k < n; k++) pl_text[got + k] = (char)tagbuf[k];
         got += n;
         if (n < want) break;                            /* short read = tail */
     }
+
+    if (!any) pl_status = PL_ERR_NOFILE;
     return got;
 }
 
@@ -273,9 +294,19 @@ static int pl_advance_auto(void)
  * present -- pl_count stays 0 and every playlist control becomes a no-op. */
 static void pl_load(void)
 {
-    pl_count = 0; pl_pos = 0;
+    pl_count = 0; pl_pos = 0; pl_status = PL_OK;
     uint32_t len = pl_read_raw();
-    if (!len) return;
+    if (!len) { pl_status = PL_ERR_NOFILE; return; }
     pl_parse(len);
+    if (!pl_count) { pl_status = PL_ERR_EMPTY; return; }
     pl_reorder();
+}
+
+/* One line saying what happened, so a playlist that did not load says why
+ * rather than just not working. */
+static void pl_report(void)
+{
+    if (pl_count)                         ui_toast_set("PLAYLIST", pl_count, " TRACKS");
+    else if (pl_status == PL_ERR_NOFILE)  ui_toast_msg("NO PLAYLIST FILE");
+    else                                  ui_toast_msg("PLAYLIST HAS NO TRACKS");
 }

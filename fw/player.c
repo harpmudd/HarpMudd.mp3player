@@ -2254,7 +2254,7 @@ int main(void)
     pl_load();
     tag_fix_budget = 2;
     if (!load_track()) ui_load_failed();
-    if (pl_count) ui_toast_set("PLAYLIST", pl_count, " TRACKS");
+    pl_report();
 
     for (;;) {
         poll_input();
@@ -2311,12 +2311,8 @@ int main(void)
             pl_reload_pending = 0;
             REG(R_RELOAD) = RL_PL_RELOAD;            /* ack just this bit */
             pl_load();
-            if (pl_count) {
-                ui_toast_set("PLAYLIST", pl_count, " TRACKS");
-                pl_play_at(0);
-            } else {
-                ui_toast_msg("EMPTY PLAYLIST");
-            }
+            pl_report();
+            if (pl_count) pl_play_at(0);
             ui_mode_dirty = 1;
             continue;
         }
