@@ -108,24 +108,25 @@ from the source file's own copyright header.
   the [Helix Community](https://helixcommunity.org) under the
   [RPSL 1.0](https://helixcommunity.org/content/rpsl). Included in full, under
   its own license, unmodified.
-- **[VexRiscv](https://github.com/SpinalHDL/VexRiscv)** soft CPU —
-  [Charles Papon](https://github.com/Dolu1990) (MIT).
-- **[PicoRV32](https://github.com/YosysHQ/picorv32)** —
-  [Claire Xenia Wolf](https://clairexen.net) (ISC). Used for the early
+- **[VexRiscv](https://github.com/SpinalHDL/VexRiscv)** soft CPU — Charles Papon
+  ([Dolu1990](https://github.com/Dolu1990)) (MIT).
+- **[PicoRV32](https://github.com/YosysHQ/picorv32)** — Claire Xenia Wolf
+  ([clairexen](https://github.com/clairexen)) (ISC). Used for the early
   feasibility benchmark; not in the shipped design.
 - **[minimp3](https://github.com/lieff/minimp3)** —
   [lieff](https://github.com/lieff) (CC0). Benchmarked against Helix and not
   used, but its test vectors were the measurement input.
-- **[picojpeg](https://github.com/richgel999/picojpeg)** —
-  [Rich Geldreich](https://github.com/richgel999) (public domain).
-- **SDRAM controller and i2s audio bridge** —
-  [Adam Gastineau](https://github.com/agg23) (MIT).
+- **[picojpeg](https://github.com/richgel999/picojpeg)** — Rich Geldreich
+  ([richgel999](https://github.com/richgel999)) (public domain).
+- **SDRAM controller and i2s audio bridge** — Adam Gastineau
+  ([agg23](https://github.com/agg23)) (MIT).
 - **[openFPGA framework](https://www.analogue.co/developer)** —
   [Analogue](https://www.analogue.co).
-- **[Inter typeface](https://rsms.me/inter/)** —
-  [Rasmus Andersson](https://github.com/rsms)
+- **[Inter typeface](https://rsms.me/inter/)** — Rasmus Andersson
+  ([rsms](https://github.com/rsms))
   ([SIL Open Font License 1.1](https://github.com/rsms/inter/blob/master/LICENSE.txt)).
-- **Core, firmware, UI and integration** — HarpMudd.
+- **Core, firmware, UI and integration** —
+  [HarpMudd](https://github.com/harpmudd).
 
 ## About / Support
 
