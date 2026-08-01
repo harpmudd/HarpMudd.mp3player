@@ -388,6 +388,7 @@ static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
 static void settings_mark_dirty(void);
+static uint8_t set_flush_now;
 
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
 static uint32_t restart_req;       /* B button: full reload, re-reads the tag */
@@ -1625,7 +1626,11 @@ static void poll_input(void)
 
     /* Pause while the OS menu ("Load MP3" etc) is open, without clobbering the
      * user's own A/Start pause -- bit 1 is the menu's, bit 0 is theirs. */
-    if (in & IN_MENU) paused |= 2u; else paused &= ~2u;
+    /* Opening the OS menu is the strongest signal that the core is about to
+     * be left, so a pending settings write goes out now rather than waiting
+     * out its quiet window that may never elapse. */
+    if (in & IN_MENU) { if (!(paused & 2u)) set_flush_now = 1u; paused |= 2u; }
+    else paused &= ~2u;
 
     /* Only SET the flag here. This runs from inside the sample-push wait,
      * which is where the CPU spends most of its time when keeping up, so a

@@ -62,3 +62,7 @@ third_party/minimp3/
 third_party/picorv32/
 # upstream clone; the build uses src/fpga/rtl/VexRiscv_Full.v
 third_party/pythondata-cpu-vexriscv/
+
+# The playlist is the USER'S file, not a build output. Shipping one meant a
+# full sync to the card overwrote whatever they had written in it.
+dist/Assets/mp3player/common/playlist.m3u

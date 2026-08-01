@@ -13,44 +13,64 @@
  */
 
 #define SET_SLOT_ID  4u
-#define SET_MAGIC    0x334D5053u        /* "SPM3" */
 #define SET_VERSION  1u
 #define SET_BYTES    32u                /* fixed: the file must not change size */
-#define SET_QUIET    (CLK_HZ * 2u)      /* settle before writing */
+#define SET_QUIET    (CLK_HZ)           /* settle before writing */
+
+/* 0184 sources its bytes from a BRIDGE address, and the shell's bridge read mux
+ * (core_top.v) serves 0xF8xxxxxx only -- the datatable. Everything else reads
+ * back as zero, so pointing a write at SoC RAM wrote 32 zero bytes to the file
+ * and the load then quietly fell back to defaults.
+ *
+ * Reads are unaffected: APF writing INTO RAM is the path data_loader already
+ * provides, so settings_load() still lands in the tag buffer.
+ *
+ * Words 0..63 are the 0190 response, 64..127 the 0192 parameters; 128 is clear
+ * of both. Byte offset 128*4 = 0x200, hence 0xF8002200. */
+#define SET_DT_W     128u
+#define SET_DT_ADDR  0xF8002200u
+
+/* The record is handled as BYTES, packed into datatable words big-endian --
+ * the convention the bridge's byte swap already imposes, and the one
+ * slot_filename() proved. Reading the file back gives those same bytes, so the
+ * two directions agree without either depending on word order. */
+static const uint8_t set_magic[4] = { 'S', 'P', 'M', '3' };
 
 static uint32_t set_dirty_at;           /* 0 = nothing pending */
 static uint8_t  set_present;            /* a settings file was found at boot */
 
-/* Field order is part of the file format. Append only, and bump SET_VERSION --
- * an older file is ignored rather than misread. */
+/* Byte offsets. Append only, and bump SET_VERSION -- an older file is ignored
+ * rather than misread. */
 enum {
-    SET_W_MAGIC = 0, SET_W_VERSION, SET_W_VOLUME, SET_W_PALETTE,
-    SET_W_REPEAT, SET_W_SHUFFLE, SET_W_ART, SET_W_COUNT
+    SET_B_MAGIC = 0,       /* 4 bytes */
+    SET_B_VERSION = 4, SET_B_VOLUME = 5, SET_B_PALETTE = 6,
+    SET_B_REPEAT = 7,  SET_B_SHUFFLE = 8, SET_B_ART = 9
 };
 
 static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
 
 static int settings_load(void)
 {
-    volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
-    for (uint32_t i = 0; i < SET_BYTES / 4u; i++) w[i] = 0u;
+    volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+    for (uint32_t i = 0; i < SET_BYTES; i++) b[i] = 0u;
 
     if (!target_read_slot(SET_SLOT_ID, 0, TAG_OFF, SET_BYTES)) return 0;
-    if (w[SET_W_MAGIC] != SET_MAGIC) return 0;      /* not ours, or never written */
-    if (w[SET_W_VERSION] != SET_VERSION) return 0;  /* older layout: use defaults */
+    for (uint32_t i = 0; i < 4u; i++)
+        if (b[SET_B_MAGIC + i] != set_magic[i]) return 0;   /* not ours */
+    if (b[SET_B_VERSION] != SET_VERSION) return 0;          /* older layout */
 
     /* Range-check every field. A corrupt or half-written file must not be able
-     * to leave the player silent, or indexing off the end of the palette. */
-    uint32_t v = w[SET_W_VOLUME];
+     * to leave the player silent, or index off the end of the palette. */
+    uint32_t v = b[SET_B_VOLUME];
     if (v <= VOL_MAX) { volume = v; vol_apply(); }
 
-    v = w[SET_W_PALETTE];
+    v = b[SET_B_PALETTE];
     if (v < UI_PALETTE_N) { ui_pal_idx = v; ui_accent = ui_palette[v]; }
 
-    v = w[SET_W_REPEAT];
+    v = b[SET_B_REPEAT];
     if (v <= REP_ONE) rep_mode = (uint8_t)v;
 
-    shuffle_on = w[SET_W_SHUFFLE] ? 1u : 0u;
+    shuffle_on = b[SET_B_SHUFFLE] ? 1u : 0u;
     set_present = 1;
     return 1;
 }
@@ -59,22 +79,28 @@ static int settings_load(void)
  * tracking which field changed would cost more than it saves. */
 static int settings_store(void)
 {
-    volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
-    for (uint32_t i = 0; i < SET_BYTES / 4u; i++) w[i] = 0u;
+    uint8_t rec[SET_BYTES];
+    for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
 
-    w[SET_W_MAGIC]   = SET_MAGIC;
-    w[SET_W_VERSION] = SET_VERSION;
-    w[SET_W_VOLUME]  = volume;
-    w[SET_W_PALETTE] = ui_pal_idx;
-    w[SET_W_REPEAT]  = rep_mode;
-    w[SET_W_SHUFFLE] = shuffle_on;
-    w[SET_W_ART]     = art_shown ? 1u : 0u;
+    for (uint32_t i = 0; i < 4u; i++) rec[SET_B_MAGIC + i] = set_magic[i];
+    rec[SET_B_VERSION] = SET_VERSION;
+    rec[SET_B_VOLUME]  = (uint8_t)volume;
+    rec[SET_B_PALETTE] = (uint8_t)ui_pal_idx;
+    rec[SET_B_REPEAT]  = rep_mode;
+    rec[SET_B_SHUFFLE] = shuffle_on;
+    rec[SET_B_ART]     = art_shown ? 1u : 0u;
+
+    for (uint32_t w = 0; w < SET_BYTES / 4u; w++)
+        dt_write(SET_DT_W + w, ((uint32_t)rec[w*4+0] << 24) |
+                               ((uint32_t)rec[w*4+1] << 16) |
+                               ((uint32_t)rec[w*4+2] << 8)  |
+                                (uint32_t)rec[w*4+3]);
 
     refill_drain();                     /* one command in flight, ever */
     uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
     REG(R_TGT_ID)  = SET_SLOT_ID;
     REG(R_TGT_OFF) = 0;
-    REG(R_TGT_ADR) = TAG_OFF;
+    REG(R_TGT_ADR) = SET_DT_ADDR;       /* the datatable, not RAM */
     REG(R_TGT_LEN) = SET_BYTES;
     REG(R_TGT_GO)  = TGT_WRITE;
 
@@ -92,7 +118,9 @@ static int settings_store(void)
 static void settings_pump(void)
 {
     if (!set_dirty_at) return;
-    if ((int32_t)(cycles() - (set_dirty_at + SET_QUIET)) < 0) return;
+    if (!set_flush_now &&
+        (int32_t)(cycles() - (set_dirty_at + SET_QUIET)) < 0) return;
+    set_flush_now = 0;
     set_dirty_at = 0;
 
     /* A failure is reported ONCE. APF refusing to write is a real possibility
