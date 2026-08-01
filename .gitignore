@@ -49,4 +49,5 @@ sim/*.txt
 third_party/libhelix-mp3/.git/
 third_party/minimp3/
 third_party/picorv32/
-third_party/pythondata-cpu-vexriscv/   # upstream clone; the build uses src/fpga/rtl/VexRiscv_Full.v
+# upstream clone; the build uses src/fpga/rtl/VexRiscv_Full.v
+third_party/pythondata-cpu-vexriscv/
