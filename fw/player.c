@@ -425,6 +425,7 @@ static uint32_t stale_ref_size;        /* and the size APF reported for it */
 static char     last_title[48];        /* title the current load settled on */
 static char     track_file[64];        /* filename APF reports for the slot  */
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
+static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
 static uint32_t reload_retries;
 static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
@@ -1598,9 +1599,15 @@ static void poll_input(void)
             ui_mode_dirty = 1u;
         }
     } else {
+        /* Apply the colour HERE, not in ui_draw_dynamic(). Deferring it meant a
+         * track change could run load_track() -> ui_draw_chrome() first and
+         * repaint everything in the PREVIOUS accent, so the choice appeared to
+         * be forgotten. ui_accent_changed still drives the invalidation work. */
         if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
+                             ui_accent = ui_palette[ui_pal_idx];
                              ui_accent_changed = 1u; }
         if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
+                             ui_accent = ui_palette[ui_pal_idx];
                              ui_accent_changed = 1u; }
     }
 
@@ -2202,8 +2209,12 @@ static int load_track(void)
     st0 |= (1u << 0); REG(R_STAT0) = st0;            /* decoder up */
 
     /* The RTL only latches R_SLOT_SZ on a reload edge, so at boot there is
-     * genuinely nothing to read. Take APF's number when there is one. */
-    slot_size = REG(R_SLOT_SZ);
+     * genuinely nothing to read. Take APF's number when there is one -- but
+     * NOT after a core-initiated 0192 open, which raises no such edge and
+     * would leave the PREVIOUS track's size here: wrong total time, wrong
+     * end-of-track, and an end-of-track that fires early or never. */
+    slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
+    force_size_probe = 0;
 
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
     if (audio_start) { st0 |= (1u << 1); REG(R_STAT0) = st0; }

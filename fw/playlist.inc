@@ -162,10 +162,9 @@ static int pl_open_name(const char *name)
         dt_write(DT_PARAM_W + w, v);
     }
 
-    /* APF treats this as a slot reload, so it raises 008A exactly as picking a
-     * file from the menu does. The existing reload path -- settle, 0190
-     * identity gate, cache flush, load_track() -- then runs unchanged. Nothing
-     * here re-implements track loading. */
+    /* This switches the slot but raises NO 008A -- that notification is for a
+     * file the USER picked from the menu, not one the core opened. The caller
+     * therefore has to drive the load itself; see pl_play_at(). */
     if (!pl_cmd(TGT_OPENFILE, MP3_SLOT_ID, CLK_HZ * 3u)) {
         pl_open_err     = PLO_OPEN;
         pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
@@ -246,9 +245,16 @@ static uint32_t pl_read_raw(void)
     uint32_t got = 0;
     int any = 0;
 
+    /* Carry the last size that worked into the next chunk instead of restarting
+     * the ladder at 4 KB every time. Restarting meant each successive chunk
+     * re-failed every larger size before getting to a workable one: 62 APF
+     * commands to read an 846-byte playlist, against 19 this way. Each command
+     * is a cluster-chain walk, which is why the load was visibly slow. */
+    uint32_t step = TAG_SIZE;
+
     while (got < PL_TEXT_MAX) {
         uint32_t want = PL_TEXT_MAX - got;
-        if (want > TAG_SIZE) want = TAG_SIZE;
+        if (want > step) want = step;
 
         uint32_t n = 0;
         while (want >= 1u) {
@@ -266,6 +272,7 @@ static uint32_t pl_read_raw(void)
         }
         if (!n) break;
 
+        step = want;                       /* start the next chunk here */
         any = 1;
         for (uint32_t k = 0; k < n; k++) pl_text[got + k] = (char)tagbuf[k];
         got += n;
@@ -349,12 +356,30 @@ static void pl_resync(uint16_t file_idx)
 
 static void ui_toast_msg(const char *msg);
 
+/* Start the track at `pos`.
+ *
+ * A successful 0192 switches the slot but raises NO 008A -- that notification
+ * is for a file the USER picked from the menu. So nothing here can wait for the
+ * reload path to notice: without driving it, file_pos, the decoder and the ring
+ * all carry over and the new track starts at the previous one's position. That
+ * is the same fault the original "Load MP3 resumed mid-song" bug had, arriving
+ * by a different route.
+ *
+ * Rather than re-implement loading, arm the very same gate the menu reload
+ * uses, with the OUTGOING file's identity as the reference so 0190 can confirm
+ * the switch actually happened before the track is loaded. */
 static int pl_play_at(uint16_t pos)
 {
     if (!pl_count) return 0;
+    uint16_t prev_pos = pl_pos;
     pl_pos = (uint16_t)(pos % pl_count);
     const char *name = &pl_text[pl_off[pl_order[pl_pos]]];
+
+    /* Captured BEFORE the open: after it, 0190 answers with the new file. */
+    uint32_t leaving_id = cur_file_id;
+
     if (!pl_open_name(name)) {
+        pl_pos = prev_pos;                  /* stay where we were */
         switch (pl_open_err) {
         case PLO_GETFILE: ui_toast_msg("OPEN FAIL: NO 0190");   break;
         case PLO_NONAME:  ui_toast_msg("OPEN FAIL: NO NAME");   break;
@@ -364,6 +389,30 @@ static int pl_play_at(uint16_t pos)
         }
         return 0;
     }
+
+    /* The slot has switched, but nothing else knows: file_pos, the decoder and
+     * the ring all still describe the previous track, which is why a skip used
+     * to start the new song at the old one's elapsed position. Arm the same
+     * gate a menu reload uses, with the OUTGOING identity as the reference so
+     * 0190 can confirm the switch before the track is loaded. */
+    for (uint32_t i = 0; i < sizeof(stale_ref_title); i++)
+        stale_ref_title[i] = last_title[i];
+    stale_ref_size    = slot_size;
+    stale_ref_file_id = leaving_id;
+
+    /* R_SLOT_SZ is only latched by an 008A edge, so it still describes the
+     * track being left. Measure the new one instead of inheriting that. */
+    force_size_probe = 1;
+    slot_size        = 0;
+
+    tag_fix_budget  = 2;
+    reload_pending  = 0;
+    reload_armed    = 1;
+    reload_probe_at = cycles();
+    /* Shorter settle than a menu pick: 0192 has already reported success, so
+     * the slot is open rather than merely chosen. */
+    reload_settle   = cycles() + CLK_HZ / 4u;
+    reload_at       = cycles() + CLK_HZ * 3u;
     return 1;
 }
 
