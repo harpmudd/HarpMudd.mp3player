@@ -1,0 +1,7 @@
+set_global_assignment -entity "mf_pllbase" -library "mf_pllbase" -name IP_TOOL_NAME "altera_pll"
+set_global_assignment -entity "mf_pllbase" -library "mf_pllbase" -name IP_TOOL_VERSION "18.1"
+set_global_assignment -entity "mf_pllbase" -library "mf_pllbase" -name IP_TARGETED_DEVICE_FAMILY "Cyclone V"
+set_global_assignment -name SYNTHESIS_ONLY_QIP ON
+set_global_assignment -library "mf_pllbase" -name VERILOG_FILE [file join $::quartus(qip_path) "mf_pllbase.v"]
+set_global_assignment -library "mf_pllbase" -name VERILOG_FILE [file join $::quartus(qip_path) "mf_pllbase/mf_pllbase_0002.v"]
+set_global_assignment -library "mf_pllbase" -name QIP_FILE [file join $::quartus(qip_path) "mf_pllbase/mf_pllbase_0002.qip"]

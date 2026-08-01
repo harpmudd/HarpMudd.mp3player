@@ -1,0 +1,23 @@
+{
+    "data": {
+        "magic": "APF_VER_1",
+        "data_slots": [
+            {
+                "name": "Firmware",
+                "id": 1,
+                "required": true,
+                "parameters": "0x108",
+                "filename": "mp3player.rom",
+                "address": "0x00000000"
+            },
+            {
+                "name": "MP3",
+                "id": 2,
+                "required": true,
+                "deferload": true,
+                "parameters": "0x1",
+                "extensions": ["mp3"]
+            }
+        ]
+    }
+}

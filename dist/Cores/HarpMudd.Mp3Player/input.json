@@ -1,0 +1,13 @@
+{
+    "input": {
+        "magic": "APF_VER_1",
+        "controllers": [
+            {
+                "type": "gamepad",
+                "mappings": [
+                    { "type": "analog_stick", "axis": "left", "target": "dpad" }
+                ]
+            }
+        ]
+    }
+}

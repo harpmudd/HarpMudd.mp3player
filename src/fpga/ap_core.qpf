@@ -1,0 +1,6 @@
+QUARTUS_VERSION = "18.1"
+DATE = "2026-04-30"
+
+# Revisions
+
+PROJECT_REVISION = "ap_core"

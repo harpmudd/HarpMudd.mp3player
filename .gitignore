@@ -1,0 +1,52 @@
+# Quartus build artefacts
+src/fpga/db/
+src/fpga/incremental_db/
+src/fpga/output_files/
+src/fpga/ap_core_assignment_defaults.qdf
+src/fpga/c5_pin_model_dump.txt
+*.qws
+*.rpt
+*.summary
+*.smsg
+*.jdi
+*.jditmp
+*.done
+quartus_build.log
+compile.log
+
+# Firmware build outputs (regenerable from fw/ via build.sh)
+fw/fw.elf
+fw/build.log
+*.rom
+
+# Simulation outputs
+sim/*.vvp
+*.vcd
+
+# Never commit audio or archives
+*.mp3
+*.zip
+
+__pycache__/
+*.pyc
+
+# Recovery scratch from the 2026-08-01 truncation incident
+fw/player.c.truncated-survivor
+fw/player.c.snapshot-0724
+fw/tail.c
+
+# Downloaded RISC-V toolchain (xPack) -- ~1GB, re-installable, not our source
+toolchain/
+
+# Simulation captures
+sim/*.bin
+sim/*.txt
+
+# Vendored upstreams that carry their own .git (would become gitlinks, not
+# content). Re-clone per README; only the ones we build against matter:
+#   libhelix-mp3, pythondata-cpu-vexriscv  -> required
+#   minimp3, picorv32                      -> evaluated and rejected (Stage 0)
+third_party/libhelix-mp3/.git/
+third_party/minimp3/
+third_party/picorv32/
+third_party/pythondata-cpu-vexriscv/   # upstream clone; the build uses src/fpga/rtl/VexRiscv_Full.v
