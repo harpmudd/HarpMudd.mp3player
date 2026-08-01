@@ -92,7 +92,8 @@ nothing. Fix and regression test:
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II
   are not handled.
 - **JPEG album art only.** PNG cover art is detected and skipped.
-- Playback state doesn't survive a relaunch.
+- **Nothing is saved between sessions.** Volume, accent colour and the art
+  panel's state all reset to defaults on relaunch. Persistence is planned.
 
 ## Credits
 
