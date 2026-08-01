@@ -5,7 +5,7 @@ Steps:
   1. Verify the bitstream exists in src/fpga/output_files/
   2. Convert .rbf -> .rbf_r (BIT-REVERSED bitstream for Pocket -- mandatory)
   3. Copy bitstream to dist/Cores/HarpMudd.Mp3Player/bitstream.rbf_r
-  4. Run pack_rom.py to generate mp3player.rom (if not already present)
+  4. Verify the firmware image is present (built separately by fw/build.sh)
   5. Print copy instructions for the Pocket SD card
 
 The .rbf_r suffix LITERALLY MEANS bit-reversed. Do NOT just rename .rbf to
@@ -13,19 +13,17 @@ The .rbf_r suffix LITERALLY MEANS bit-reversed. Do NOT just rename .rbf to
 never respond ("Error in framework RS: BRIDGE not responding").
 
 Usage:
-  python package.py [--skip-rom]
+  python package.py [--skip-rom]   # --skip-rom: package without the firmware check
 """
 
 import os
 import sys
-import subprocess
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 BITSTREAM_SRC = os.path.join(PROJECT_ROOT, "src", "fpga", "output_files", "ap_core.rbf")
 DIST_CORE     = os.path.join(PROJECT_ROOT, "dist", "Cores", "HarpMudd.Mp3Player")
 BITSTREAM_DST = os.path.join(DIST_CORE, "bitstream.rbf_r")
 ROM_DST       = os.path.join(PROJECT_ROOT, "dist", "Assets", "mp3player", "common", "mp3player.rom")
-PACK_ROM_PY   = os.path.join(PROJECT_ROOT, "pack_rom.py")
 README_PATH   = os.path.join(PROJECT_ROOT, "README.md")
 
 
@@ -51,22 +49,16 @@ def rbf_to_rbf_r(src, dst):
 
 
 def check_readme():
-    """Warn (don't fail) if README.md still has unfilled scaffold markers.
-
-    The scaffolded README ships with `<!-- TODO ... -->` placeholders for the
-    game overview, hardware, credits, controls, etc. It's easy to ship a core
-    with these never filled in, so flag it loudly at package time.
-    """
+    """Warn (don't fail) if README.md still has unfilled TODO markers."""
     if not os.path.exists(README_PATH):
-        print("\n!! README.md MISSING — every core should ship a filled-in README.")
+        print("\n!! README.md MISSING.")
         return
     text = open(README_PATH, encoding="utf-8", errors="ignore").read()
     todos = text.count("<!-- TODO")
     if todos:
         print(f"\n{'!' * 60}")
         print(f"!! README.md still has {todos} unfilled <!-- TODO --> marker(s).")
-        print("!! Fill in the game/hardware/port/credits/controls sections")
-        print("!! (pull author credits from the source headers) before shipping.")
+        print("!! Fill them in before shipping.")
         print(f"{'!' * 60}")
 
 
@@ -86,17 +78,17 @@ def main():
     print("Converting bitstream...")
     rbf_to_rbf_r(BITSTREAM_SRC, BITSTREAM_DST)
 
-    # 2. ROM
+    # 2. Firmware. Not built here -- fw/build.sh owns that, and it is a separate
+    #    toolchain. Just refuse to call the package complete without it, since
+    #    the core does not start when the firmware is missing.
     if not skip_rom:
         if os.path.exists(ROM_DST):
-            print(f"\nROM already exists: {ROM_DST}")
+            print(f"\nFirmware present: {ROM_DST} ({os.path.getsize(ROM_DST):,} bytes)")
         else:
-            print("\nBuilding ROM image...")
-            result = subprocess.run([sys.executable, PACK_ROM_PY], capture_output=False)
-            if result.returncode != 0:
-                print("\nROM build failed. Package incomplete.")
-                print("Provide a complete MAME romset and re-run.")
-                sys.exit(1)
+            print(f"\nERROR: firmware missing: {ROM_DST}")
+            print("Build it first:")
+            print("  bash fw/build.sh")
+            sys.exit(1)
 
     # 3. Summary
     print("\n=== Package contents ===")

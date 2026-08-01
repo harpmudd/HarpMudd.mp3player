@@ -243,8 +243,8 @@ always @(posedge clk_74a) begin
 end
 
 // -- 6. Video -- SDRAM-backed framebuffer UI -----------------------------------
-// Replaces the Stage 1-3 bring-up display (mp3_video.v, 32-bit-block status
-// rows) entirely. SDRAM is otherwise completely unused by this core -- Stage 0
+// Replaced the Stage 1-3 bring-up display (32-bit-block status rows) entirely;
+// that module is gone. SDRAM is otherwise completely unused by this core -- Stage 0
 // measured the decoder fits entirely in BRAM -- so the framebuffer costs
 // essentially nothing (~360 KB of 32 MB) and needed no BRAM budget, which
 // mattered: the core is already at 90% BRAM utilisation.

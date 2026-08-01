@@ -29,6 +29,11 @@ fw/build.log
 sim/*.vvp
 *.vcd
 
+# Stage 0 benchmark firmware -- regenerable by sim/build_fw.sh, ~4 MB of hex
+sim/fw_*/*.elf
+sim/fw_*/*.bin
+sim/fw_*/*.hex
+
 # Never commit audio or archives
 *.mp3
 *.zip

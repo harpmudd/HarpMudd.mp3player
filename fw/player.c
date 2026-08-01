@@ -248,7 +248,7 @@ static void fb_test_pattern(void)
 }
 
 /* The font itself now lives in the FPGA (src/fpga/core/font_rom.v, generated
- * from fw/font8x8_basic.h by tools/gen_font_rom.py) -- the CPU sends a
+ * from the Inter typeface by tools/gen_font_rom.py) -- the CPU sends a
  * character code, not pixels. Firmware keeps only the geometry, since it still
  * has to decide what fits where. */
 
