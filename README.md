@@ -60,36 +60,28 @@ running; they reset on relaunch.
 - **Elapsed and total time**, with a progress bar.
 
 CBR and VBR MPEG-1 Layer III are supported at every standard bitrate and sample
-rate, mono or stereo.
-
-<br clear="right">
+rate, mono or stereo.<br clear="right">
 
 ## How it works
 
 There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a small
-RISC-V CPU running at 60 MHz, and the decoder runs on it as software. Before any
-hardware time was spent, simulation measured the decoder at ~664,000
-instructions per frame of audio — putting the real-time floor around 46 MHz, so
-60 MHz leaves comfortable headroom. The method and numbers are in
+RISC-V CPU running at 60 MHz and the decoder runs on it as software. Simulation
+put the real-time floor around 46 MHz before any hardware was built, which is
+where the headroom comes from — details in
 [STAGE0_RESULTS.md](STAGE0_RESULTS.md).
 
-The audio itself never passes through the CPU sample by sample: decoded audio
-goes into a hardware queue that drains at the file's own sample rate, which is
-what lets the CPU spend ~20 ms decoding a frame without the sound breaking up.
+Decoded audio goes into a hardware queue that drains at the file's own sample
+rate, so the CPU can spend ~20 ms on a frame without the sound breaking up. The
+display works the same way: the CPU sends drawing commands to a framebuffer
+engine rather than writing pixels itself, keeping the interface out of the
+decoder's way.
 
-The display is a 400×360 framebuffer in SDRAM with a small drawing engine
-alongside it, so the CPU sends commands — fill this rectangle, draw this
-character, copy this block — instead of writing pixels itself. That is what
-keeps the interface from stealing time the decoder needs.
-
-Reading the file relies on two Analogue framework commands that let a running
-core read any part of a user-chosen file. They had never been used before, and
-making them work required fixing a subtle handshake bug: the "command finished"
-signal is a level that stays asserted until the *next* command starts, so a
-naive reader sees the previous command's completion and every read after the
-first silently returns nothing. The fix and its regression test are in
-[`src/fpga/core/tgt_cmd.v`](src/fpga/core/tgt_cmd.v) and
-[`sim/tb_tgt_cmd.v`](sim/tb_tgt_cmd.v).
+Reading the file uses two Analogue framework commands that no core had driven
+before. Making them work meant fixing a handshake bug — the "command finished"
+signal stays asserted until the *next* command starts, so a naive reader sees
+the previous command's completion and every read after the first returns
+nothing. Fix and regression test:
+[`tgt_cmd.v`](src/fpga/core/tgt_cmd.v), [`tb_tgt_cmd.v`](sim/tb_tgt_cmd.v).
 
 ## Known limitations
 
