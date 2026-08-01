@@ -16,7 +16,9 @@
                 "required": true,
                 "deferload": true,
                 "parameters": "0x1",
-                "extensions": ["mp3"]
+                "extensions": [
+                    "mp3"
+                ]
             },
             {
                 "name": "Playlist",
@@ -25,7 +27,17 @@
                 "deferload": true,
                 "parameters": "0x1",
                 "filename": "playlist.m3u",
-                "extensions": ["m3u"]
+                "extensions": [
+                    "m3u"
+                ]
+            },
+            {
+                "name": "Settings",
+                "id": 4,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x1",
+                "filename": "settings.bin"
             }
         ]
     }

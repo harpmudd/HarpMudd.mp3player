@@ -54,6 +54,7 @@
 #define TGT_READ     0u   /* 0180 */
 #define TGT_OPENFILE 1u   /* 0192 */
 #define TGT_GETFILE  2u   /* 0190 */
+#define TGT_WRITE    3u   /* 0184 */
 
 /* R_RELOAD bits -- see mp3_soc.v */
 #define RL_PENDING   1u
@@ -134,7 +135,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503310u   /* rev 16: param struct at word 64   */
+#define EXPECT_VERSION 0x4D503311u   /* rev 17: 0184 write for settings   */
 
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */
@@ -349,7 +350,7 @@ static char track_trk[8];
  * software divides every frame inside the decode budget. */
 #define VOL_MAX   100u
 #define VOL_STEP  5u
-static uint32_t paused, volume = VOL_MAX;
+static uint32_t paused, volume = 65u;    /* overridden by settings.bin if present */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -382,9 +383,11 @@ static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 
 #define PL_HOLD_MS 400u                  /* Left/Right held this long = skip  */
 
-/* Defined in playlist.inc, called from the input handler above it. */
+/* Defined in playlist.inc / settings.inc, called from the input handler that
+ * sits above both includes. */
 static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
+static void settings_mark_dirty(void);
 
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
 static uint32_t restart_req;       /* B button: full reload, re-reads the tag */
@@ -1571,9 +1574,11 @@ static void poll_input(void)
 
     if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
                                   ? VOL_MAX : volume + VOL_STEP;
-                           vol_apply(); ui_toast_set("VOLUME", volume, "%"); }
+                           vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                           settings_mark_dirty(); }
     if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
-                           vol_apply(); ui_toast_set("VOLUME", volume, "%"); }
+                           vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                           settings_mark_dirty(); }
 
     /* ---- Select as a modifier for L/R ---- */
     if (edge & KEY_SELECT) sel_used = 0;
@@ -1585,6 +1590,7 @@ static void poll_input(void)
             ui_toast_msg(rep_mode == REP_OFF ? "REPEAT OFF"
                        : rep_mode == REP_ALL ? "REPEAT ALL" : "REPEAT ONE");
             ui_mode_dirty = 1u;
+            settings_mark_dirty();
         }
         if (edge & KEY_R1) {
             sel_used   = 1;
@@ -1597,6 +1603,7 @@ static void poll_input(void)
             }
             ui_toast_msg(shuffle_on ? "SHUFFLE ON" : "SHUFFLE OFF");
             ui_mode_dirty = 1u;
+            settings_mark_dirty();
         }
     } else {
         /* Apply the colour HERE, not in ui_draw_dynamic(). Deferring it meant a
@@ -1605,10 +1612,12 @@ static void poll_input(void)
          * be forgotten. ui_accent_changed still drives the invalidation work. */
         if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
-                             ui_accent_changed = 1u; }
+                             ui_accent_changed = 1u;
+                             settings_mark_dirty(); }
         if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
-                             ui_accent_changed = 1u; }
+                             ui_accent_changed = 1u;
+                             settings_mark_dirty(); }
     }
 
     /* Only a Select that was NOT used as a modifier toggles the art panel. */
@@ -1838,6 +1847,7 @@ static void target_flush_slot_cache(void)
 
 #include "art.inc"
 #include "playlist.inc"
+#include "settings.inc"
 
 /* Slide unconsumed bytes down and pull in ONE chunk. Compaction keeps Helix's
  * input pointer arithmetic simple -- it wants a flat span, not a wrap. */
@@ -2267,6 +2277,8 @@ int main(void)
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
      * while doing it mid-stream would make every refill re-walk the cluster
      * chain. No playlist on the card simply leaves pl_count at 0. */
+    settings_load();          /* before the track: another slot's read drops
+                               * APF's fragment cache for the MP3 slot */
     pl_load();
     tag_fix_budget = 2;
     if (!load_track()) ui_load_failed();
@@ -2353,6 +2365,10 @@ int main(void)
             }
             continue;
         }
+
+        /* Only when nothing is loading: a write is an SD round trip, and the
+         * quiet window means it never lands in the middle of a track change. */
+        if (!reload_armed && !reload_pending) settings_pump();
 
         if (art_toggle) {
             art_toggle = 0;

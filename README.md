@@ -67,7 +67,7 @@ Rhinestone Eyes.mp3
 
 Bare names are relative to that folder; a leading `/` is from the root of the
 card, so tracks can live anywhere. Lines starting with `#` are ignored, so
-playlists exported from other players work as-is. Up to 128 tracks.
+playlists exported from other players work as-is.
 
 `playlist.m3u` loads at boot. For any other name — or to switch playlists while
 running — press the **Analogue** button and choose **Load Playlist**.
@@ -95,7 +95,7 @@ rate, mono or stereo.<br clear="right">
 
 ## How it works
 
-There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a small
+There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a
 RISC-V CPU running at 60 MHz and the decoder runs on it as software. Simulation
 put the real-time floor around 46 MHz before any hardware was built, which is
 where the headroom comes from.
