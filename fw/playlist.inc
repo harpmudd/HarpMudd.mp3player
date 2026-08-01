@@ -76,35 +76,48 @@ enum { PLO_OK = 0, PLO_GETFILE, PLO_NONAME, PLO_TOOLONG, PLO_OPEN };
 static uint8_t pl_open_err;
 static uint8_t pl_open_errcode;      /* target_dataslot_err from 0192 */
 
-static int pl_open_name(const char *name)
+/* Fetch a template descriptor into `buf`. Returns the length of the printable
+ * path it contains, or 0.
+ *
+ * Either slot will do. The MP3 slot is preferred because its path is the folder
+ * the current track came from, but at launch it may hold nothing at all -- the
+ * core no longer forces a file to be picked before it starts. The playlist slot
+ * is filled at boot from playlist.m3u and sits in the same folder as the tracks
+ * it names, so it is a perfectly good stand-in. */
+static uint32_t pl_template(uint32_t slot, uint8_t *buf, uint32_t *name_at)
 {
-    pl_open_err = PLO_OK; pl_open_errcode = 0;
+    if (!pl_cmd(TGT_GETFILE, slot, CLK_HZ)) return 0;
 
-    /* 1. Template: a struct APF built itself, for the file already loaded. */
-    if (!pl_cmd(TGT_GETFILE, MP3_SLOT_ID, CLK_HZ)) { pl_open_err = PLO_GETFILE; return 0; }
-
-    uint8_t buf[DT_WORDS * 4u];
     for (uint32_t w = 0; w < DT_WORDS; w++) {
         uint32_t v = dt_read(DT_RESP_W + w);
-        /* BIG-endian: the bridge byte-swaps. Unpacking little-endian scrambles
-         * the name into reversed 4-byte groups -- the bug that first proved
-         * 0190 was working at all ("Assets/mp3player" came back as
-         * "ssA//step3pmeyaloc"). */
+        /* BIG-endian: the bridge byte-swaps. */
         buf[w*4 + 0] = (uint8_t)(v >> 24);
         buf[w*4 + 1] = (uint8_t)(v >> 16);
         buf[w*4 + 2] = (uint8_t)(v >> 8);
         buf[w*4 + 3] = (uint8_t)v;
     }
 
-    /* 2. Find the name the same way slot_filename() does. */
     uint32_t best = 0, best_len = 0, i = 0;
-    while (i < sizeof(buf)) {
+    while (i < DT_WORDS * 4u) {
         uint32_t start = i;
-        while (i < sizeof(buf) && buf[i] >= 0x20u && buf[i] < 0x7Fu) i++;
+        while (i < DT_WORDS * 4u && buf[i] >= 0x20u && buf[i] < 0x7Fu) i++;
         if (i - start > best_len) { best_len = i - start; best = start; }
         i++;
     }
-    if (!best_len) { pl_open_err = PLO_NONAME; return 0; }   /* refuse to guess */
+    *name_at = best;
+    return best_len;
+}
+
+static int pl_open_name(const char *name)
+{
+    pl_open_err = PLO_OK; pl_open_errcode = 0;
+
+    /* 1. Template: a struct APF built itself, for a file it already has. */
+    uint8_t buf[DT_WORDS * 4u];
+    uint32_t best = 0, best_len = pl_template(MP3_SLOT_ID, buf, &best);
+    if (!best_len) best_len = pl_template(PL_SLOT_ID, buf, &best);
+    if (!best_len) { pl_open_err = PLO_NONAME; return 0; }
+
 
     /* 3. If the word immediately before the name holds the OLD name's length,
      *    it is a length field and has to move with the name. Checked rather

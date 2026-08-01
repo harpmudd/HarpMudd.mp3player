@@ -13,7 +13,7 @@
             {
                 "name": "MP3",
                 "id": 2,
-                "required": true,
+                "required": false,
                 "deferload": true,
                 "parameters": "0x1",
                 "extensions": [

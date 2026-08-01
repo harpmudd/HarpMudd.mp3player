@@ -380,6 +380,7 @@ static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
 static uint8_t  shuffle_on;
 static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
+static uint32_t idle;                    /* nothing loaded: waiting on the user */
 
 #define PL_HOLD_MS 400u                  /* Left/Right held this long = skip  */
 
@@ -1032,6 +1033,29 @@ static void ui_draw_chrome(void)
  * user could not even pick another file. Say what happened, keep the status
  * bytes on screen, and stay responsive so the Core menu can load a new track. */
 static void poll_input(void);
+
+/* Nothing loaded. The core no longer forces a file to be chosen before it
+ * starts, so this is the first thing seen on a card with no playlist -- it has
+ * to say what to do rather than look like a failure. */
+static void ui_idle_screen(void)
+{
+    ui_gradient();
+
+    uint16_t bg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, (FB_H / 2u) * UI_BANDS / FB_H,
+                         UI_BANDS);
+    uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
+    fb_set_color(ui_accent, bg);
+    fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
+
+    fb_set_color(UI_WHITE, bg);
+    fb_text_clipped(UI_MARGIN, 176u, "Press the Analogue button",
+                    TS_1X, TS_1X, FB_W - UI_MARGIN);
+    fb_set_color(UI_DIM, bg);
+    fb_text_clipped(UI_MARGIN, 198u, "Load MP3       play one track",
+                    TS_1X, TS_1X, FB_W - UI_MARGIN);
+    fb_text_clipped(UI_MARGIN, 218u, "Load Playlist  play an .m3u",
+                    TS_1X, TS_1X, FB_W - UI_MARGIN);
+}
 
 static void ui_load_failed(void)
 {
@@ -2286,8 +2310,21 @@ int main(void)
                                * APF's fragment cache for the MP3 slot */
     pl_load();
     tag_fix_budget = 2;
-    if (!load_track()) ui_load_failed();
-    pl_report();
+
+    /* Try whatever is already in the slot -- a file picked from the Pocket's
+     * browser, or one left there by a previous session. If that comes to
+     * nothing and a playlist exists, start it; the common case is then launch
+     * straight into music with no interaction at all. */
+    if (!load_track()) {
+        if (pl_count && pl_play_at(0)) {
+            ui_idle_screen();          /* until the load lands */
+        } else {
+            idle = 1;
+            ui_idle_screen();
+        }
+    } else {
+        pl_report();
+    }
 
     for (;;) {
         poll_input();
@@ -2332,7 +2369,8 @@ int main(void)
 
             if (ready || (int32_t)(cycles() - reload_at) >= 0) {
                 reload_armed = 0;
-                if (!load_track()) ui_load_failed();
+                if (load_track()) idle = 0;
+                else if (!idle)   ui_load_failed();
                 continue;
             }
         }
@@ -2409,6 +2447,10 @@ int main(void)
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
             continue;
         }
+
+        /* Nothing to decode. poll_input() and the reload handling above still
+         * run, so Load MP3 / Load Playlist work from here. */
+        if (idle) continue;
 
         if (paused) {
             st0 |= (1u << 7); REG(R_STAT0) = st0;

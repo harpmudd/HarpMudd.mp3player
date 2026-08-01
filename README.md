@@ -29,11 +29,11 @@ core and the core won't start without it — leave it alone.
 
 ## Playing
 
-Launch the core and the Pocket's file browser opens; pick a track and it plays.
+If a playlist is on the card, the core starts playing it as soon as it launches.
 
-To change tracks without leaving the core, press the **Analogue** button to open
-the menu, choose **Load MP3**, and pick another file. Playback switches as soon
-as you select it.
+Otherwise press the **Analogue** button and choose **Load MP3** for a single
+track or **Load Playlist** for an `.m3u`. The same menu switches tracks or
+playlists at any time.
 
 | Pocket | Action |
 |---|---|
