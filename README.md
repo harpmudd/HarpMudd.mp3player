@@ -1,8 +1,6 @@
 # MP3 Player — Analogue Pocket
 
-<p align="center">
-  <img src="docs/screenshot.png" width="440" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right and a progress bar below">
-</p>
+<img src="docs/screenshot.png" width="280" align="right" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right and a progress bar below">
 
 An MP3 player for the Analogue Pocket. Pick a track and the core decodes and
 plays it straight off the SD card, with album art, ID3 tags, a spectrum meter
@@ -14,6 +12,8 @@ running this project's own firmware.
 > **Status: in development (0.1.0).** Playback, seeking, tags, art and the UI
 > all work on real hardware. It has not been released — see
 > [Known limitations](#known-limitations).
+
+<br clear="right">
 
 ## Installing
 
