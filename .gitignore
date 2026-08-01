@@ -19,6 +19,12 @@ fw/fw.elf
 fw/build.log
 *.rom
 
+# ...except the shipped firmware image. It is THIS PROJECT'S OWN compiled code,
+# not a game ROM, and the core does not start without it -- a release zip built
+# from a checkout that lacks it is a broken release. The blanket *.rom rule above
+# still covers everything else.
+!dist/Assets/mp3player/common/mp3player.rom
+
 # Simulation outputs
 sim/*.vvp
 *.vcd

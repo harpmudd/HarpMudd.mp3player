@@ -1,0 +1,42 @@
+name: Attach release zip
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The core will not start without its firmware image, and *.rom is
+      # gitignored by default here -- so check it actually made it into the
+      # checkout rather than publishing a zip that silently cannot boot.
+      - name: Verify the release payload is complete
+        run: |
+          for f in \
+            dist/Cores/HarpMudd.Mp3Player/bitstream.rbf_r \
+            dist/Cores/HarpMudd.Mp3Player/core.json \
+            dist/Assets/mp3player/common/mp3player.rom \
+            dist/Platforms/mp3player.json
+          do
+            if [ ! -s "$f" ]; then
+              echo "::error::missing or empty: $f"
+              exit 1
+            fi
+          done
+
+      - name: Create zip of dist contents
+        run: |
+          cd dist
+          zip -r "../HarpMudd.Mp3Player_${{ github.event.release.tag_name }}.zip" .
+
+      - name: Upload zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: HarpMudd.Mp3Player_${{ github.event.release.tag_name }}.zip
