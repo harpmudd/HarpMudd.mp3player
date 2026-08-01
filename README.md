@@ -46,7 +46,6 @@ as you select it.
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
-| **Select** + **B** | Diagnostic screen (see [Troubleshooting](#troubleshooting)) |
 
 Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
@@ -99,30 +98,9 @@ On screen you get a repeat icon and a shuffle icon in the transport row, dimmed
 when the mode is off rather than hidden, plus the track position at the right
 and a brief overlay naming the track number when you skip.
 
-## Troubleshooting
-
-The player says what went wrong rather than just not working:
-
-| On screen | Meaning |
-|---|---|
-| `PLAYLIST 3 TRACKS` | loaded normally |
-| `PLAYLIST HAS NO TRACKS` | the file was read, but every line was a comment or blank |
-| `NO PLAYLIST FILE` | the slot could not be read — usually a wrong name or extension; pick it with **Load Playlist** |
-| `NO PLAYLIST` | you held Left/Right with no playlist loaded |
-| `OPEN FAIL: …` | a track could not be opened; the rest of the message says at which step |
-
-`OPEN FAIL: 0192 ERR n` means the Analogue framework accepted the request and
-refused it — most often the file named in the playlist isn't where the playlist
-says it is. Check the spelling against the actual filename, including its
-extension.
-
-**Select** + **B** shows the raw file descriptor the framework returns for the
-current slot, as hex and ASCII. It exists for diagnosing the above; press again
-to resume. Audio keeps playing while it's up.
-
 ## What it shows
 
-<img src="docs/screenshot.png" width="280" align="right" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right and a progress bar below">
+<img src="docs/screenshot.png" width="280" align="right" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right; below, a PLAYING label with repeat and shuffle icons, the track position, elapsed and total time, and a progress bar">
 
 - **Title and artist** from the ID3v2 tag, in a real proportional typeface with
   anti-aliased text.
