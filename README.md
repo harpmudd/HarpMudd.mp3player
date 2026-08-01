@@ -56,8 +56,8 @@ they reset on relaunch.
 
 ## Playlists
 
-Make a plain text file with one track per line, save it as `.m3u` in
-`/Assets/mp3player/common/`, and the core will play through it:
+Make a plain text file with one track per line and save it as `playlist.m3u` in
+`/Assets/mp3player/common/`:
 
 ```text
 Feel Good Inc.mp3
@@ -65,38 +65,16 @@ Rhinestone Eyes.mp3
 /Music/Albums/Demon Days/01 Intro.mp3
 ```
 
-Paths without a leading `/` are relative to that same folder; a leading `/`
-means from the root of the card, so tracks can live anywhere. Lines starting
-with `#` are ignored — which also means the `#EXTM3U` and `#EXTINF` lines other
-players write are skipped, so a playlist exported from elsewhere works as-is.
-Up to 128 tracks.
+Bare names are relative to that folder; a leading `/` is from the root of the
+card, so tracks can live anywhere. Lines starting with `#` are ignored, so
+playlists exported from other players work as-is. Up to 128 tracks.
 
-At boot the core loads the file named exactly **`playlist.m3u`** from that
-folder. A starter one ships with the core, with the format written into it as
-comments — edit it in any text editor.
+`playlist.m3u` loads at boot. For any other name — or to switch playlists while
+running — press the **Analogue** button and choose **Load Playlist**.
 
-Any other name works too, you just pick it yourself: press the **Analogue**
-button and choose **Load Playlist**. That is also how you switch between
-several playlists without leaving the core. Playing a single file with
-**Load MP3** still works and simply ignores the playlist.
-
-When a track finishes, the next one starts automatically. **Repeat** governs
-only what happens at the *end of the list* — off stops there, *all* loops back
-to the first track, *one* repeats the current track instead of advancing.
-Skipping by hand with **Left**/**Right** always wraps, so you can never get
-stuck at the end.
-
-**Shuffle** plays every track once before repeating any, and reshuffles each
-time it comes round. Turning it on or off keeps the current track playing rather
-than jumping, and the `4 / 12` counter always refers to the same track whether
-shuffled or not.
-
-Every track change — skipped, auto-advanced or picked from the menu — starts at
-the beginning of the new file.
-
-On screen you get a repeat icon and a shuffle icon in the transport row, dimmed
-when the mode is off rather than hidden, plus the track position at the right
-and a brief overlay naming the track number when you skip.
+Tracks advance automatically. **Repeat** decides what happens at the end of the
+list: off stops, *all* loops, *one* repeats the current track. **Shuffle** plays
+everything once before repeating any.
 
 ## What it shows
 
@@ -120,8 +98,7 @@ rate, mono or stereo.<br clear="right">
 There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a small
 RISC-V CPU running at 60 MHz and the decoder runs on it as software. Simulation
 put the real-time floor around 46 MHz before any hardware was built, which is
-where the headroom comes from — details in
-[STAGE0_RESULTS.md](STAGE0_RESULTS.md).
+where the headroom comes from.
 
 Decoded audio goes into a hardware queue that drains at the file's own sample
 rate, so the CPU can spend ~20 ms on a frame without the sound breaking up. The
@@ -133,8 +110,7 @@ Reading the file uses two Analogue framework commands that no core had driven
 before. Making them work meant fixing a handshake bug — the "command finished"
 signal stays asserted until the *next* command starts, so a naive reader sees
 the previous command's completion and every read after the first returns
-nothing. Fix and regression test:
-[`tgt_cmd.v`](src/fpga/core/tgt_cmd.v), [`tb_tgt_cmd.v`](sim/tb_tgt_cmd.v).
+nothing.
 
 ## Known limitations
 
