@@ -1,15 +1,15 @@
 # MP3 Player — Analogue Pocket
 
-An MP3 player for the Analogue Pocket. Pick a track and the core decodes and
-plays it straight off the SD card, with album art, ID3 tags, a spectrum meter
-and a progress bar.
+An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
+decodes and plays it straight off the SD card, with album art, ID3 tags, a
+spectrum meter and a progress bar.
 
 The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
-> **Status: in development (0.1.0).** Playback, seeking, tags, art and the UI
-> all work on real hardware. It has not been released — see
-> [Known limitations](#known-limitations).
+> **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
+> repeat, tags, album art and the UI all work on real hardware. It has not been
+> released — see [Known limitations](#known-limitations).
 
 ## Installing
 
@@ -41,11 +41,16 @@ as you select it.
 | **Left** / **Right** | *Tap* — seek −5 s / +5 s |
 | **Left** / **Right** | *Hold* — previous / next track |
 | **Up** / **Down** | Volume, in 5% steps |
-| **B** | Restart the current track |
+| **B** | Restart the current track from the beginning |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
+| **Select** + **B** | Diagnostic screen (see [Troubleshooting](#troubleshooting)) |
+
+Left and Right do one thing tapped and another held, and both resolve on
+release, so a tap can never also trigger the hold. Select works the same way: a
+Select used as a modifier doesn't toggle the art panel.
 
 Volume, accent colour, repeat and shuffle persist while the core is running;
 they reset on relaunch.
@@ -76,12 +81,44 @@ button and choose **Load Playlist**. That is also how you switch between
 several playlists without leaving the core. Playing a single file with
 **Load MP3** still works and simply ignores the playlist.
 
-**Repeat** governs only what happens when a track ends by itself — off stops at
-the end of the list, *all* loops back to the first track, *one* repeats the
-current track. Skipping by hand with **Left**/**Right** always wraps, so you can
-never get stuck at the end. **Shuffle** plays every track once before repeating
-any, and reshuffles each time it comes round; turning it on or off keeps the
-current track playing rather than jumping.
+When a track finishes, the next one starts automatically. **Repeat** governs
+only what happens at the *end of the list* — off stops there, *all* loops back
+to the first track, *one* repeats the current track instead of advancing.
+Skipping by hand with **Left**/**Right** always wraps, so you can never get
+stuck at the end.
+
+**Shuffle** plays every track once before repeating any, and reshuffles each
+time it comes round. Turning it on or off keeps the current track playing rather
+than jumping, and the `4 / 12` counter always refers to the same track whether
+shuffled or not.
+
+Every track change — skipped, auto-advanced or picked from the menu — starts at
+the beginning of the new file.
+
+On screen you get a repeat icon and a shuffle icon in the transport row, dimmed
+when the mode is off rather than hidden, plus the track position at the right
+and a brief overlay naming the track number when you skip.
+
+## Troubleshooting
+
+The player says what went wrong rather than just not working:
+
+| On screen | Meaning |
+|---|---|
+| `PLAYLIST 3 TRACKS` | loaded normally |
+| `PLAYLIST HAS NO TRACKS` | the file was read, but every line was a comment or blank |
+| `NO PLAYLIST FILE` | the slot could not be read — usually a wrong name or extension; pick it with **Load Playlist** |
+| `NO PLAYLIST` | you held Left/Right with no playlist loaded |
+| `OPEN FAIL: …` | a track could not be opened; the rest of the message says at which step |
+
+`OPEN FAIL: 0192 ERR n` means the Analogue framework accepted the request and
+refused it — most often the file named in the playlist isn't where the playlist
+says it is. Check the spelling against the actual filename, including its
+extension.
+
+**Select** + **B** shows the raw file descriptor the framework returns for the
+current slot, as hex and ASCII. It exists for diagnosing the above; press again
+to resume. Audio keeps playing while it's up.
 
 ## What it shows
 
@@ -94,8 +131,8 @@ current track playing rather than jumping.
 - **A spectrum meter** driven by the decoder's own subband data, so it follows
   the actual audio.
 - **Elapsed and total time**, with a progress bar.
-- **Repeat and shuffle indicators** and the track position in the
-  playlist, when one is loaded.
+- **Repeat and shuffle indicators**, dimmed rather than hidden when off, and the
+  track position in the playlist when one is loaded.
 
 CBR and VBR MPEG-1 Layer III are supported at every standard bitrate and sample
 rate, mono or stereo.<br clear="right">
@@ -128,8 +165,10 @@ nothing. Fix and regression test:
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II
   are not handled.
 - **JPEG album art only.** PNG cover art is detected and skipped.
-- **Nothing is saved between sessions.** Volume, accent colour and the art
-  panel's state all reset to defaults on relaunch. Persistence is planned.
+- **Nothing is saved between sessions.** Volume, accent colour, repeat, shuffle
+  and the art panel's state all reset to defaults on relaunch. Persistence is
+  planned.
+- **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 
 ## Credits
 
