@@ -67,12 +67,14 @@ with `#` are ignored — which also means the `#EXTM3U` and `#EXTINF` lines othe
 players write are skipped, so a playlist exported from elsewhere works as-is.
 Up to 128 tracks.
 
-A starter `playlist.m3u` ships with the core, with the format written into it
-as comments. Edit it in any text editor.
+At boot the core loads the file named exactly **`playlist.m3u`** from that
+folder. A starter one ships with the core, with the format written into it as
+comments — edit it in any text editor.
 
-To switch playlists without leaving the core, press the **Analogue** button and
-choose **Load Playlist**. Playing a single file with **Load MP3** still works
-and simply ignores the playlist.
+Any other name works too, you just pick it yourself: press the **Analogue**
+button and choose **Load Playlist**. That is also how you switch between
+several playlists without leaving the core. Playing a single file with
+**Load MP3** still works and simply ignores the playlist.
 
 **Repeat** governs only what happens when a track ends by itself — off stops at
 the end of the list, *all* loops back to the first track, *one* repeats the
