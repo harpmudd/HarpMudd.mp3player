@@ -56,9 +56,6 @@ Volume, accent colour, repeat, shuffle and the art panel are remembered between
 sessions — they're written to `settings.bin` beside the core a moment after you
 change them.
 
-Volume, accent colour, repeat and shuffle persist while the core is running;
-they reset on relaunch.
-
 ## Playlists
 
 Make a plain text file with one track per line and save it as `playlist.m3u` in
