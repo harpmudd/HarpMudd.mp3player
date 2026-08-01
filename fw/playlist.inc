@@ -32,9 +32,15 @@
  * run of printable ASCII -- so even the name's OFFSET is observed rather than
  * assumed.
  */
-#define DT_RESP_W   0u      /* response struct  (APF writes) -- word address */
-#define DT_PARAM_W  256u    /* parameter struct (APF reads)                  */
-#define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window  */
+/* Word addresses inside mf_datatable, which is 256 WORDS deep. These MUST
+ * match target_buffer_resp_struct / target_buffer_param_struct in
+ * core_game.vh, and must not overlap: the parameter struct is built from the
+ * response struct, so an overlap is a read-after-write on itself. The param
+ * struct was originally at word 256 -- past the end of a 256-word RAM, so the
+ * address wrapped and landed straight back on the response struct. */
+#define DT_RESP_W   0u      /* response struct  (APF writes) */
+#define DT_PARAM_W  64u     /* parameter struct (APF reads)  */
+#define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window */
 
 static inline void dt_write(uint32_t word, uint32_t val)
 {
@@ -63,10 +69,19 @@ static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
 /* Ask APF to put `name` in the MP3 slot. Returns 0 if the command failed --
  * the caller stays on the current track rather than leaving the player in a
  * state where nothing is loaded. */
+/* Why the last open failed, surfaced in the toast. Guessing between these is
+ * exactly what cost several rounds on the reload bug -- each has a different
+ * cause and a different fix, and they are indistinguishable from outside. */
+enum { PLO_OK = 0, PLO_GETFILE, PLO_NONAME, PLO_TOOLONG, PLO_OPEN };
+static uint8_t pl_open_err;
+static uint8_t pl_open_errcode;      /* target_dataslot_err from 0192 */
+
 static int pl_open_name(const char *name)
 {
+    pl_open_err = PLO_OK; pl_open_errcode = 0;
+
     /* 1. Template: a struct APF built itself, for the file already loaded. */
-    if (!pl_cmd(TGT_GETFILE, MP3_SLOT_ID, CLK_HZ)) return 0;
+    if (!pl_cmd(TGT_GETFILE, MP3_SLOT_ID, CLK_HZ)) { pl_open_err = PLO_GETFILE; return 0; }
 
     uint8_t buf[DT_WORDS * 4u];
     for (uint32_t w = 0; w < DT_WORDS; w++) {
@@ -89,7 +104,7 @@ static int pl_open_name(const char *name)
         if (i - start > best_len) { best_len = i - start; best = start; }
         i++;
     }
-    if (!best_len) return 0;                 /* no name found: refuse to guess */
+    if (!best_len) { pl_open_err = PLO_NONAME; return 0; }   /* refuse to guess */
 
     /* 3. If the word immediately before the name holds the OLD name's length,
      *    it is a length field and has to move with the name. Checked rather
@@ -98,7 +113,7 @@ static int pl_open_name(const char *name)
      *    eventually match something unrelated and corrupt it. */
     uint32_t new_len = 0;
     while (name[new_len]) new_len++;
-    if (new_len >= sizeof(buf) - best) return 0;      /* name will not fit */
+    if (new_len >= sizeof(buf) - best) { pl_open_err = PLO_TOOLONG; return 0; }
 
     uint32_t len_w = (best >= 4u) ? ((best - 4u) / 4u) : 0xFFFFFFFFu;
     int patch_len = 0;
@@ -134,7 +149,12 @@ static int pl_open_name(const char *name)
      * file from the menu does. The existing reload path -- settle, 0190
      * identity gate, cache flush, load_track() -- then runs unchanged. Nothing
      * here re-implements track loading. */
-    return pl_cmd(TGT_OPENFILE, MP3_SLOT_ID, CLK_HZ * 3u);
+    if (!pl_cmd(TGT_OPENFILE, MP3_SLOT_ID, CLK_HZ * 3u)) {
+        pl_open_err     = PLO_OPEN;
+        pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
+        return 0;
+    }
+    return 1;
 }
 
 /* ------------------------------------------------------------------ parsing */
@@ -270,7 +290,16 @@ static int pl_play_at(uint16_t pos)
     if (!pl_count) return 0;
     pl_pos = (uint16_t)(pos % pl_count);
     const char *name = &pl_text[pl_off[pl_order[pl_pos]]];
-    if (!pl_open_name(name)) { ui_toast_msg("TRACK FAILED"); return 0; }
+    if (!pl_open_name(name)) {
+        switch (pl_open_err) {
+        case PLO_GETFILE: ui_toast_msg("OPEN FAIL: NO 0190");   break;
+        case PLO_NONAME:  ui_toast_msg("OPEN FAIL: NO NAME");   break;
+        case PLO_TOOLONG: ui_toast_msg("OPEN FAIL: NAME LONG"); break;
+        default:          ui_toast_set("OPEN FAIL: 0192 ERR",
+                                       pl_open_errcode, 0);     break;
+        }
+        return 0;
+    }
     return 1;
 }
 

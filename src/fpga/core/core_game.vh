@@ -199,8 +199,13 @@ assign datatable_data = soc_dt_wdata;
 // The datatable lives at bridge 0xF8xx2xxx and is word-addressed
 // (b_datatable_addr = bridge_addr >> 2), so these are 256 words apart and
 // cannot overlap.
-assign target_buffer_resp_struct  = 32'hF8002000;   // word 0   -- APF writes
-assign target_buffer_param_struct = 32'hF8002400;   // word 256 -- APF reads
+// mf_datatable is 256 WORDS (widthad = 8), so word 256 does not exist -- the
+// address wraps and the parameter struct landed on top of the response struct
+// at word 0. They must not overlap: 0192's parameters are built FROM a 0190
+// response, so one clobbering the other is a read-after-write on itself.
+// Response occupies words 0..63; parameters start at word 64.
+assign target_buffer_resp_struct  = 32'hF8002000;   // word  0 -- APF writes
+assign target_buffer_param_struct = 32'hF8002100;   // word 64 -- APF reads
 
 // -- 5. APF target-command bridge (clk_sys <-> clk_74a) -----------------------
 // STAGE 2 GOAL: no core in this workspace has ever driven these. 0192 hands off

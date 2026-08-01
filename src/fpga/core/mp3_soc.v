@@ -363,7 +363,7 @@ module mp3_soc #(
     // stale RTL. That has already happened three times here, each time looking
     // like a logic bug (dead peripheral, no audio, unresponsive buttons) rather
     // than what it was. BUMP THIS whenever the MMIO map changes.
-    localparam [31:0] CORE_VERSION = 32'h4D50330F;   // "MP3" + rev 15 (playlist reload bit)
+    localparam [31:0] CORE_VERSION = 32'h4D503310;   // "MP3" + rev 16 (param struct moved to word 64)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
