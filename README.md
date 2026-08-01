@@ -49,6 +49,10 @@ running; they reset on relaunch.
 
 ## What it shows
 
+<p align="center">
+  <img src="docs/screenshot.png" width="400" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right and a progress bar below">
+</p>
+
 - **Title and artist** from the ID3v2 tag, in a real proportional typeface with
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
