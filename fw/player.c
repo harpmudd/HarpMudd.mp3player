@@ -2260,6 +2260,7 @@ static int      rd_kind;
 
 /* Periodic ID3 re-probe: a light backstop behind the 0190 identity gate. */
 static uint32_t tag_next;
+static uint32_t tag_walk_at;   /* tag length pending a full walk, 0 = none */
 static uint32_t tag_probes_left;
 
 static int  target_read_poll(void);
@@ -2848,17 +2849,15 @@ static int read_track_head(void)
          * not in there, the text frames sit past a large picture -- so walk the
          * tag properly rather than reporting a well-formed file as untagged.
          * Only the fields actually missing are looked up again. */
-        if (title_status != ID3_OK) {
-            /* ONE walk for every missing field, not one per field.
-             *
-             * Each walk reads a header per frame -- ~23 on a tag with a large
-             * picture -- so calling it five times cost ~140 SD reads inside
-             * load_track, with the PCM FIFO already flushed and the DAC holding
-             * a DC level. That is the restart hiccup, and it showed up on
-             * exactly the track whose text frames sit past its artwork,
-             * because that is the only one that reaches this path. */
-            title_status = id3_walk_all(skip);
-        }
+        /* DEFER the walk. It is dozens of SD reads, and everything here runs
+         * between pcm_flush() and prefill() with the FIFO empty -- which is
+         * what made the track needing it tic. Note it and let the main loop do
+         * it once audio is flowing and the buffer is full.
+         *
+         * This tic was self-inflicted: before the walk existed that track
+         * loaded fast and simply showed no title. Fixing the title bought a
+         * hiccup, which is why it appeared out of nowhere. */
+        if (title_status != ID3_OK) tag_walk_at = skip ? skip : 1u;
         for (uint32_t i = 0; i < sizeof(track_trk); i++)
             if (track_trk[i] == '/') { track_trk[i] = 0; break; }  /* "5/12" -> "5" */
         if (id3_find_text(ring, ring_fill, skip, "TDRC",
@@ -3139,6 +3138,17 @@ int main(void)
         /* Only when nothing is loading: a write is an SD round trip, and the
          * quiet window means it never lands in the middle of a track change. */
         if (!reload_armed && !reload_pending) settings_pump();
+
+        /* The deferred tag walk, on the same terms as a settings write: only
+         * with the buffer full, so its reads cannot empty the FIFO. Paused is
+         * free -- there is nothing to starve. */
+        if (tag_walk_at && !reload_armed && !reload_pending &&
+            (paused || (pcm_level() >= 1792u &&
+                        ring_fill - ring_rd >= RING_SIZE / 2u))) {
+            uint32_t sk = tag_walk_at; tag_walk_at = 0;
+            if (id3_walk_all(sk) == ID3_OK) title_status = ID3_OK;
+            ui_draw_chrome();          /* the caption changed underneath us */
+        }
 
         if (art_toggle) {
             art_toggle = 0;
