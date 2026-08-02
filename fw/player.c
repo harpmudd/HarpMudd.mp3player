@@ -859,11 +859,12 @@ static uint32_t ui_byte_rate(void)
 
 static uint32_t ui_total_secs(void)
 {
-    if (track_secs) return track_secs;          /* Xing/VBRI: exact */
-    uint32_t rate = ui_byte_rate();
-    if (slot_size > audio_start && rate)
-        return (slot_size - audio_start) / rate;
-    return 0;
+    /* track_secs only: exact from a Xing/VBRI frame count, or latched once
+     * from six seconds of measurement on a headerless file. The live estimate
+     * that used to fill in here is exactly what made the total wander during
+     * playback and differ between launches -- --:-- followed by one number
+     * that never moves beats a number that keeps changing. */
+    return track_secs;
 }
 
 static char *ui_mmss(char *p, uint32_t sec)
@@ -1771,6 +1772,17 @@ static void ui_draw_dynamic(void)
         uint32_t consumed = (file_pos > audio_start + buffered)
                           ? file_pos - buffered - audio_start : 0u;
         if (consumed) meas_rate = consumed / sec;
+
+        /* LATCH the total once, instead of re-deriving it from a rate that is
+         * still being measured. total = size / meas_rate recomputed every
+         * second made the displayed length drift while playing and differ
+         * between launches -- the size was fixed, the denominator was live. A
+         * headerless file's total is an estimate either way; an estimate that
+         * arrives once and stays put beats one that wanders. Latching into
+         * track_secs also makes seek distances use the same figure, so the
+         * clock, the bar and scrubbing all agree with each other. */
+        if (meas_rate && slot_size > audio_start && sec >= 6u)
+            track_secs = (slot_size - audio_start) / meas_rate;
     }
     if (sec != ui_last_sec) {
         ui_last_sec = sec;
