@@ -2550,16 +2550,22 @@ int main(void)
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
 
     vol_apply();
+
+    /* Settings FIRST, so the splash is drawn in the accent the user actually
+     * chose. It only reads a slot -- nothing on screen depends on it -- and
+     * painting before it meant the very first thing shown was always the
+     * default orange regardless of what had been saved. */
+    settings_load();
+
     /* Something deliberate on screen BEFORE the slow work -- reading the
      * playlist, opening a track, decoding cover art. Previously the first
      * paint came after all of that. */
     ui_splash();
+
     /* Before the track, deliberately: reading the playlist slot makes APF drop
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
      * while doing it mid-stream would make every refill re-walk the cluster
      * chain. No playlist on the card simply leaves pl_count at 0. */
-    settings_load();          /* before the track: another slot's read drops
-                               * APF's fragment cache for the MP3 slot */
     pl_load();
     tag_fix_budget = 2;
 
