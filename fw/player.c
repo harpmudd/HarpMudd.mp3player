@@ -713,6 +713,7 @@ static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
  * is wanted, so the next track that has some brings it back. */
 static uint8_t  art_pref = 1, art_have;
 static uint32_t art_file_id;      /* 0190 identity the stash was decoded for */
+static uint32_t size_file_id, size_cached;   /* measured length, per file    */
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -2949,7 +2950,26 @@ static int load_track(void)
     ld_head = LD_MS(cycles() - tphase); tphase = cycles();
     if (audio_start) { st0 |= (1u << 1); REG(R_STAT0) = st0; }
 
-    if (slot_size <= audio_start) slot_size = probe_file_size();
+    /* The size probe is a ~20-read binary search and it runs with the FIFO
+     * empty -- measured at 481 ms on a file with no Xing header, the single
+     * largest avoidable part of a load. Two ways to not pay it:
+     *
+     *   1. The file already said how long it is. A Xing/VBRI BYTES field is
+     *      exact, so there is nothing to search for.
+     *   2. We already measured this file. Keyed on the 0190 identity, so a
+     *      restart or a return to the same track reuses the answer and a
+     *      genuine new file still measures once. */
+    if (slot_size <= audio_start && track_bytes)
+        slot_size = audio_start + track_bytes;
+    if (slot_size <= audio_start && cur_file_id && cur_file_id == size_file_id)
+        slot_size = size_cached;
+    if (slot_size <= audio_start) {
+        slot_size = probe_file_size();
+        if (cur_file_id && slot_size > audio_start) {
+            size_file_id = cur_file_id;
+            size_cached  = slot_size;
+        }
+    }
     ld_size = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Cover art BEFORE the chrome, because whether it exists decides the
