@@ -12,6 +12,30 @@
  * things have been quiet for a moment.
  */
 
+/* WRITING IS DISABLED. Do not re-enable without reading the note below.
+ *
+ * Twice now, every .mp3 in /Assets/mp3player/common/ has come back with the
+ * SAME wrong size -- 21,037,825 the first time, 21,365,505 the second -- while
+ * settings.bin itself stayed exactly 32 bytes and the audio data in those files
+ * was intact. Files being individually overwritten does not look like that; a
+ * directory sector being rewritten with bad size fields does, and every file in
+ * that folder shares one.
+ *
+ * The 0184 write is the ONLY thing this core writes to the card, and both
+ * events coincided with it. That is not proof it is at fault, but a music
+ * player that might damage a user's library is not shippable on a maybe, and
+ * the cost of being wrong in each direction is not symmetric: leaving it off
+ * costs a convenience, leaving it on risks someone's files.
+ *
+ * Reading stays enabled, so a settings.bin placed on the card by hand is still
+ * honoured -- only the write-back is gone.
+ *
+ * If this is revisited: the first thing to try is giving the writable file its
+ * OWN directory, containing nothing else. If the damage really is collateral to
+ * a directory-sector rewrite, isolating our file means only our file is at
+ * risk. Test that on a card with nothing valuable on it. */
+#define SETTINGS_WRITE 0
+
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
 #define SET_BYTES    32u                /* fixed: the file must not change size */
@@ -84,6 +108,9 @@ static int settings_load(void)
  * tracking which field changed would cost more than it saves. */
 static int settings_store(void)
 {
+#if !SETTINGS_WRITE
+    return 1;                       /* report success; simply never write */
+#else
     uint8_t rec[SET_BYTES];
     for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
 
@@ -116,6 +143,7 @@ static int settings_store(void)
         if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
         if ((int32_t)(cycles() - deadline) >= 0) return 0;
     }
+#endif
 }
 
 /* Called from the main loop. Does nothing until the settings have been stable
