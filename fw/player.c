@@ -639,6 +639,9 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU, VIZ_COU
                                    * is solid. At 10 they sat 5.4 px apart and
                                    * the needle read as a dotted line. */
 static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
+static uint8_t  vu_face;          /* the static face is on screen        */
+static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
+
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
  * sweep, which is what a real VU movement travels. The first attempt built one
@@ -653,6 +656,21 @@ static const int16_t vu_cs[17] = {
      2633,  2959,  3250,  3502,  3712,  3879,  3999,  4072,  4096,
      4072,  3999,  3879,  3712,  3502,  3250,  2959,  2633
 };
+
+/* Interpolate between table entries. Indexing the table directly gave the
+ * needle 17 positions across the sweep -- the tip jumping ~5 px at a time,
+ * which reads as stepping rather than sweeping. Interpolating gives it 256, so
+ * the movement is as smooth as the ballistics driving it. */
+static void vu_angle(uint32_t v255, int32_t *sn, int32_t *cs)
+{
+    uint32_t pos = v255 * 16u;                 /* 0..4080 */
+    uint32_t q   = pos / 255u;                 /* 0..16   */
+    uint32_t f   = pos % 255u;
+    uint32_t q1  = (q < 16u) ? q + 1u : 16u;
+    *sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 255;
+    *cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 255;
+}
+
 
 #define WAVE_COLS 64u
 #define WAVE_SPAN 4u              /* samples per column -- 256 sample window */
@@ -1406,14 +1424,24 @@ static void ui_draw_dynamic(void)
          * widens the box from ~246 to ~360, and a fixed layout would leave the
          * pair huddled at the left -- the same trap the waterfall fell into. */
         if (viz_mode == VIZ_VU) {
-            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            /* The face -- arc, ticks, labels -- never changes, so it is drawn
+             * ONCE and left alone. Clearing the whole box and repainting
+             * everything each pass is what made the L and R labels flicker:
+             * they were being erased and redrawn while the panel was being
+             * scanned out. Only the needle is erased and redrawn now. */
+            if (wf) vu_face = 0;
+
+            if (!vu_face) fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
 
             for (int ch = 0; ch < 2; ch++) {
                 uint32_t half = ww / 2u;
                 uint32_t ox   = UI_MARGIN + (uint32_t)ch * half;
                 uint32_t pivx = ox + half / 2u;
-                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 4u;    /* pivot at the base */
+                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 4u;
                 uint32_t len  = UI_WAVE_H - 18u;
+                /* Needle stops short of the ticks, so erasing it can never rub
+                 * them out and they never need repainting. */
+                uint32_t nlen = len - 6u;
 
                 uint32_t pkc = ch ? peak_r : peak_l;
                 uint32_t tgt = (pkc * 255u) / 32768u;
@@ -1424,69 +1452,65 @@ static void ui_draw_dynamic(void)
                 else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
                                 if (*v < tgt) *v = tgt; }
 
-                /* Scale arc, drawn as a dense run of points along the sweep so
-                 * it reads as a continuous curve rather than scattered marks.
-                 * 33 samples across 17 table entries, interpolating between
-                 * neighbours -- the previous 9 marks were what looked
-                 * half-finished. */
-                /* 64 samples, not 33. The arc is ~99 px long at this radius,
-                 * so 33 single pixels sit 3 px apart and read as a dotted line
-                 * -- which is what looked partially drawn. 80 steps of 2 px
-                 * dots overlap into a continuous curve; 64 still left 2.2 px
-                 * gaps, which is measured, not guessed. */
-                for (uint32_t t = 0; t <= 80u; t++) {
-                    uint32_t q = (t * 16u) / 80u;              /* table index   */
-                    uint32_t f = (t * 16u) % 80u;              /* fraction /80  */
-                    uint32_t q1 = (q < 16u) ? q + 1u : 16u;
-                    int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 80;
-                    int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 80;
-                    int32_t ar = (int32_t)len + 4;
-                    int32_t ax = (int32_t)pivx + (ar * sn) / 4096;
-                    int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
-                    if (ay < (int32_t)UI_WAVE_Y) continue;
-                    if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
-                    /* UI_TRACK is luma 26 against a luma 11 background --
-                     * near-invisible, which is why only the red section showed.
-                     * UI_FAINT reads as a drawn scale without competing with
-                     * the needle. */
-                    fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
-                            (t >= 60u) ? UI_RED : UI_FAINT);
+                if (!vu_face) {
+                    for (uint32_t t = 0; t <= 80u; t++) {
+                        uint32_t q = (t * 16u) / 80u, f = (t * 16u) % 80u;
+                        uint32_t q1 = (q < 16u) ? q + 1u : 16u;
+                        int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 80;
+                        int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 80;
+                        int32_t ar = (int32_t)len + 4;
+                        int32_t ax = (int32_t)pivx + (ar * sn) / 4096;
+                        int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
+                        if (ay < (int32_t)UI_WAVE_Y) continue;
+                        if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
+                        fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
+                                (t >= 60u) ? UI_RED : UI_FAINT);
+                    }
+                    for (uint32_t t = 0; t <= 4u; t++) {
+                        uint32_t i = t * 4u;
+                        for (uint32_t d = 0; d < 4u; d++) {
+                            int32_t ar = (int32_t)len - 1 - (int32_t)d;
+                            int32_t ax = (int32_t)pivx + (ar * vu_sn[i]) / 4096;
+                            int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
+                            if (ay < (int32_t)UI_WAVE_Y) continue;
+                            fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
+                                    (t >= 3u) ? UI_RED : UI_DIM);
+                        }
+                    }
+                    fb_set_color(ui_accent, bed);
+                    fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
+                                    TS_1X, TS_1X, 16u);
                 }
 
-                /* Ticks: longer marks inside the arc at fifths of the sweep. */
-                for (uint32_t t = 0; t <= 4u; t++) {
-                    uint32_t i = t * 4u;
-                    for (uint32_t d = 0; d < 4u; d++) {
-                        int32_t ar = (int32_t)len - 1 - (int32_t)d;
-                        int32_t ax = (int32_t)pivx + (ar * vu_sn[i]) / 4096;
-                        int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
-                        if (ay < (int32_t)UI_WAVE_Y) continue;
-                        fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
-                                (t >= 3u) ? UI_RED : UI_DIM);
+                uint8_t shown = ch ? vu_shown_r : vu_shown_l;
+                uint8_t now   = (uint8_t)*v;
+                if (vu_face && now == shown) continue;   /* nothing moved */
+
+                /* Erase the old needle, then draw the new one. Two passes over
+                 * the same geometry costs less than repainting the face. The
+                 * erase is skipped on the first draw after the face is laid
+                 * down, when there is no old needle to remove. */
+                for (int pass = vu_face ? 0 : 1; pass < 2; pass++) {
+                    int32_t  sn, cs;
+                    vu_angle(pass ? now : shown, &sn, &cs);
+                    uint16_t col = pass ? ((*v >= 192u) ? UI_RED : ui_accent) : bed;
+                    for (uint32_t k = 2; k <= VU_STEPS; k++) {
+                        int32_t rr = ((int32_t)nlen * (int32_t)k) / (int32_t)VU_STEPS;
+                        int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
+                        int32_t ny = (int32_t)pivy - (rr * cs) / 4096;
+                        if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
+                        if (ny < (int32_t)UI_WAVE_Y) continue;
+                        uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;
+                        fb_rect((uint32_t)nx, (uint32_t)ny, th, th, col);
                     }
                 }
-
-                uint32_t ai   = (*v * 16u) / 255u;
-                int32_t  sn   = vu_sn[ai], cs = vu_cs[ai];
-                uint16_t ncol = (*v >= 192u) ? UI_RED : ui_accent;
-                for (uint32_t k = 2; k <= VU_STEPS; k++) {
-                    int32_t rr = ((int32_t)len * (int32_t)k) / (int32_t)VU_STEPS;
-                    int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
-                    int32_t ny = (int32_t)pivy - (rr * cs) / 4096;
-                    if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
-                    if (ny < (int32_t)UI_WAVE_Y) continue;
-                    /* Tapered: thin at the tip, so it looks like a needle
-                     * rather than a bar. */
-                    uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;   /* taper the tip */
-                    fb_rect((uint32_t)nx, (uint32_t)ny, th, th, ncol);
-                }
-                fb_rect(pivx - 2u, pivy - 2u, 5, 5, ncol);      /* hub */
+                fb_rect(pivx - 2u, pivy - 2u, 5, 5,
+                        (*v >= 192u) ? UI_RED : ui_accent);
                 fb_rect(pivx - 1u, pivy - 1u, 3, 3, bed);
 
-                fb_set_color(ncol, bed);
-                fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
-                                TS_1X, TS_1X, 16u);
+                if (ch) vu_shown_r = now; else vu_shown_l = now;
             }
+            vu_face = 1;
             goto viz_done;
         }
 
