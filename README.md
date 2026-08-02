@@ -45,7 +45,7 @@ playlists at any time.
 | **Left** / **Right** | *Hold* — seek back / forward |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter: bars, waterfall, L/R levels, phase scope |
+| **X** | Cycle the meter: bars, waterfall, L/R levels, phase scope, oscilloscope |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
@@ -92,9 +92,9 @@ everything once before repeating any.
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **A meter**, in four styles cycled with **X**: scrolling bars, a waterfall
-  strip that colours loudness over time, per-channel L/R levels, and a stereo
-  phase scope.
+- **A meter**, in five styles cycled with **X**: scrolling bars, a waterfall
+  strip that colours loudness over time, per-channel L/R levels, a stereo phase
+  scope, and an oscilloscope.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, and the
   track position in the playlist when one is loaded.
