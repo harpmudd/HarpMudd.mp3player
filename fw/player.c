@@ -604,6 +604,7 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_COUNT };
  * the buffer is refilled every frame and the UI runs on its own schedule, so
  * drawing from it directly would sample whatever happened to be there. */
 #define SCOPE_N 64u
+#define SCOPE_R 30u             /* peak maps here, inside the 36 px half-height */
 static signed char scope_x[SCOPE_N], scope_y[SCOPE_N];
 static uint8_t  viz_mode;
 static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
@@ -3023,20 +3024,28 @@ int main(void)
              * period rather than clustering at its start. */
             uint32_t pairs = (uint32_t)(stereo ? (n / 2) : n);
             uint32_t step  = pairs / SCOPE_N;
-            if (step) {
+            if (step && pk > 0) {
+                /* AUTO-GAIN, normalised to this frame's peak.
+                 *
+                 * A fixed shift was sized for full-scale samples, and real
+                 * music sits far below that -- mid/side landed a couple of
+                 * pixels from centre and the trace was a smudge. Scaling to the
+                 * peak makes the shape readable at any level, which is the
+                 * whole point: this mode shows correlation, not loudness. The
+                 * L/R bars already show loudness.
+                 *
+                 * One divide per frame, then a shift per point. Averages rather
+                 * than sums, so mid and side each span +-pk and the reciprocal
+                 * maps them exactly onto the box. */
+                int32_t scale = ((int32_t)SCOPE_R << 15) / (int32_t)pk;
                 for (uint32_t k = 0; k < SCOPE_N; k++) {
                     uint32_t idx = k * step;
                     int32_t l = pcm[stereo ? idx * 2u : idx];
                     int32_t r = stereo ? pcm[idx * 2u + 1u] : l;
-                    /* mid/side: mono collapses onto x = 0.
-                     *
-                     * >>11, not >>10: mid and side are SUMS, so each reaches
-                     * twice full scale. At >>10 a loud passage peaked 64 px
-                     * from centre against a 36 px half-height and most points
-                     * were clipped away -- the scope emptying out exactly when
-                     * the music got loud. */
-                    scope_x[k] = (signed char)((l - r) >> 11);
-                    scope_y[k] = (signed char)((l + r) >> 11);
+                    int32_t mid  = (l + r) / 2;      /* mono -> x = 0 */
+                    int32_t side = (l - r) / 2;
+                    scope_x[k] = (signed char)((side * scale) >> 15);
+                    scope_y[k] = (signed char)((mid  * scale) >> 15);
                 }
             }
         }
