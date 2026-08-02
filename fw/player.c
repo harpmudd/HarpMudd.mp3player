@@ -1129,57 +1129,55 @@ static void ui_splash_anim(void)
     uint32_t ww = ui_wave_w();
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
 
-    /* Two phases, both symmetric about the centre.
+    /* Settling noise: the meter starts as chaos and calms to rest.
      *
-     * A: bars light from BOTH OUTER EDGES and converge inward.
-     * B: they drain back outward, centre releasing first.
+     * Every bar picks a fresh random height each frame, drawn from an envelope
+     * that decays to nothing over the animation -- so it begins looking like a
+     * meter being driven hard and ends at silence, without ever repeating.
+     * Seeded from the cycle counter, so it differs on every boot; a fixed
+     * pattern would stop feeling random the third time it is seen.
      *
-     * A single pulse travelling one direction reads as a scroll -- which is
-     * what the waterfall does during playback, so it said nothing about the
-     * core starting up. Converging and draining reads as powering on, and
-     * being symmetric it looks deliberate from any point in the animation. */
-    const uint32_t PH_A = 22u, PH_B = 20u, TAIL = 6u;
-    const uint32_t HALF = UI_WAVE_N / 2u + 1u;
+     * Peaks fall under their own gravity rather than following the envelope,
+     * which is what stops it reading as uniform noise fading out: the markers
+     * trail behind and settle last. */
+    uint32_t rng = cycles() | 1u;
+    unsigned char h_cur[UI_WAVE_N] = { 0 }, h_pk[UI_WAVE_N] = { 0 };
 
-    for (uint32_t t = 0; t < PH_A + PH_B; t++) {
-        /* Title fades in across phase A, then holds. */
-        uint32_t f = (t < PH_A) ? (t * STEP_DEN / PH_A) : STEP_DEN;
+    const uint32_t FRAMES = 46u;
+    for (uint32_t t = 0; t < FRAMES; t++) {
+        uint32_t f = (t * 2u < FRAMES) ? (t * 2u * STEP_DEN / FRAMES) : STEP_DEN;
         fb_set_color(ui_mix(tbg, ui_accent, f, STEP_DEN), tbg);
         fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
 
-        uint32_t pa = (t < PH_A) ? ((t + 1u) * (HALF + TAIL)) / PH_A : HALF + TAIL;
-        uint32_t pb = (t < PH_A) ? 0u
-                                 : (((t - PH_A) + 1u) * (HALF + TAIL)) / PH_B;
+        /* Envelope: full early, nothing by the end. Squared so it holds up
+         * before collapsing, rather than sagging from the first frame. */
+        uint32_t left = FRAMES - t;
+        uint32_t env  = (UI_WAVE_H * left * left) / (FRAMES * FRAMES);
 
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+
+            uint32_t h = env ? (rng % (env + 1u)) : 0u;
+            if (h < 2u) h = 2u;
+            /* Rise instantly, fall gradually -- the shape of a real meter. */
+            if (h < h_cur[i]) h = h_cur[i] - (h_cur[i] - h + 3u) / 4u;
+            h_cur[i] = (unsigned char)h;
+
+            if (h >= h_pk[i]) h_pk[i] = (unsigned char)h;
+            else if (h_pk[i] > 2u) h_pk[i] -= 2u;
+
             uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
             uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
             uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
 
-            uint32_t d = (i < UI_WAVE_N - 1u - i) ? i : (UI_WAVE_N - 1u - i);
-
-            /* Rise: full once the inbound front has passed, ramping over TAIL
-             * so the leading edge is soft rather than a hard step. */
-            uint32_t h = 0;
-            if (pa > d) { uint32_t r = pa - d; h = (r >= TAIL) ? UI_WAVE_H
-                                                              : (r * UI_WAVE_H) / TAIL; }
-            /* Fall: centre (largest d) releases first. */
-            if (pb) {
-                uint32_t rel = HALF - d;
-                if (pb > rel) {
-                    uint32_t r = pb - rel;
-                    uint32_t keep = (r >= TAIL) ? 0u : ((TAIL - r) * UI_WAVE_H) / TAIL;
-                    if (keep < h) h = keep;
-                }
-            }
-            if (h < 2u) h = 2u;
-
             uint16_t c = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
             fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h, c);
             if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+            if (h_pk[i] > h + 1u)
+                fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h_pk[i], lit, 1, UI_WHITE);
         }
 
-        uint32_t next = cycles() + CLK_HZ / 50u;      /* ~20 ms a frame */
+        uint32_t next = cycles() + CLK_HZ / 55u;      /* ~18 ms a frame */
         while ((int32_t)(cycles() - next) < 0) { }
     }
 
