@@ -41,8 +41,13 @@ module pcm_fifo #(
 
     // ---- drain side ----
     input  wire [31:0] rate_inc,       // sample_rate * 2^32 / CLK_HZ
-    output reg  [15:0] out_l,
-    output reg  [15:0] out_r,
+    // SIGNED. The decay below does arithmetic on these, and the first attempt
+    // at it left them unsigned -- so >>> was a logical shift and negative
+    // samples diverged away from zero until they wrapped: noise on every
+    // track change instead of a fade. sim/tb_pcm_decay.v exists so that
+    // mistake cannot come back.
+    output reg signed [15:0] out_l,
+    output reg signed [15:0] out_r,
     output reg         underrun
 );
 
@@ -108,8 +113,30 @@ module pcm_fifo #(
                     out_r <= q[31:16];
                     rptr  <= rptr + 1'b1;
                 end else begin
-                    // Hold the last sample rather than slamming to zero -- a
-                    // held level is far less audible than a hard discontinuity.
+                    // Empty: GLIDE the output to zero rather than holding it.
+                    //
+                    // Holding was right for the gap this FIFO was designed
+                    // around -- a few samples between frame bursts. It is wrong
+                    // for the gap a track load opens: the output sits at an
+                    // arbitrary DC level for the best part of a second and then
+                    // steps to the new track's first sample, and that step is
+                    // the restart click. Firmware cannot reach this value, so
+                    // the glide has to live here.
+                    //
+                    // One shift per tick halves the level every ~90 samples:
+                    // a few-sample gap is still effectively a hold, a long one
+                    // reaches silence in ~15 ms. The window comparison snaps
+                    // the tail to exactly zero so a positive residue (x < 128
+                    // decays by 0) cannot stick.
+                    //
+                    // NOTE the pairing: firmware fades new audio in from zero
+                    // after every discontinuity INCLUDING unpause -- resume
+                    // used to rely on the held value being waveform-continuous
+                    // with the next sample, and this glide breaks that.
+                    if (out_l > -16'sd128 && out_l < 16'sd128) out_l <= 16'sd0;
+                    else                                       out_l <= out_l - (out_l >>> 7);
+                    if (out_r > -16'sd128 && out_r < 16'sd128) out_r <= 16'sd0;
+                    else                                       out_r <= out_r - (out_r >>> 7);
                     underrun <= 1'b1;
                 end
             end

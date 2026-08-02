@@ -400,6 +400,20 @@ static char track_trk[8];
 #define VOL_MAX   100u
 #define VOL_STEP  5u
 static uint32_t paused, volume = 65u;    /* overridden by settings.bin if present */
+
+/* Fade-in after ANY audio discontinuity, in samples (~46 ms at 44.1 kHz).
+ *
+ * Paired with pcm_fifo's glide-to-zero on underrun: the FIFO brings the held
+ * output down to silence during a gap, and this ramps the new audio up from
+ * silence after it. BOTH halves are required -- a fade alone starts at zero
+ * while the DAC still holds the old level (the step just moves), and the glide
+ * alone ends at zero and then steps up to the first full-scale sample.
+ *
+ * This includes RESUME from pause. Resume used to be click-free by accident:
+ * the held sample was waveform-continuous with the next pushed one. The glide
+ * breaks that bargain, so resume must ramp like everything else. */
+#define FADE_SAMPLES 2048u
+static uint32_t fade_left;
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -2257,7 +2271,11 @@ static void poll_input(void)
 /* Drops every sample queued in the hardware FIFO. Required on any
  * discontinuity (track change, seek, restart) -- without it the OLD position's
  * queued ~43 ms keeps draining while the new position spins up. */
-static inline void pcm_flush(void) { REG(R_PCM_ST) = 1u; }
+static inline void pcm_flush(void)
+{
+    REG(R_PCM_ST) = 1u;
+    fade_left = FADE_SAMPLES;     /* every flush is a discontinuity */
+}
 
 static uint32_t rd_seq0, rd_deadline, rd_len;
 static int      rd_pending, rd_ok;
@@ -3318,6 +3336,10 @@ int main(void)
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
             }
+            /* The FIFO drained during the pause and its output has glided to
+             * zero, so the resume must ramp up from zero like any other
+             * discontinuity -- see FADE_SAMPLES. */
+            fade_left = FADE_SAMPLES;
         }
         ui_was_paused = 0;
 
@@ -3481,6 +3503,14 @@ int main(void)
             if (vol_gain != 256) {
                 l = (l * vol_gain) >> 8;
                 r = (r * vol_gain) >> 8;
+            }
+            /* Ramp out of a discontinuity: one shift per sample, and only
+             * while the fade is live. Grows 0 -> 255/256 across FADE_SAMPLES. */
+            if (fade_left) {
+                int32_t g = (int32_t)((FADE_SAMPLES - fade_left) >> 3);
+                l = (l * g) >> 8;
+                r = (r * g) >> 8;
+                fade_left--;
             }
             /* Block while the FIFO is full -- pcm_fifo silently DROPS pushes
              * when full, so skipping this corrupts the audio rather than
