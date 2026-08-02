@@ -3065,6 +3065,38 @@ static int load_track(void)
     tag_next        = cycles() + CLK_HZ;
 
     if (!prefill()) { REG(R_STAT2) = 0xD0000000u; return 0; }
+
+    /* Warm the decoder BEFORE playback, still inside the silent gap.
+     *
+     * The user's stop-vs-skip experiment isolated this: a warm decoder starts
+     * clean, a fresh one tics. A fresh decoder's first successful frame is
+     * synthesised through empty polyphase and overlap state; decode up to and
+     * including that frame here and discard it, so the first frame that
+     * actually PLAYS goes through a decoder in steady state -- the same
+     * condition the proven-clean warm path starts from. Costs ~26 ms of gap
+     * and the first ~26 ms of the track.
+     *
+     * Discarding was tried once before and made things worse -- but that was
+     * before the glide, when the FIFO held a DC level and every extra frame
+     * lengthened the hold. The output now rests at true zero through the gap,
+     * so the trade is purely: one inaudible frame for a steady-state start. */
+    {
+        int guard = 8;                       /* never loop on a broken stream */
+        while (guard--) {
+            int bl = (int)(ring_fill - ring_rd);
+            if (bl < 512) break;
+            int off = MP3FindSyncWord(&ring[ring_rd], bl);
+            if (off < 0) break;
+            ring_rd += (uint32_t)off; bl -= off;
+            unsigned char *ib = &ring[ring_rd];
+            int before = bl;
+            int e = MP3Decode(dec, &ib, &bl, pcm, 0);
+            ring_rd += (uint32_t)(before - bl);
+            if (e == 0) break;               /* state is warm; frame discarded */
+            if (before - bl <= 0) ring_rd++;
+        }
+    }
+
     ld_pre   = LD_MS(cycles() - tphase);
     ld_total = LD_MS(cycles() - t0);
     return 1;
