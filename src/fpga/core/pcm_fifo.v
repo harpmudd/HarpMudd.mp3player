@@ -108,22 +108,8 @@ module pcm_fifo #(
                     out_r <= q[31:16];
                     rptr  <= rptr + 1'b1;
                 end else begin
-                    // Nothing to play. Decay toward silence rather than holding
-                    // the last sample.
-                    //
-                    // Holding is right for a gap of a few samples, which is what
-                    // this was written for. It is wrong for the gap a track load
-                    // opens: the output sits at an arbitrary DC level for the
-                    // best part of a second and then jumps back to audio, and
-                    // BOTH edges click. Firmware cannot fix that from its side --
-                    // it does not get to choose what the DAC emits while it is
-                    // busy.
-                    //
-                    // >>> 7 halves the level about every 90 samples, so a hold
-                    // of a few samples is still effectively a hold, while a long
-                    // one glides to zero in ~15 ms and stays there.
-                    out_l    <= out_l - (out_l >>> 7);
-                    out_r    <= out_r - (out_r >>> 7);
+                    // Hold the last sample rather than slamming to zero -- a
+                    // held level is far less audible than a hard discontinuity.
                     underrun <= 1'b1;
                 end
             end
