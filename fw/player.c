@@ -1825,20 +1825,6 @@ static void ui_draw_dynamic(void)
     /* Loud, and it stays: a wrong file size means the card's directory is
      * damaged, which will not fix itself and puts every file in that folder in
      * question -- not something to mention in a toast that scrolls away. */
-    /* TEMPORARY: load timing, so the hiccup is a number rather than a theory.
-     * H=head read (tag parse), S=size probe, A=album art, P=prefill, T=total. */
-    if (ld_total && !ui_ld_shown) {
-        ui_ld_shown = 1;
-        char b[40], *q = b;
-        *q++='H'; q=ui_dec(q, ld_head);  *q++=' ';
-        *q++='S'; q=ui_dec(q, ld_size);  *q++=' ';
-        *q++='A'; q=ui_dec(q, ld_art);   *q++=' ';
-        *q++='P'; q=ui_dec(q, ld_pre);   *q++=' ';
-        *q++='T'; q=ui_dec(q, ld_total); *q++='m'; *q++='s'; *q=0;
-        fb_set_color(UI_WHITE, UI_PANEL);
-        fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X, ui_text_w);
-    }
-
     if (size_suspect && !ui_size_warned) {
         ui_size_warned = 1;
         fb_set_color(UI_RED, UI_PANEL);
@@ -1848,7 +1834,7 @@ static void ui_draw_dynamic(void)
 
     /* Format line, drawn once the decoder has told us what the stream is. */
     uint32_t info = track_kbps * 1000u + track_hz / 100u;
-    if (track_kbps && info != ui_last_info && !size_suspect && !ld_total) {
+    if (track_kbps && info != ui_last_info && !size_suspect) {
         ui_last_info = info;
         char b[32], *q = b;
         q = ui_dec(q, track_kbps);
@@ -2780,11 +2766,18 @@ static int read_track_head(void)
     int attempt = 0, have_prev = 0;
     uint32_t skip = 0, prev_skip = 0;
     char prev_try[48];
-    for (;;) {
-
-    /* Drop APF's stale fragment cache before reading -- inside the loop, so a
-     * retry is a fresh attempt rather than another read of the same chain. */
+    /* ONCE, before the loop -- not on every retry.
+     *
+     * Flushing makes APF forget the slot's cluster chain, so the next read has
+     * to walk it from the start. That is the point of doing it after a file
+     * change, but doing it again on each retry means every attempt pays a full
+     * walk, and the walk is proportional to file size -- which is why the
+     * longest file in the set was the one that hiccuped. One flush is enough to
+     * discard the stale chain; the retries that follow want the fresh one kept,
+     * not thrown away again. */
     target_flush_slot_cache();
+
+    for (;;) {
 
     /* ...then throw away one MP3-slot read before the one that matters. Only
      * the FIRST read after a file change comes back stale: the audio has
