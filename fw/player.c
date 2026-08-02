@@ -2605,80 +2605,6 @@ static int id3_find_text(const uint8_t *ring, uint32_t avail,
     return ID3_NO_FRAME;
 }
 
-/* Walk the tag ONCE and collect every field still missing.
- *
- * id3_find_text() only sees the first 4 KB the head read brought in. That covers
- * most files, because text frames normally come before any embedded picture --
- * but nothing requires it. A file with a 15 KB APIC at offset 100 puts TIT2 at
- * 15618, far outside the window.
- *
- * Reading each 10-byte header on its own and skipping by the declared size needs
- * no buffer, so tag size stops mattering. It costs one small read per frame,
- * which is why it is the fallback -- and why it collects ALL the fields in a
- * single pass rather than being called once per field. */
-static int id3_walk_all(uint32_t tag_len)
-{
-    if (tag_len < 20u) return ID3_NO_TAG;
-    if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) return ID3_NO_TAG;
-    if (tagbuf[0] != 'I' || tagbuf[1] != 'D' || tagbuf[2] != '3') return ID3_NO_TAG;
-    uint8_t major = tagbuf[3];
-
-    struct { const char *id; char *out; uint32_t sz; } want[] = {
-        { "TIT2", track_title,  sizeof(track_title)  },
-        { "TPE2", track_artist, sizeof(track_artist) },
-        { "TALB", track_album,  sizeof(track_album)  },
-        { "TRCK", track_trk,    sizeof(track_trk)    },
-        { "TDRC", track_year,   sizeof(track_year)   },
-        { "TYER", track_year,   sizeof(track_year)   },
-    };
-    const uint32_t NW = sizeof(want) / sizeof(want[0]);
-
-    int status = ID3_NO_FRAME;
-    uint32_t p = 10;
-    while (p + 10u <= tag_len) {
-        if (!target_read_slot(MP3_SLOT_ID, p, TAG_OFF, 16u)) break;
-        if (tagbuf[0] == 0) break;                        /* padding reached */
-
-        uint32_t fsize = (major >= 4)
-            ? (((uint32_t)(tagbuf[4] & 0x7Fu) << 21) | ((uint32_t)(tagbuf[5] & 0x7Fu) << 14) |
-               ((uint32_t)(tagbuf[6] & 0x7Fu) << 7)  |  (uint32_t)(tagbuf[7] & 0x7Fu))
-            : (((uint32_t)tagbuf[4] << 24) | ((uint32_t)tagbuf[5] << 16) |
-               ((uint32_t)tagbuf[6] << 8)  |  (uint32_t)tagbuf[7]);
-        if (!fsize || p + 10u + fsize > tag_len) break;
-
-        for (uint32_t w = 0; w < NW; w++) {
-            if (want[w].out[0]) continue;                 /* already have it */
-            if (tagbuf[0] != (uint8_t)want[w].id[0] || tagbuf[1] != (uint8_t)want[w].id[1] ||
-                tagbuf[2] != (uint8_t)want[w].id[2] || tagbuf[3] != (uint8_t)want[w].id[3])
-                continue;
-            if (fsize < 2u) break;
-
-            uint32_t take = fsize;
-            if (take > want[w].sz + 1u) take = want[w].sz + 1u;
-            if (!target_read_slot(MP3_SLOT_ID, p + 10u, TAG_OFF, take)) break;
-
-            uint8_t enc = tagbuf[0];
-            if (enc == 1u || enc == 2u) {                 /* UTF-16 unsupported */
-                if (w == 0) status = ID3_UNSUPPORTED_ENCODING;
-                break;
-            }
-            uint32_t m = take - 1u;
-            if (m > want[w].sz - 1u) m = want[w].sz - 1u;
-            uint32_t i;
-            for (i = 0; i < m; i++) {
-                uint8_t c = tagbuf[1 + i];
-                if (c == 0) break;
-                want[w].out[i] = (char)c;
-            }
-            want[w].out[i] = 0;
-            if (w == 0 && i > 0) status = ID3_OK;
-            break;                                        /* one hit per frame */
-        }
-        p += 10u + fsize;
-    }
-    return status;
-}
-
 static int title_is_stale(const char *title)
 {
     if (slot_size == stale_ref_size) return 0;
@@ -2834,11 +2760,39 @@ static int read_track_head(void)
          * not in there, the text frames sit past a large picture -- so walk the
          * tag properly rather than reporting a well-formed file as untagged.
          * Only the fields actually missing are looked up again. */
-        /* Walked HERE, not deferred to the main loop. Deferring moved dozens
-         * of blocking SD reads into playback, where 43 ms of FIFO cannot cover
-         * them -- audibly worse than doing it during the load, and it made the
-         * caption arrive late. One pass collects every missing field. */
-        if (title_status != ID3_OK) title_status = id3_walk_all(skip);
+        /* Text frames past the artwork: pull MORE OF THE TAG into the ring and
+         * parse it in memory, rather than walking it a frame header at a time.
+         *
+         * The walk cost ~29 separate SD reads, all inside the window where
+         * pcm_flush() has emptied the FIFO -- audible on the one track whose
+         * frames sit past a 15 KB picture, and on no other, because no other
+         * track reaches this path. A 16 KB tag is three more 4 KB reads, and
+         * the in-memory parser then finds everything for free. The ring is
+         * 32 KB and is reloaded with audio immediately below, so filling it
+         * with tag bytes here costs nothing. */
+        if (title_status != ID3_OK && skip > ring_fill) {
+            uint32_t want = skip;
+            if (want > RING_SIZE) want = RING_SIZE;
+            int ok = 1;
+            while (ring_fill < want && ok) {
+                uint32_t n2 = want - ring_fill;
+                if (n2 > REFILL_CHUNK) n2 = REFILL_CHUNK;
+                ok = target_read(ring_fill, RING_OFF + ring_fill, n2);
+                if (ok) ring_fill += n2;
+            }
+            title_status = id3_find_text(ring, ring_fill, skip, "TIT2",
+                                         track_title,  sizeof(track_title));
+            if (!track_artist[0]) id3_find_text(ring, ring_fill, skip, "TPE2",
+                                                track_artist, sizeof(track_artist));
+            if (!track_album[0])  id3_find_text(ring, ring_fill, skip, "TALB",
+                                                track_album, sizeof(track_album));
+            if (!track_trk[0])    id3_find_text(ring, ring_fill, skip, "TRCK",
+                                                track_trk, sizeof(track_trk));
+            if (!track_year[0] && id3_find_text(ring, ring_fill, skip, "TDRC",
+                                                track_year, sizeof(track_year)) != ID3_OK)
+                id3_find_text(ring, ring_fill, skip, "TYER",
+                              track_year, sizeof(track_year));
+        }
         for (uint32_t i = 0; i < sizeof(track_trk); i++)
             if (track_trk[i] == '/') { track_trk[i] = 0; break; }  /* "5/12" -> "5" */
         if (id3_find_text(ring, ring_fill, skip, "TDRC",
