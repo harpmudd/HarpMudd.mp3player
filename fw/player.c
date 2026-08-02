@@ -638,11 +638,18 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU, VIZ_COU
 #define VU_STEPS  10u             /* segments the needle is drawn from   */
 static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
 
-/* sin/cos over 0..90 degrees in 16 steps, Q12. A needle sweeping -50..+50
- * degrees indexes this; deriving both from one table keeps it to 16 entries. */
-static const int16_t vu_sin[17] = {
-        0,  400,  799, 1194, 1583, 1966, 2340, 2703, 3053,
-     3389, 3709, 4011, 4294, 4557, 4798, 5016, 5211
+/* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
+ * sweep, which is what a real VU movement travels. The first attempt built one
+ * table and tried to derive both components from it by index arithmetic; the
+ * values ran past Q12 unity, so the sweep came out narrow and lopsided -- the
+ * 45-degree stub. Two honest tables, generated rather than hand-written. */
+static const int16_t vu_sn[17] = {
+    -3138, -2832, -2493, -2125, -1731, -1317,  -887,  -446,     0,
+      446,   887,  1317,  1731,  2125,  2493,  2832,  3138
+};
+static const int16_t vu_cs[17] = {
+     2633,  2959,  3250,  3502,  3712,  3879,  3999,  4072,  4096,
+     4072,  3999,  3879,  3712,  3502,  3250,  2959,  2633
 };
 
 #define WAVE_COLS 64u
@@ -1398,10 +1405,9 @@ static void ui_draw_dynamic(void)
                 uint32_t half = ww / 2u;
                 uint32_t ox   = UI_MARGIN + (uint32_t)ch * half;
                 uint32_t pivx = ox + half / 2u;
-                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 3u;   /* pivot at the base */
-                uint32_t len  = UI_WAVE_H - 12u;
+                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 4u;    /* pivot at the base */
+                uint32_t len  = UI_WAVE_H - 18u;
 
-                /* Target from this channel's peak, then ballistics. */
                 uint32_t pkc = ch ? peak_r : peak_l;
                 uint32_t tgt = (pkc * 255u) / 32768u;
                 if (tgt > 255u) tgt = 255u;
@@ -1411,36 +1417,55 @@ static void ui_draw_dynamic(void)
                 else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
                                 if (*v < tgt) *v = tgt; }
 
-                /* Scale arc: ticks along the sweep, brighter past 3/4 where a
-                 * real meter turns red. */
-                for (uint32_t t = 0; t <= 8u; t++) {
-                    uint32_t d  = (t * 255u) / 8u;
-                    uint32_t ai = (d * 16u) / 255u;
-                    int32_t  sx2 = vu_sin[ai], cx2 = vu_sin[16u - ai];
-                    int32_t  dx = ((int32_t)len * (sx2 - 2048)) / 4096;
-                    int32_t  dy = ((int32_t)len * cx2) / 5211;
-                    uint16_t tc = (t >= 6u) ? UI_RED : UI_TRACK;
-                    fb_rect((uint32_t)((int32_t)pivx + dx),
-                            (uint32_t)((int32_t)pivy - dy), 2, 2, tc);
+                /* Scale arc, drawn as a dense run of points along the sweep so
+                 * it reads as a continuous curve rather than scattered marks.
+                 * 33 samples across 17 table entries, interpolating between
+                 * neighbours -- the previous 9 marks were what looked
+                 * half-finished. */
+                for (uint32_t t = 0; t <= 32u; t++) {
+                    uint32_t i0 = t / 2u, i1 = (i0 < 16u) ? i0 + 1u : 16u;
+                    int32_t sn = (t & 1u) ? (vu_sn[i0] + vu_sn[i1]) / 2 : vu_sn[i0];
+                    int32_t cs = (t & 1u) ? (vu_cs[i0] + vu_cs[i1]) / 2 : vu_cs[i0];
+                    int32_t ar = (int32_t)len + 3;
+                    int32_t ax = (int32_t)pivx + (ar * sn) / 4096;
+                    int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
+                    if (ay < (int32_t)UI_WAVE_Y) continue;
+                    fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
+                            (t >= 24u) ? UI_RED : UI_TRACK);
                 }
 
-                /* Needle: short segments out from the pivot. */
-                uint32_t ai = (*v * 16u) / 255u;
-                int32_t  sx2 = vu_sin[ai], cx2 = vu_sin[16u - ai];
-                for (uint32_t k = 1; k <= VU_STEPS; k++) {
+                /* Ticks: longer marks inside the arc at fifths of the sweep. */
+                for (uint32_t t = 0; t <= 4u; t++) {
+                    uint32_t i = t * 4u;
+                    for (uint32_t d = 0; d < 4u; d++) {
+                        int32_t ar = (int32_t)len - 1 - (int32_t)d;
+                        int32_t ax = (int32_t)pivx + (ar * vu_sn[i]) / 4096;
+                        int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
+                        if (ay < (int32_t)UI_WAVE_Y) continue;
+                        fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
+                                (t >= 3u) ? UI_RED : UI_TRACK);
+                    }
+                }
+
+                uint32_t ai   = (*v * 16u) / 255u;
+                int32_t  sn   = vu_sn[ai], cs = vu_cs[ai];
+                uint16_t ncol = (*v >= 192u) ? UI_RED : ui_accent;
+                for (uint32_t k = 2; k <= VU_STEPS; k++) {
                     int32_t rr = ((int32_t)len * (int32_t)k) / (int32_t)VU_STEPS;
-                    int32_t dx = (rr * (sx2 - 2048)) / 4096;
-                    int32_t dy = (rr * cx2) / 5211;
-                    int32_t nx = (int32_t)pivx + dx, ny = (int32_t)pivy - dy;
-                    if (nx < (int32_t)UI_MARGIN || nx >= (int32_t)(UI_MARGIN + ww)) continue;
+                    int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
+                    int32_t ny = (int32_t)pivy - (rr * cs) / 4096;
+                    if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
                     if (ny < (int32_t)UI_WAVE_Y) continue;
-                    fb_rect((uint32_t)nx, (uint32_t)ny, 2, 2,
-                            (*v >= 192u) ? UI_RED : ui_accent);
+                    /* Tapered: thin at the tip, so it looks like a needle
+                     * rather than a bar. */
+                    uint32_t th = (k > VU_STEPS - 3u) ? 1u : 2u;
+                    fb_rect((uint32_t)nx, (uint32_t)ny, th, th, ncol);
                 }
-                fb_rect(pivx - 1u, pivy - 1u, 3, 3, UI_WHITE);   /* hub */
+                fb_rect(pivx - 2u, pivy - 2u, 5, 5, ncol);      /* hub */
+                fb_rect(pivx - 1u, pivy - 1u, 3, 3, bed);
 
-                fb_set_color(UI_FAINT, bed);
-                fb_text_clipped(ox + 4u, UI_WAVE_Y + 2u, ch ? "R" : "L",
+                fb_set_color(ncol, bed);
+                fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
                                 TS_1X, TS_1X, 16u);
             }
             goto viz_done;
