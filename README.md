@@ -24,9 +24,9 @@ files into:
 They can live anywhere on the card, but keeping them there puts them next to
 the core and makes them quick to find in the file browser.
 
-Two files in that folder ship with the core and aren't yours to edit:
-`mp3player.rom` is the firmware — the core won't start without it — and
-`settings.bin` is where your volume, colour and playback modes are saved.
+`mp3player.rom` in that folder is the firmware — the core won't start without
+it. `settings/settings.bin` holds your volume, colour and playback modes.
+Neither is yours to edit, and nothing else belongs in `settings/`.
 
 ## Playing
 
@@ -58,10 +58,10 @@ Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
 
-Volume, accent colour, repeat, shuffle, the meter style and the art panel reset
-to defaults on relaunch. The core reads `settings.bin` if you place one on the
-card, but **it never writes to the SD card at all** — see
-[Known limitations](#known-limitations).
+Volume, accent colour, repeat, shuffle, the meter style and the art panel are
+remembered between sessions, saved to `settings/settings.bin` beside the core.
+Writing happens when playback is paused or stopped, or as you open the Analogue
+menu, so it never interrupts a track.
 
 Hiding the album art is a preference, not a per-track state: a track with no
 artwork hides the panel without forgetting you want it, so the next track that
@@ -151,12 +151,12 @@ back with one path component changed. Nothing about the layout is assumed.
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
-- **Settings are not saved.** Writing them back was implemented and then
-  disabled: twice, every `.mp3` in the core's folder came back reporting the
-  same wrong size, while the settings file itself was untouched and the audio
-  data intact. That is what a damaged directory entry looks like, not a damaged
-  file, and the write was the only thing this core put on the card. It is off
-  until that is understood — a music player must not be able to harm a library.
+- **The saved-settings file lives in its own folder**, `settings/`, and is the
+  only thing this core ever writes. It is kept apart from your music
+  deliberately: earlier builds wrote it alongside the `.mp3` files and twice
+  every file in that folder came back reporting the same wrong size, with the
+  audio itself intact — the signature of a damaged directory entry rather than a
+  damaged file. Keep `.mp3` files out of `settings/`.
 
 ## Credits
 

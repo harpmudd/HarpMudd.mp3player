@@ -12,7 +12,8 @@
  * things have been quiet for a moment.
  */
 
-/* WRITING IS DISABLED. Do not re-enable without reading the note below.
+/* WRITING IS ENABLED, but only because the file now lives ALONE in its own
+ * directory. Read the note below before changing that.
  *
  * Twice now, every .mp3 in /Assets/mp3player/common/ has come back with the
  * SAME wrong size -- 21,037,825 the first time, 21,365,505 the second -- while
@@ -30,11 +31,15 @@
  * Reading stays enabled, so a settings.bin placed on the card by hand is still
  * honoured -- only the write-back is gone.
  *
- * If this is revisited: the first thing to try is giving the writable file its
- * OWN directory, containing nothing else. If the damage really is collateral to
- * a directory-sector rewrite, isolating our file means only our file is at
- * risk. Test that on a card with nothing valuable on it. */
-#define SETTINGS_WRITE 0
+ * MITIGATION IN PLACE: settings.bin now lives in its own subdirectory,
+ * .../common/settings/, containing nothing else. If the damage is collateral to
+ * a directory sector being rewritten, the only entry in that sector is our own
+ * file -- the user's music is in the parent directory and is not part of it.
+ *
+ * This is a reasoned mitigation, NOT a proven fix. The mechanism was never
+ * confirmed, only inferred from the signature. If .mp3 sizes go wrong again,
+ * set SETTINGS_WRITE back to 0 first and ask questions afterwards. */
+#define SETTINGS_WRITE 1
 
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
