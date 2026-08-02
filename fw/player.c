@@ -549,6 +549,16 @@ typedef struct {
     uint32_t y, scale, on, pos, next;
 } ui_marquee_t;
 static ui_marquee_t ui_mq_title, ui_mq_artist;
+/* Visualisations, cycled with X. The choice persists in settings.bin.
+ *
+ * All three run off what the decoder already produces -- there are no frequency
+ * bins here, so none of these is a spectrum: BARS and WATER show loudness over
+ * TIME, LEVELS shows the two channels right now. */
+enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_COUNT };
+static uint8_t  viz_mode;
+static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
+static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
+
 static unsigned char wave[UI_WAVE_N], wave_drawn[UI_WAVE_N];
 static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
 
@@ -869,6 +879,12 @@ static void ui_icon_shuffle(uint32_t x, uint32_t y, uint16_t c)
     fb_rect(x + UI_MODE_W - 1u, y + UI_MODE_H-3, 1u, 3u, c);
 }
 
+/* Stop: a filled square, the universal counterpart to the pause bars. */
+static void ui_icon_stop(uint32_t x, uint32_t y, uint16_t c)
+{
+    fb_rect(x, y, UI_ICON_W, UI_ICON_H, c);
+}
+
 static void ui_icon_pause(uint32_t x, uint32_t y, uint16_t c)
 {
     uint32_t bar = UI_ICON_W / 3u;
@@ -1153,6 +1169,63 @@ static void ui_draw_dynamic(void)
         uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
                               UI_WAVE_Y * UI_BANDS / FB_H, UI_BANDS);
 
+        /* ---- WATERFALL ----------------------------------------------------
+         * Scroll the whole strip one pixel left with a single COPY, then draw
+         * only the new right-hand column. That is ~4 commands a frame against
+         * the bars' ~72, because COPY moves a block for the price of one
+         * command -- the same primitive the album-art slide uses.
+         *
+         * Colour encodes loudness, so the strip becomes a picture of the
+         * track's dynamics rather than an instantaneous reading. */
+        if (viz_mode == VIZ_WATER) {
+            const uint32_t x0 = UI_MARGIN, w = ww;
+            if (!paused) {
+                fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
+
+                uint32_t a = (peak_amp * UI_WAVE_H) / 32768u;
+                if (a > UI_WAVE_H) a = UI_WAVE_H;
+
+                /* Column drawn as three bands -- quiet bed, body, hot tip --
+                 * so loud passages read as brighter AND taller. */
+                uint32_t cx = x0 + w - 1u;
+                fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H - a, bed);
+                if (a) {
+                    uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_H);
+                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, a, c);
+                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, 1, UI_WHITE);
+                }
+            }
+            goto viz_done;
+        }
+
+        /* ---- L/R LEVELS ---------------------------------------------------
+         * The only mode that uses stereo information; the others collapse both
+         * channels into one number. Two bars plus two peak-hold markers. */
+        if (viz_mode == VIZ_LEVELS) {
+            uint32_t la = (peak_l * ww) / 32768u; if (la > ww) la = ww;
+            uint32_t ra = (peak_r * ww) / 32768u; if (ra > ww) ra = ww;
+            if (!paused) { lvl_l = (unsigned char)(la * 255u / (ww ? ww : 1u));
+                           lvl_r = (unsigned char)(ra * 255u / (ww ? ww : 1u)); }
+            if (lvl_l > lvl_pl) lvl_pl = lvl_l; else if (lvl_pl) lvl_pl--;
+            if (lvl_r > lvl_pr) lvl_pr = lvl_r; else if (lvl_pr) lvl_pr--;
+
+            const uint32_t bh = UI_WAVE_H / 3u;          /* bar height */
+            const uint32_t gap = UI_WAVE_H - 2u * bh;    /* space between */
+            uint16_t lit = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
+            for (int ch = 0; ch < 2; ch++) {
+                uint32_t y  = UI_WAVE_Y + (ch ? bh + gap : 0u);
+                uint32_t v  = ch ? lvl_r : lvl_l;
+                uint32_t pk = ch ? lvl_pr : lvl_pl;
+                uint32_t bw = (v  * ww) / 255u;
+                uint32_t px = (pk * ww) / 255u;
+                if (bw) fb_rect(UI_MARGIN, y, bw, bh, lit);
+                if (bw < ww) fb_rect(UI_MARGIN + bw, y, ww - bw, bh, UI_TRACK);
+                if (px > bw + 1u && px < ww)
+                    fb_rect(UI_MARGIN + px, y, 1, bh, UI_WHITE);
+            }
+            goto viz_done;
+        }
+
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             /* Bar edges come from scaling the index across the full width, so
              * the row always reaches its right edge. A single per-bar width
@@ -1184,6 +1257,7 @@ static void ui_draw_dynamic(void)
             if (pk > h + 1u)                       /* 1 px peak-hold marker */
                 fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 1, UI_WHITE);
         }
+    viz_done: ;
     }
 
     /* Sticky underrun latch (pcm_fifo.v) stays set until the next pcm_flush()
@@ -1388,14 +1462,20 @@ static void ui_draw_dynamic(void)
         uint32_t lvl = (ph < 32u) ? ph : (63u - ph);
 
         if (paused) {
-            uint16_t c = ui_mix(UI_PANEL, UI_WHITE, lvl, 31u);
-            fb_rect(lx, ly, lbl_w + 8u, FB_CELL(TS_1X), tbg);
-            fb_set_color(c, tbg);
-            fb_text_clipped(lx, ly, stopped ? "STOPPED" : "PAUSED",
-                            TS_1X, TS_1X, lbl_w + 8u);
-            fb_rect(ix, iy, UI_ARR_SPAN, UI_ICONBOX_H, tbg);
-            ui_icon_pause(ix, iy, c);
-            ui_last_pause = 0xFFFFFFFFu;      /* force a repaint on resume */
+            /* Stopped is a settled state, so it does not breathe -- the pulse
+             * says "waiting to resume", which stop is not. It also means the
+             * label and icon are drawn once instead of every frame. */
+            uint16_t c = stopped ? UI_WHITE : ui_mix(UI_PANEL, UI_WHITE, lvl, 31u);
+            if (!stopped || ui_last_pause != 2u) {
+                fb_rect(lx, ly, lbl_w + 8u, FB_CELL(TS_1X), tbg);
+                fb_set_color(c, tbg);
+                fb_text_clipped(lx, ly, stopped ? "STOPPED" : "PAUSED",
+                                TS_1X, TS_1X, lbl_w + 8u);
+                fb_rect(ix, iy, UI_ARR_SPAN, UI_ICONBOX_H, tbg);
+                if (stopped) ui_icon_stop(ix, iy, c);
+                else         ui_icon_pause(ix, iy, c);
+            }
+            ui_last_pause = stopped ? 2u : 0xFFFFFFFFu;
         } else {
             if (ui_last_pause != 0u) {
                 ui_last_pause = 0u;
@@ -1512,6 +1592,7 @@ static void ui_draw_dynamic(void)
 #define KEY_RIGHT   (1u << 3)
 #define KEY_A       (1u << 4)
 #define KEY_B       (1u << 5)
+#define KEY_X       (1u << 6)
 #define KEY_L1      (1u << 8)
 #define KEY_R1      (1u << 9)
 #define KEY_SELECT  (1u << 14)
@@ -1579,6 +1660,18 @@ static void poll_input(void)
     if (edge & KEY_A) {
         paused ^= 1u;
         if (!(paused & 1u)) stopped = 0;      /* playing is never "stopped" */
+    }
+    if (edge & KEY_X) {
+        viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        ui_wave_clear();                 /* modes do not share a screen layout */
+        ui_wave_force = 1u;
+        for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+            wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+        }
+        ui_toast_msg(viz_mode == VIZ_BARS  ? "METER: BARS"
+                   : viz_mode == VIZ_WATER ? "METER: WATERFALL"
+                                           : "METER: L/R LEVELS");
+        settings_mark_dirty();
     }
     if (edge & KEY_START) {
         if (!stopped) { stopped = 1u; paused |= 1u; stop_req = 1u; }
@@ -2739,13 +2832,17 @@ int main(void)
         /* Real amplitude, not a proxy: max |sample| over the frame just
          * decoded, so the meter reflects what is actually playing. */
         {
-            int32_t pk = 0;
-            for (int i = 0; i < n; i++) {
-                int32_t v = pcm[i];
-                if (v < 0) v = -v;
-                if (v > pk) pk = v;
+            int32_t pk = 0, pkl = 0, pkr = 0;
+            for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
+                int32_t l = pcm[i];        if (l < 0) l = -l;
+                int32_t r = stereo ? pcm[i + 1] : l; if (r < 0) r = -r;
+                if (l > pkl) pkl = l;
+                if (r > pkr) pkr = r;
             }
+            pk = (pkl > pkr) ? pkl : pkr;
             peak_amp = (uint32_t)pk;
+            peak_l   = (uint32_t)pkl;
+            peak_r   = (uint32_t)pkr;
         }
 
         for (int i = 0; i < n; i += (stereo ? 2 : 1)) {

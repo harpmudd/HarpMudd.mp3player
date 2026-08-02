@@ -45,6 +45,7 @@ playlists at any time.
 | **Left** / **Right** | *Hold* — seek back / forward |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
+| **X** | Cycle the meter: bars, waterfall, L/R levels |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
@@ -91,8 +92,8 @@ everything once before repeating any.
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **A spectrum meter** driven by the decoder's own subband data, so it follows
-  the actual audio.
+- **A meter**, in three styles cycled with **X**: scrolling bars, a waterfall
+  strip that colours loudness over time, and per-channel L/R levels.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, and the
   track position in the playlist when one is loaded.
