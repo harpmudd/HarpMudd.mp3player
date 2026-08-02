@@ -603,7 +603,14 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_COUNT };
  * Points are captured during decode rather than read from pcm[] at draw time:
  * the buffer is refilled every frame and the UI runs on its own schedule, so
  * drawing from it directly would sample whatever happened to be there. */
-#define SCOPE_N 96u
+#define SCOPE_N 48u
+/* Frames of persistence. A vectorscope drawn as isolated dots, cleared every
+ * pass, never builds into a shape -- what makes a real one readable is the
+ * phosphor holding the trace while it moves. Keeping a few frames and drawing
+ * the older ones dimmer costs a little more per pass but multiplies what is on
+ * screen: 48 points x 4 frames reads as a continuous figure where 96 fresh dots
+ * read as static. */
+#define SCOPE_HIST 4u
 /* Capture is normalised to a fixed +-SCOPE_UNIT; the DRAW scales that onto the
  * box. Splitting it that way is what lets x and y have different extents: the
  * meter area is 246x72, so an isotropic trace can only ever be 72 px across and
@@ -611,7 +618,8 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_COUNT };
  * and exaggerates stereo width, while mono still collapses to x = 0 and
  * out-of-phase still lies flat -- the readings that matter are preserved. */
 #define SCOPE_UNIT 100
-static signed char scope_x[SCOPE_N], scope_y[SCOPE_N];
+static signed char scope_x[SCOPE_HIST][SCOPE_N], scope_y[SCOPE_HIST][SCOPE_N];
+static uint8_t     scope_head;   /* newest frame */
 static uint8_t  viz_mode;
 static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
 static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
@@ -1360,15 +1368,22 @@ static void ui_draw_dynamic(void)
             if (!paused) {
                 const int32_t ex = (int32_t)(ww / 2u) - 2;   /* horizontal reach */
                 const int32_t ey = (int32_t)r - 2;           /* vertical reach   */
-                for (uint32_t k = 0; k < SCOPE_N; k++) {
-                    int32_t px = (int32_t)cx + (scope_x[k] * ex) / SCOPE_UNIT;
-                    int32_t py = (int32_t)cy - (scope_y[k] * ey) / SCOPE_UNIT;
-                    if (px < (int32_t)UI_MARGIN || px >= (int32_t)(UI_MARGIN + ww)) continue;
-                    if (py < (int32_t)UI_WAVE_Y || py >= (int32_t)(UI_WAVE_Y + UI_WAVE_H)) continue;
-                    /* Newest points brightest, so the trace has a direction
-                     * instead of looking like static. */
-                    uint16_t c = ui_mix(UI_TRACK, ui_accent, k + 1u, SCOPE_N);
-                    fb_rect((uint32_t)px, (uint32_t)py, 2, 2, c);
+                /* Oldest first, so the newest trace lands on top of the
+                 * fading ones rather than under them. */
+                for (uint32_t age = SCOPE_HIST; age-- > 0; ) {
+                    uint32_t f = (scope_head + SCOPE_HIST - age) % SCOPE_HIST;
+                    const signed char *sx = scope_x[f], *sy = scope_y[f];
+                    uint16_t c  = ui_mix(bed, ui_accent, SCOPE_HIST - age, SCOPE_HIST);
+                    uint32_t sz = age ? 1u : 2u;     /* newest trace is fatter */
+                    for (uint32_t k = 0; k < SCOPE_N; k++) {
+                        int32_t px = (int32_t)cx + (sx[k] * ex) / SCOPE_UNIT;
+                        int32_t py = (int32_t)cy - (sy[k] * ey) / SCOPE_UNIT;
+                        if (px < (int32_t)UI_MARGIN ||
+                            px + (int32_t)sz > (int32_t)(UI_MARGIN + ww)) continue;
+                        if (py < (int32_t)UI_WAVE_Y ||
+                            py + (int32_t)sz > (int32_t)(UI_WAVE_Y + UI_WAVE_H)) continue;
+                        fb_rect((uint32_t)px, (uint32_t)py, sz, sz, c);
+                    }
                 }
             }
             goto viz_done;
@@ -3046,14 +3061,16 @@ int main(void)
                  * than sums, so mid and side each span +-pk and the reciprocal
                  * maps them exactly onto the box. */
                 int32_t scale = ((int32_t)SCOPE_UNIT << 15) / (int32_t)pk;
+                scope_head = (uint8_t)((scope_head + 1u) % SCOPE_HIST);
+                signed char *sx = scope_x[scope_head], *sy = scope_y[scope_head];
                 for (uint32_t k = 0; k < SCOPE_N; k++) {
                     uint32_t idx = k * step;
                     int32_t l = pcm[stereo ? idx * 2u : idx];
                     int32_t r = stereo ? pcm[idx * 2u + 1u] : l;
                     int32_t mid  = (l + r) / 2;      /* mono -> x = 0 */
                     int32_t side = (l - r) / 2;
-                    scope_x[k] = (signed char)((side * scale) >> 15);
-                    scope_y[k] = (signed char)((mid  * scale) >> 15);
+                    sx[k] = (signed char)((side * scale) >> 15);
+                    sy[k] = (signed char)((mid  * scale) >> 15);
                 }
             }
         }
