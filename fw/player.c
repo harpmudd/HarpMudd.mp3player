@@ -612,13 +612,20 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_COUNT };
  * read as static. */
 #define SCOPE_HIST 4u
 
-/* Oscilloscope: min and max of the mid signal over each column's slice of the
- * frame, drawn as one vertical rect. The whole box is cleared once first, so
- * the cost is one command per column -- cheaper than the bars, and it shows
- * waveform SHAPE rather than level: a kick, a sustained note and silence all
- * look different, which none of the other modes manage. */
+/* Oscilloscope: a short TRIGGERED window, not the whole frame's envelope.
+ *
+ * Min/max across each column's slice filled almost the whole box, because a
+ * column covering ~18 samples spans several cycles of anything above a few
+ * hundred Hz -- the envelope of a frame is nearly always full scale. Showing a
+ * brief window instead means the columns follow the wave itself, so the trace
+ * is thin and you can see the shape moving.
+ *
+ * The window starts at a rising zero crossing so successive frames line up
+ * instead of sliding; without that the trace skates sideways and reads as
+ * noise. */
 #define WAVE_COLS 64u
-static signed char wav_lo[WAVE_COLS], wav_hi[WAVE_COLS];
+#define WAVE_SPAN 4u              /* samples per column -- 256 sample window */
+static signed char wav_v[WAVE_COLS];
 /* Capture is normalised to a fixed +-SCOPE_UNIT; the DRAW scales that onto the
  * box. Splitting it that way is what lets x and y have different extents: the
  * meter area is 246x72, so an isotropic trace can only ever be 72 px across and
@@ -1368,19 +1375,28 @@ static void ui_draw_dynamic(void)
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);      /* zero line */
 
             if (!paused) {
+                int32_t prev_y = 0;
                 for (uint32_t c = 0; c < WAVE_COLS; c++) {
                     uint32_t x  = UI_MARGIN + (c * ww) / WAVE_COLS;
                     uint32_t xn = UI_MARGIN + ((c + 1u) * ww) / WAVE_COLS;
                     uint32_t w  = (xn > x) ? (xn - x) : 1u;
 
-                    int32_t lo = (wav_lo[c] * ey) / SCOPE_UNIT;
-                    int32_t hi = (wav_hi[c] * ey) / SCOPE_UNIT;
-                    if (lo < -ey) lo = -ey;
-                    if (hi >  ey) hi =  ey;
-                    if (hi < lo) hi = lo;
+                    int32_t v = (wav_v[c] * ey) / SCOPE_UNIT;
+                    if (v >  ey) v =  ey;
+                    if (v < -ey) v = -ey;
+
+                    /* Span from the previous sample to this one, so the trace
+                     * is continuous rather than a row of disconnected marks --
+                     * and stays thin, because consecutive samples in a short
+                     * window are close together. */
+                    int32_t a = (c == 0) ? v : prev_y;
+                    int32_t lo = (a < v) ? a : v;
+                    int32_t hi = (a < v) ? v : a;
+                    prev_y = v;
 
                     uint32_t top = (uint32_t)((int32_t)cy - hi);
-                    uint32_t h   = (uint32_t)(hi - lo) + 1u;
+                    uint32_t h   = (uint32_t)(hi - lo) + 2u;   /* min 2 px line */
+                    if (top + h > UI_WAVE_Y + UI_WAVE_H) h = UI_WAVE_Y + UI_WAVE_H - top;
                     uint16_t col = ui_mix(UI_TRACK, ui_accent, c + 1u, WAVE_COLS);
                     fb_rect(x, top, w, h, col);
                 }
@@ -3132,20 +3148,26 @@ int main(void)
                  * each slice rather than a single sample: point-sampling a
                  * waveform at 64 points aliases badly and the trace jumps
                  * about; the envelope is stable and shows the real shape. */
-                uint32_t cstep = pairs / WAVE_COLS;
-                if (cstep) {
+                uint32_t need = WAVE_COLS * WAVE_SPAN;
+                if (pairs > need) {
+                    /* Trigger: first rising crossing of zero, searched only in
+                     * the slack between the window and the frame so there is
+                     * always a full window left to draw. */
+                    uint32_t trig = 0, limit = pairs - need;
+                    int32_t prev = 0;
+                    for (uint32_t i2 = 0; i2 < limit; i2++) {
+                        int32_t l = pcm[stereo ? i2 * 2u : i2];
+                        int32_t rr = stereo ? pcm[i2 * 2u + 1u] : l;
+                        int32_t m = (l + rr) / 2;
+                        if (prev < 0 && m >= 0) { trig = i2; break; }
+                        prev = m;
+                    }
                     for (uint32_t c = 0; c < WAVE_COLS; c++) {
-                        int32_t lo = 32767, hi = -32768;
-                        for (uint32_t j = 0; j < cstep; j++) {
-                            uint32_t idx = c * cstep + j;
-                            int32_t l = pcm[stereo ? idx * 2u : idx];
-                            int32_t rr = stereo ? pcm[idx * 2u + 1u] : l;
-                            int32_t m = (l + rr) / 2;
-                            if (m < lo) lo = m;
-                            if (m > hi) hi = m;
-                        }
-                        wav_lo[c] = (signed char)((lo * scale) >> 15);
-                        wav_hi[c] = (signed char)((hi * scale) >> 15);
+                        uint32_t idx = trig + c * WAVE_SPAN;
+                        int32_t l = pcm[stereo ? idx * 2u : idx];
+                        int32_t rr = stereo ? pcm[idx * 2u + 1u] : l;
+                        int32_t m = (l + rr) / 2;
+                        wav_v[c] = (signed char)((m * scale) >> 15);
                     }
                 }
             }
