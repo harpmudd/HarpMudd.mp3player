@@ -350,6 +350,9 @@ static uint32_t samprate;         /* set once rate_set; needed for elapsed-time 
 static uint32_t audio_start;             /* first byte after any ID3 tag */
 static uint32_t bytes_per_sec = 16000u;  /* refined once decoding */
 static uint32_t track_kbps, track_hz;
+static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
+static uint8_t  size_suspect;     /* directory disagrees with the file itself   */
+static uint8_t  ui_size_warned;
 /* Total frames declared by a Xing/Info/VBRI header, 0 when the file has none.
  * Duration from size/bitrate is only right for CBR -- on a VBR file the first
  * frame's bitrate is not the file's average, which is why both the total time
@@ -1198,6 +1201,7 @@ static void ui_draw_chrome(void)
      * line's draw is gated on track_kbps being non-zero. Whoever resets
      * rate_set clears it instead. */
     ui_underrun_shown = 0;
+    ui_size_warned    = 0;
 }
 
 /* A load failure used to spin in `for(;;){}`, which is the worst possible
@@ -1809,9 +1813,19 @@ static void ui_draw_dynamic(void)
     ui_marq_step(&ui_mq_title,  UI_WHITE);
     ui_marq_step(&ui_mq_artist, UI_DIM);
 
+    /* Loud, and it stays: a wrong file size means the card's directory is
+     * damaged, which will not fix itself and puts every file in that folder in
+     * question -- not something to mention in a toast that scrolls away. */
+    if (size_suspect && !ui_size_warned) {
+        ui_size_warned = 1;
+        fb_set_color(UI_RED, UI_PANEL);
+        fb_text_clipped(UI_MARGIN, ui_info_y, "! FILE SIZE WRONG - CHECK SD CARD",
+                        TS_1X, TS_1X, ui_text_w);
+    }
+
     /* Format line, drawn once the decoder has told us what the stream is. */
     uint32_t info = track_kbps * 1000u + track_hz / 100u;
-    if (track_kbps && info != ui_last_info) {
+    if (track_kbps && info != ui_last_info && !size_suspect) {
         ui_last_info = info;
         char b[32], *q = b;
         q = ui_dec(q, track_kbps);
@@ -2689,12 +2703,21 @@ static uint32_t vbr_frame_count(void)
             uint32_t flags = ((uint32_t)ring[i+4] << 24) | ((uint32_t)ring[i+5] << 16) |
                              ((uint32_t)ring[i+6] << 8)  |  (uint32_t)ring[i+7];
             if (!(flags & 1u)) return 0;            /* no FRAMES field */
+            /* The BYTES field, when present, is the file's own statement of how
+             * long its audio is -- an exact figure to check the directory
+             * against, where a bitrate estimate is only a guess on VBR. */
+            if (flags & 2u)
+                track_bytes = ((uint32_t)ring[i+12] << 24) | ((uint32_t)ring[i+13] << 16) |
+                              ((uint32_t)ring[i+14] << 8)  |  (uint32_t)ring[i+15];
             return ((uint32_t)ring[i+8]  << 24) | ((uint32_t)ring[i+9]  << 16) |
                    ((uint32_t)ring[i+10] << 8)  |  (uint32_t)ring[i+11];
         }
-        if (a == 'V' && b == 'B' && c == 'R' && d == 'I')
+        if (a == 'V' && b == 'B' && c == 'R' && d == 'I') {
+            track_bytes = ((uint32_t)ring[i+10] << 24) | ((uint32_t)ring[i+11] << 16) |
+                          ((uint32_t)ring[i+12] << 8)  |  (uint32_t)ring[i+13];
             return ((uint32_t)ring[i+14] << 24) | ((uint32_t)ring[i+15] << 16) |
                    ((uint32_t)ring[i+16] << 8)  |  (uint32_t)ring[i+17];
+        }
     }
     return 0;
 }
@@ -2839,7 +2862,34 @@ static int read_track_head(void)
         if (!target_read(skip, RING_OFF, REFILL_CHUNK)) return 0;
         ring_fill = REFILL_CHUNK;
     }
+    track_bytes  = 0;
+    size_suspect = 0;
     track_frames = vbr_frame_count();
+
+    /* CROSS-CHECK the directory against the file's own account of itself.
+     *
+     * A Xing/VBRI BYTES field states exactly how many bytes of audio follow the
+     * header, so audio_start + that is the file's real length -- give or take an
+     * ID3v1 trailer. A corrupt directory entry inflates the SIZE while leaving
+     * the audio intact, which is the damage seen twice on this card: .mp3s
+     * reporting ~4x their true length with every frame still decoding.
+     *
+     * 1/4 over is far beyond any legitimate trailer and far below the observed
+     * corruption, so it neither cries wolf nor misses the real thing. Files
+     * without a Xing header simply are not checked -- a precise test on some
+     * files beats a vague one on all of them. */
+    if (track_bytes && slot_size) {
+        uint32_t real = audio_start + track_bytes;
+        if (slot_size > real + real / 4u) {
+            size_suspect = 1;
+            slot_size    = real;      /* trust the audio, not the directory */
+        }
+    }
+    /* Nothing to check on a file with no Xing/VBRI header -- it never states
+     * its own length, so there is nothing to disagree with. Better an exact
+     * test on the files that can be tested than a guess applied to all of
+     * them; a player that cries wolf about healthy files is worse than one
+     * that stays quiet about a case it genuinely cannot judge. */
     return 1;
 }
 
@@ -3257,6 +3307,7 @@ int main(void)
             if (track_frames && fi.nChans && fi.samprate) {
                 uint32_t spf = (uint32_t)fi.outputSamps / (uint32_t)fi.nChans;
                 track_secs = (uint32_t)(((uint64_t)track_frames * spf) / fi.samprate);
+
             }
             rate_set = 1;
             st0 |= (1u << 2); REG(R_STAT0) = st0;
