@@ -1,8 +1,8 @@
 # MP3 Player — Analogue Pocket
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, ID3 tags, a
-spectrum meter and a progress bar.
+decodes and plays it straight off the SD card, with album art, ID3 tags, six
+switchable meters and a progress bar.
 
 The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
@@ -58,9 +58,14 @@ Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
 
-Volume, accent colour, repeat, shuffle and the art panel are remembered between
-sessions — they're written to `settings.bin` beside the core a moment after you
-change them.
+Volume, accent colour, repeat, shuffle, the meter style and the art panel are
+remembered between sessions, saved to `settings.bin` beside the core. Writing
+happens when playback is paused or stopped, or as you open the Analogue menu, so
+it never interrupts a track.
+
+Hiding the album art is a preference, not a per-track state: a track with no
+artwork hides the panel without forgetting you want it, so the next track that
+has some brings it back.
 
 ## Playlists
 
@@ -92,9 +97,20 @@ everything once before repeating any.
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **A meter**, in six styles cycled with **X**: scrolling bars, a waterfall
-  strip that colours loudness over time, per-channel L/R levels, a stereo phase
-  scope, an oscilloscope, and a pair of analogue VU needles.
+- **Six meters**, cycled with **X** and remembered between sessions:
+  - **Bars** — scrolling loudness history with peak-hold markers.
+  - **Waterfall** — a strip scrolling left, colour tracking loudness, building a
+    picture of the track's dynamics.
+  - **L/R levels** — horizontal bars per channel.
+  - **Phase scope** — a goniometer with fading trails. Vertical is mono, wide is
+    a wide mix, horizontal is out of phase.
+  - **Oscilloscope** — the waveform itself, from a short window triggered on a
+    zero crossing so the trace holds still.
+  - **VU** — twin analogue needles with real ballistics, a 100° sweep, and a
+    fall to rest when you pause.
+
+  None of them is a spectrum: the decoder doesn't expose frequency bins, so
+  these show loudness, waveform and stereo rather than frequency content.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, and the
   track position in the playlist when one is loaded.
@@ -115,11 +131,15 @@ display works the same way: the CPU sends drawing commands to a framebuffer
 engine rather than writing pixels itself, keeping the interface out of the
 decoder's way.
 
-Reading the file uses two Analogue framework commands that no core had driven
-before. Making them work meant fixing a handshake bug — the "command finished"
-signal stays asserted until the *next* command starts, so a naive reader sees
-the previous command's completion and every read after the first returns
-nothing.
+Reading files uses Analogue framework commands no core had driven before, for
+random reads, opening a file by name and writing one back. Making them work meant
+fixing a handshake bug — the "command finished" signal stays asserted until the
+*next* command starts, so a naive reader sees the previous command's completion
+and every read after the first returns nothing.
+
+Switching tracks in a playlist leans on the same path: the core asks the
+framework to describe the file already in the slot, then hands that description
+back with one path component changed. Nothing about the layout is assumed.
 
 ## Known limitations
 
@@ -129,6 +149,11 @@ nothing.
   are not handled.
 - **JPEG album art only.** PNG cover art is detected and skipped.
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
+- **No spectrum display.** The decoder doesn't expose frequency bins, so the
+  meters show loudness, waveform and stereo instead.
+- **A settings change made while playing is written when you next pause or open
+  the menu**, not immediately. Cutting power mid-track without doing either
+  loses that change.
 
 ## Credits
 
