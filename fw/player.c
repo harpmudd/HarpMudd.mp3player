@@ -603,8 +603,14 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_COUNT };
  * Points are captured during decode rather than read from pcm[] at draw time:
  * the buffer is refilled every frame and the UI runs on its own schedule, so
  * drawing from it directly would sample whatever happened to be there. */
-#define SCOPE_N 64u
-#define SCOPE_R 30u             /* peak maps here, inside the 36 px half-height */
+#define SCOPE_N 96u
+/* Capture is normalised to a fixed +-SCOPE_UNIT; the DRAW scales that onto the
+ * box. Splitting it that way is what lets x and y have different extents: the
+ * meter area is 246x72, so an isotropic trace can only ever be 72 px across and
+ * sits as a small blob in a wide empty rectangle. Stretching x fills the space
+ * and exaggerates stereo width, while mono still collapses to x = 0 and
+ * out-of-phase still lies flat -- the readings that matter are preserved. */
+#define SCOPE_UNIT 100
 static signed char scope_x[SCOPE_N], scope_y[SCOPE_N];
 static uint8_t  viz_mode;
 static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
@@ -1352,9 +1358,11 @@ static void ui_draw_dynamic(void)
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);
 
             if (!paused) {
+                const int32_t ex = (int32_t)(ww / 2u) - 2;   /* horizontal reach */
+                const int32_t ey = (int32_t)r - 2;           /* vertical reach   */
                 for (uint32_t k = 0; k < SCOPE_N; k++) {
-                    int32_t px = (int32_t)cx + scope_x[k];
-                    int32_t py = (int32_t)cy - scope_y[k];
+                    int32_t px = (int32_t)cx + (scope_x[k] * ex) / SCOPE_UNIT;
+                    int32_t py = (int32_t)cy - (scope_y[k] * ey) / SCOPE_UNIT;
                     if (px < (int32_t)UI_MARGIN || px >= (int32_t)(UI_MARGIN + ww)) continue;
                     if (py < (int32_t)UI_WAVE_Y || py >= (int32_t)(UI_WAVE_Y + UI_WAVE_H)) continue;
                     /* Newest points brightest, so the trace has a direction
@@ -3037,7 +3045,7 @@ int main(void)
                  * One divide per frame, then a shift per point. Averages rather
                  * than sums, so mid and side each span +-pk and the reciprocal
                  * maps them exactly onto the box. */
-                int32_t scale = ((int32_t)SCOPE_R << 15) / (int32_t)pk;
+                int32_t scale = ((int32_t)SCOPE_UNIT << 15) / (int32_t)pk;
                 for (uint32_t k = 0; k < SCOPE_N; k++) {
                     uint32_t idx = k * step;
                     int32_t l = pcm[stereo ? idx * 2u : idx];
