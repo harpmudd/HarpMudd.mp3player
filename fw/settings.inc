@@ -120,11 +120,27 @@ static int settings_store(void)
 /* Called from the main loop. Does nothing until the settings have been stable
  * for SET_QUIET, so a held volume button costs one write rather than a dozen.
  * Deliberately not called while a track is loading -- see the call site. */
+/* The FIFO holds 2048 samples, ~43 ms. Writing with it nearly full means the
+ * decoder can be stalled for the length of an SD write without the DAC ever
+ * running dry -- which is what the faint tic on every settings change was. */
+#define SET_PCM_SAFE  1792u              /* 7/8 of the FIFO */
+#define SET_PATIENCE  (CLK_HZ * 15u)     /* ...but do not defer forever */
+
 static void settings_pump(void)
 {
     if (!set_dirty_at) return;
     if (!set_flush_now &&
         (int32_t)(cycles() - (set_dirty_at + SET_QUIET)) < 0) return;
+
+    /* Take the stall at the widest margin available rather than the instant
+     * the debounce expires. Nothing to protect when paused, and the menu-open
+     * flush has already paused playback. */
+    if (!set_flush_now && !paused &&
+        (int32_t)(cycles() - (set_dirty_at + SET_PATIENCE)) < 0) {
+        if (pcm_level() < SET_PCM_SAFE) return;
+        if (ring_fill - ring_rd < RING_SIZE / 2u) return;
+    }
+
     set_flush_now = 0;
     set_dirty_at = 0;
 
