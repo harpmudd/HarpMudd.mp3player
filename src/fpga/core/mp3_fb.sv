@@ -579,13 +579,28 @@ module mp3_fb (
     wire [10:0] vsub  = vc - VOFF;
     wire        top_guard = active && (vsub < GUARD_TOP);
 
+    // Blank until the CPU has drawn something.
+    //
+    // SDRAM powers up holding garbage and scanout displays it the moment video
+    // comes alive, which is well before the firmware is even loaded. That used
+    // to be hidden because APF put its file browser in front of the core at
+    // launch; now the core comes up directly and the garbage is the first thing
+    // on screen. One command pushed is enough to know the CPU is running and
+    // painting -- main() clears the whole frame before anything else.
+    reg painted_sys = 1'b0;
+    always @(posedge clk_sys) if (cmd_push) painted_sys <= 1'b1;
+
+    // A level that only ever goes 0 -> 1, so a plain synchroniser is enough.
+    reg [2:0] painted_vid = 3'b0;
+    always @(posedge clk_vid) painted_vid <= {painted_vid[1:0], painted_sys};
+
     always @(posedge clk_vid) begin
         lb_q         <= linebuf[{vc[0], hcsub[8:0]}];   // vc-VOFF parity = vc[0] (VOFF even)
         active_p1    <= active;
         top_guard_p1 <= top_guard;
         hs_p1        <= hs_pulse;
         vs_p1        <= vs_pulse;
-        video_rgb    <= (active_p1 && !top_guard_p1)
+        video_rgb    <= (active_p1 && !top_guard_p1 && painted_vid[2])
                        ? {lb_q[15:11], 3'b0, lb_q[10:5], 2'b0, lb_q[4:0], 3'b0}  // RGB565 -> 24-bit
                        : 24'h000000;
         video_de     <= active_p1;

@@ -381,6 +381,7 @@ static uint8_t  shuffle_on;
 static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
+static uint8_t  boot_hold = 1u;          /* first track loads PAUSED           */
 
 #define PL_HOLD_MS 400u                  /* Left/Right held this long = skip  */
 
@@ -496,16 +497,6 @@ static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone *
 #define UI_RED     0xF800u
 
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
-/* The 1px ring between the art and its mount. Its own constant rather than
- * UI_FAINT, which also colours the filename line and the dimmed mode icons.
- * At UI_FAINT the ring sat too close to the mount to read as an edge at all,
- * so a cover that is light to its own borders -- and plenty are -- lost the
- * frame entirely and looked like it was missing a mount. Bright enough to
- * separate a white cover, not so bright it becomes a hard outline on a dark
- * one. Fixed for every track: a mount that adapted to the artwork would look
- * right on any one cover and inconsistent across a playlist, which is what
- * sank the cover-derived accent. */
-#define UI_ART_EDGE 0xAD75u
 #define UI_CARD_H  120u
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
 
@@ -765,8 +756,6 @@ static void ui_art_round(void)
 static void ui_art_mount(void)
 {
     fb_rect(0, ART_STASH_Y, ART_W, ART_H, UI_PANEL);
-    fb_rect(ART_PAD - 1u, ART_STASH_Y + ART_PAD - 1u,
-            ART_IMG + 2u, ART_IMG + 2u, UI_ART_EDGE);
 }
 
 static void ui_art_placeholder(void)
@@ -1047,16 +1036,25 @@ static void poll_input(void);
 /* Nothing loaded. The core no longer forces a file to be chosen before it
  * starts, so this is the first thing seen on a card with no playlist -- it has
  * to say what to do rather than look like a failure. */
-static void ui_idle_screen(void)
+/* Gradient and title only. Shown while the first track loads, so the wait is a
+ * deliberate-looking screen rather than a flash of instructions that is then
+ * replaced -- which read as a glitch. */
+static void ui_splash(void)
 {
     ui_gradient();
-
     uint16_t bg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, (FB_H / 2u) * UI_BANDS / FB_H,
                          UI_BANDS);
     uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
     fb_set_color(ui_accent, bg);
     fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
+}
 
+static void ui_idle_screen(void)
+{
+    ui_splash();
+
+    uint16_t bg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, (FB_H / 2u) * UI_BANDS / FB_H,
+                         UI_BANDS);
     fb_set_color(UI_WHITE, bg);
     fb_text_clipped(UI_MARGIN, 176u, "Press the Analogue button",
                     TS_1X, TS_1X, FB_W - UI_MARGIN);
@@ -1577,30 +1575,29 @@ static void poll_input(void)
         else                     restart_req = 1u;
     }
 
-    /* ---- Left/Right: tap seeks, hold skips track ---- */
+    /* ---- Left/Right: tap changes track, hold seeks ----
+     * Skipping is the common action, so it gets the cheap gesture. Holding
+     * then scrubs: the seek REPEATS while the button is down, which is what
+     * makes holding useful rather than just a slower single jump. */
     {
         const uint32_t kmask[2] = { KEY_LEFT, KEY_RIGHT };
         const uint32_t hold_cy  = CLK_HZ / 1000u * PL_HOLD_MS;
+        const uint32_t rep_cy   = CLK_HZ / 1000u * 250u;   /* scrub rate */
         for (int i = 0; i < 2; i++) {
             if (edge & kmask[i]) { lr_t0[i] = cycles(); lr_fired[i] = 0; }
 
-            /* Fire the skip the moment the threshold passes rather than on
-             * release: holding a button and having nothing happen until you
-             * let go feels broken, and repeat-skip needs the same shape. */
-            if ((keys & kmask[i]) && !lr_fired[i] &&
+            if ((keys & kmask[i]) &&
                 (int32_t)(cycles() - lr_t0[i]) >= (int32_t)hold_cy) {
-                lr_fired[i] = 1;
-                if (pl_count) {
-                    skip_req = i ? 1u : (uint32_t)-1;
-                } else {
-                    ui_toast_msg("NO PLAYLIST");
-                }
+                lr_fired[i] = 1;                  /* release must not skip */
+                seek_req = i ? 1u : (uint32_t)-1;
+                ui_toast_msg(i ? "SEEK +5s" : "SEEK -5s");
+                lr_t0[i] = cycles() + rep_cy - hold_cy;   /* next repeat */
             }
 
             if (fall & kmask[i]) {
-                if (!lr_fired[i]) {          /* a tap: the original seek */
-                    seek_req = i ? 1u : (uint32_t)-1;
-                    ui_toast_msg(i ? "SEEK +5s" : "SEEK -5s");
+                if (!lr_fired[i]) {               /* a tap: change track */
+                    if (pl_count) skip_req = i ? 1u : (uint32_t)-1;
+                    else          ui_toast_msg("NO PLAYLIST");
                 }
                 lr_fired[i] = 0;
             }
@@ -2407,6 +2404,10 @@ int main(void)
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
 
     vol_apply();
+    /* Something deliberate on screen BEFORE the slow work -- reading the
+     * playlist, opening a track, decoding cover art. Previously the first
+     * paint came after all of that. */
+    ui_splash();
     /* Before the track, deliberately: reading the playlist slot makes APF drop
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
      * while doing it mid-stream would make every refill re-walk the cluster
@@ -2421,14 +2422,16 @@ int main(void)
      * nothing and a playlist exists, start it; the common case is then launch
      * straight into music with no interaction at all. */
     if (!load_track()) {
-        if (pl_count && pl_play_at(0)) {
-            ui_idle_screen();          /* until the load lands */
-        } else {
+        /* The splash is already up; leave it while the playlist track loads
+         * rather than flashing instructions that are about to be replaced. */
+        if (!(pl_count && pl_play_at(0))) {
             idle = 1;
             ui_idle_screen();
         }
     } else {
         pl_report();
+        paused |= 1u;              /* wait for the user to press play */
+        boot_hold = 0;
     }
 
     for (;;) {
@@ -2474,8 +2477,14 @@ int main(void)
 
             if (ready || (int32_t)(cycles() - reload_at) >= 0) {
                 reload_armed = 0;
-                if (load_track()) idle = 0;
-                else if (!idle)   ui_load_failed();
+                if (load_track()) {
+                    idle = 0;
+                    /* The first track to arrive after launch is queued, not
+                     * played: starting music the moment the core opens is
+                     * startling, and there is nothing to stop it with until
+                     * the UI is up. Every later track change plays normally. */
+                    if (boot_hold) { boot_hold = 0; paused |= 1u; }
+                } else if (!idle) ui_load_failed();
                 continue;
             }
         }
