@@ -484,6 +484,7 @@ static char     last_title[48];        /* title the current load settled on */
 static char     track_file[64];        /* filename APF reports for the slot  */
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
+static uint8_t  keep_size;             /* same file: keep the size we have    */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
 static uint32_t reload_retries;
 static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
@@ -713,7 +714,7 @@ static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
  * is wanted, so the next track that has some brings it back. */
 static uint8_t  art_pref = 1, art_have;
 static uint32_t art_file_id;      /* 0190 identity the stash was decoded for */
-static uint32_t size_file_id, size_cached;   /* measured length, per file    */
+static uint32_t size_key, size_cached;       /* measured length, per file    */
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -2942,7 +2943,15 @@ static int load_track(void)
      * NOT after a core-initiated 0192 open, which raises no such edge and
      * would leave the PREVIOUS track's size here: wrong total time, wrong
      * end-of-track, and an end-of-track that fires early or never. */
-    slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
+    /* A restart is the SAME file, so the size already measured is still right
+     * -- no need to re-read a stale R_SLOT_SZ and then re-measure. Exact, where
+     * the content-keyed cache below is a heuristic. */
+    if (keep_size && slot_size > audio_start) {
+        /* keep it */
+    } else {
+        slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
+    }
+    keep_size = 0;
     force_size_probe = 0;
 
     uint32_t t0 = cycles(), tphase = t0;
@@ -2961,13 +2970,23 @@ static int load_track(void)
      *      genuine new file still measures once. */
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
-    if (slot_size <= audio_start && cur_file_id && cur_file_id == size_file_id)
+    /* Keyed on facts read out of the FILE, not on cur_file_id. The 0190
+     * identity turned out not to be usable here -- the probe kept running on a
+     * reload, so that hash is either unstable for this slot or zero when the
+     * command does not answer, and either way a cache that silently never hits
+     * is worse than no cache. Tag length plus the first four bytes of the file
+     * are stable across loads and differ between files. */
+    uint32_t skey = audio_start ^ (((uint32_t)head_bytes[0] << 24) |
+                                   ((uint32_t)head_bytes[1] << 16) |
+                                   ((uint32_t)head_bytes[2] << 8)  |
+                                    (uint32_t)head_bytes[3]);
+    if (slot_size <= audio_start && skey && skey == size_key)
         slot_size = size_cached;
     if (slot_size <= audio_start) {
         slot_size = probe_file_size();
-        if (cur_file_id && slot_size > audio_start) {
-            size_file_id = cur_file_id;
-            size_cached  = slot_size;
+        if (skey && slot_size > audio_start) {
+            size_key    = skey;
+            size_cached = slot_size;
         }
     }
     ld_size = LD_MS(cycles() - tphase); tphase = cycles();
@@ -3187,6 +3206,7 @@ int main(void)
          * post-reload read. */
         if (restart_req) {
             restart_req = 0;
+            keep_size = 1;      /* B replays THIS file; its length has not changed */
             if (!load_track()) ui_load_failed();
             continue;
         }
