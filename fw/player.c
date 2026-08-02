@@ -344,17 +344,20 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
  * C requires a declaration to be visible before first use. */
 static HMP3Decoder dec;
 static uint32_t frames, errs, rate_set, min_level;
-/* Frames to decode but NOT play after a discontinuity.
+/* Fade-in after a discontinuity, in samples.
  *
  * MP3's bit reservoir lets a frame reference main_data from frames before it.
- * Straight after a decoder reset -- restart, seek, track change -- that data is
- * not there, so the first frame or two decode to whatever the empty reservoir
- * produces: a short burst before the music proper. Helix reports it as
- * ERR_MP3_MAINDATA_UNDERFLOW on some files and silently produces garbage on
- * others, which is why the hiccup was intermittent. Decode them to prime the
- * reservoir, then throw the output away. */
-#define DEC_WARMUP 2u
-static uint32_t dec_warmup;
+ * Straight after a restart, seek or track change that data is not there, so the
+ * first frames decode to whatever the empty reservoir produces -- a short burst
+ * before the music proper, and the reason the hiccup was intermittent.
+ *
+ * DISCARDING those frames was the obvious fix and made it WORSE: pcm_flush
+ * leaves the DAC holding its last sample, so dropping ~50 ms of output extends
+ * that hold and enlarges the step into real audio. Ramping instead removes the
+ * garbage AND the step, and adds no delay at all. ~46 ms at 44.1 kHz; the
+ * divisor is a power of two so the gain is a shift. */
+#define FADE_SAMPLES 2048u
+static uint32_t fade_left;
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
 /* Up here with the other UI-visible state: the progress bar needs both, and C
  * needs them declared before ui_draw_dynamic(). */
@@ -2915,7 +2918,7 @@ static int load_track(void)
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
     track_kbps = 0; track_hz = 0;
-    dec_warmup = DEC_WARMUP;
+    fade_left = FADE_SAMPLES;
     bytes_per_sec = 16000u;
     paused = 0;
     seek_req = 0; restart_req = 0; soft_restart_req = 0;
@@ -3146,7 +3149,7 @@ int main(void)
             refill_drain();
             frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
             track_kbps = 0; track_hz = 0;
-            dec_warmup = DEC_WARMUP;
+            fade_left = FADE_SAMPLES;
             file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
@@ -3194,7 +3197,7 @@ int main(void)
             ring_fill = 0; ring_rd = 0;
             /* A seek keeps the decoder but lands somewhere the bit reservoir
              * does not describe, so it needs the same warm-up as a reset. */
-            dec_warmup = DEC_WARMUP;
+            fade_left = FADE_SAMPLES;
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
             if (paused) { ui_draw_dynamic(); continue; }
         }
@@ -3384,11 +3387,6 @@ int main(void)
             }
         }
 
-        /* Skip only the PUSH, not the bookkeeping below: the frame was
-         * decoded and the position did advance, so frames++ still has to run
-         * or the elapsed clock loses time on every discontinuity. */
-        if (dec_warmup) dec_warmup--;
-        else
         for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
             int32_t l = pcm[i];
             int32_t r = stereo ? pcm[i + 1] : l;
@@ -3397,6 +3395,15 @@ int main(void)
             if (vol_gain != 256) {
                 l = (l * vol_gain) >> 8;
                 r = (r * vol_gain) >> 8;
+            }
+            /* Ramp up out of a discontinuity. Folded in here rather than as a
+             * second pass so it costs one shift per sample and only while the
+             * fade is running. */
+            if (fade_left) {
+                int32_t g = (int32_t)((FADE_SAMPLES - fade_left) >> 3);  /* 0..256 */
+                l = (l * g) >> 8;
+                r = (r * g) >> 8;
+                fade_left--;
             }
             /* Block while the FIFO is full -- pcm_fifo silently DROPS pushes
              * when full, so skipping this corrupts the audio rather than
