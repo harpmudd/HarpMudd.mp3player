@@ -344,6 +344,17 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
  * C requires a declaration to be visible before first use. */
 static HMP3Decoder dec;
 static uint32_t frames, errs, rate_set, min_level;
+/* Frames to decode but NOT play after a discontinuity.
+ *
+ * MP3's bit reservoir lets a frame reference main_data from frames before it.
+ * Straight after a decoder reset -- restart, seek, track change -- that data is
+ * not there, so the first frame or two decode to whatever the empty reservoir
+ * produces: a short burst before the music proper. Helix reports it as
+ * ERR_MP3_MAINDATA_UNDERFLOW on some files and silently produces garbage on
+ * others, which is why the hiccup was intermittent. Decode them to prime the
+ * reservoir, then throw the output away. */
+#define DEC_WARMUP 2u
+static uint32_t dec_warmup;
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
 /* Up here with the other UI-visible state: the progress bar needs both, and C
  * needs them declared before ui_draw_dynamic(). */
@@ -1190,7 +1201,12 @@ static void ui_draw_chrome(void)
     ui_last_prog  = 0xFFFFFFFFu;
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
     ui_prog_sec   = 0xFFFFFFFFu;
-    track_kbps    = 0;
+    /* track_kbps is NOT cleared here. It describes the STREAM, not the screen,
+     * and ui_draw_chrome() is also called mid-track by the tag probe. Clearing
+     * it there blanked the format line permanently: rate_set is latched after
+     * the first decoded frame, so nothing ever recomputed the value, and the
+     * line's draw is gated on track_kbps being non-zero. Whoever resets
+     * rate_set clears it instead. */
     ui_underrun_shown = 0;
 }
 
@@ -2898,6 +2914,8 @@ static int load_track(void)
     pcm_flush();
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+    track_kbps = 0; track_hz = 0;
+    dec_warmup = DEC_WARMUP;
     bytes_per_sec = 16000u;
     paused = 0;
     seek_req = 0; restart_req = 0; soft_restart_req = 0;
@@ -3127,6 +3145,8 @@ int main(void)
             pcm_flush();
             refill_drain();
             frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+            track_kbps = 0; track_hz = 0;
+            dec_warmup = DEC_WARMUP;
             file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
@@ -3172,6 +3192,9 @@ int main(void)
             pcm_flush();
             refill_drain();
             ring_fill = 0; ring_rd = 0;
+            /* A seek keeps the decoder but lands somewhere the bit reservoir
+             * does not describe, so it needs the same warm-up as a reset. */
+            dec_warmup = DEC_WARMUP;
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
             if (paused) { ui_draw_dynamic(); continue; }
         }
@@ -3361,6 +3384,11 @@ int main(void)
             }
         }
 
+        /* Skip only the PUSH, not the bookkeeping below: the frame was
+         * decoded and the position did advance, so frames++ still has to run
+         * or the elapsed clock loses time on every discontinuity. */
+        if (dec_warmup) dec_warmup--;
+        else
         for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
             int32_t l = pcm[i];
             int32_t r = stereo ? pcm[i + 1] : l;
