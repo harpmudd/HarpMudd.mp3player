@@ -207,8 +207,13 @@ static void fb_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t col
  * writing the full width, so it emits garbage AND runs past where the caller
  * thinks it stopped. A 246 px scroll wrote straight through into the album art,
  * which shares those scanlines. Splitting here rather than at the call sites
- * means nothing else can hit it either. */
-#define FB_COPY_MAX 128u
+ * means nothing else can hit it either.
+ *
+ * 127, not 128: the engine latches the width as char_w <= q_w[6:0], seven bits,
+ * so a span of exactly 128 truncates to ZERO and copies nothing at all. That
+ * left the first span dead and only the remainder scrolling -- half the strip
+ * moving and half sitting still. */
+#define FB_COPY_MAX 127u
 
 static void fb_copy_span(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
                          uint32_t w, uint32_t h)
