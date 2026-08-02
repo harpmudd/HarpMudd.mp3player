@@ -1524,7 +1524,10 @@ static void ui_draw_dynamic(void)
                 for (int pass = vu_face ? 0 : 1; pass < 2; pass++) {
                     int32_t  sn, cs;
                     vu_angle(pass ? now : shown, &sn, &cs);
-                    uint16_t col = pass ? ((*v >= 192u) ? UI_WHITE : ui_accent) : bed;
+                    /* One colour throughout its travel. Flashing at the top drew the eye
+                     * to the loudest moments, which is the opposite of what a
+                     * meter is for -- the scale already marks the peak zone. */
+                    uint16_t col = pass ? ui_accent : bed;
                     for (uint32_t k = 2; k <= VU_STEPS; k++) {
                         int32_t rr = ((int32_t)nlen * (int32_t)k) / (int32_t)VU_STEPS;
                         int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
@@ -1535,8 +1538,7 @@ static void ui_draw_dynamic(void)
                         fb_rect((uint32_t)nx, (uint32_t)ny, th, th, col);
                     }
                 }
-                fb_rect(pivx - 2u, pivy - 2u, 5, 5,
-                        (*v >= 192u) ? UI_WHITE : ui_accent);
+                fb_rect(pivx - 2u, pivy - 2u, 5, 5, ui_accent);
                 fb_rect(pivx - 1u, pivy - 1u, 3, 3, bed);
 
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
