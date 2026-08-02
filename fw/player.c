@@ -496,6 +496,16 @@ static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone *
 #define UI_RED     0xF800u
 
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
+/* The 1px ring between the art and its mount. Its own constant rather than
+ * UI_FAINT, which also colours the filename line and the dimmed mode icons.
+ * At UI_FAINT the ring sat too close to the mount to read as an edge at all,
+ * so a cover that is light to its own borders -- and plenty are -- lost the
+ * frame entirely and looked like it was missing a mount. Bright enough to
+ * separate a white cover, not so bright it becomes a hard outline on a dark
+ * one. Fixed for every track: a mount that adapted to the artwork would look
+ * right on any one cover and inconsistent across a playlist, which is what
+ * sank the cover-derived accent. */
+#define UI_ART_EDGE 0xAD75u
 #define UI_CARD_H  120u
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
 
@@ -756,7 +766,7 @@ static void ui_art_mount(void)
 {
     fb_rect(0, ART_STASH_Y, ART_W, ART_H, UI_PANEL);
     fb_rect(ART_PAD - 1u, ART_STASH_Y + ART_PAD - 1u,
-            ART_IMG + 2u, ART_IMG + 2u, UI_FAINT);
+            ART_IMG + 2u, ART_IMG + 2u, UI_ART_EDGE);
 }
 
 static void ui_art_placeholder(void)
