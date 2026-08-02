@@ -1127,24 +1127,51 @@ static void ui_splash_anim(void)
                           UI_BANDS);
     uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
     uint32_t ww = ui_wave_w();
+    const uint32_t STEP_DEN = 32u;   /* title fade resolution */
 
-    const uint32_t STEPS = 40u, TAIL = 7u;
-    for (uint32_t t = 0; t < STEPS; t++) {
-        /* Title fades in over the first half, then holds. */
-        uint32_t f = (t * 2u < STEPS) ? (t * 2u) : STEPS;
-        fb_set_color(ui_mix(tbg, ui_accent, f, STEPS), tbg);
+    /* Two phases, both symmetric about the centre.
+     *
+     * A: bars light from BOTH OUTER EDGES and converge inward.
+     * B: they drain back outward, centre releasing first.
+     *
+     * A single pulse travelling one direction reads as a scroll -- which is
+     * what the waterfall does during playback, so it said nothing about the
+     * core starting up. Converging and draining reads as powering on, and
+     * being symmetric it looks deliberate from any point in the animation. */
+    const uint32_t PH_A = 22u, PH_B = 20u, TAIL = 6u;
+    const uint32_t HALF = UI_WAVE_N / 2u + 1u;
+
+    for (uint32_t t = 0; t < PH_A + PH_B; t++) {
+        /* Title fades in across phase A, then holds. */
+        uint32_t f = (t < PH_A) ? (t * STEP_DEN / PH_A) : STEP_DEN;
+        fb_set_color(ui_mix(tbg, ui_accent, f, STEP_DEN), tbg);
         fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
 
-        /* A travelling pulse: each bar peaks as the crest passes it and decays
-         * behind, so the meter reads as sweeping rather than flashing. */
-        uint32_t pos = (t * (UI_WAVE_N + TAIL)) / STEPS;
+        uint32_t pa = (t < PH_A) ? ((t + 1u) * (HALF + TAIL)) / PH_A : HALF + TAIL;
+        uint32_t pb = (t < PH_A) ? 0u
+                                 : (((t - PH_A) + 1u) * (HALF + TAIL)) / PH_B;
+
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
             uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
             uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
 
-            uint32_t d = (pos > i) ? (pos - i) : (i - pos);
-            uint32_t h = (d < TAIL) ? ((TAIL - d) * UI_WAVE_H) / TAIL : 0u;
+            uint32_t d = (i < UI_WAVE_N - 1u - i) ? i : (UI_WAVE_N - 1u - i);
+
+            /* Rise: full once the inbound front has passed, ramping over TAIL
+             * so the leading edge is soft rather than a hard step. */
+            uint32_t h = 0;
+            if (pa > d) { uint32_t r = pa - d; h = (r >= TAIL) ? UI_WAVE_H
+                                                              : (r * UI_WAVE_H) / TAIL; }
+            /* Fall: centre (largest d) releases first. */
+            if (pb) {
+                uint32_t rel = HALF - d;
+                if (pb > rel) {
+                    uint32_t r = pb - rel;
+                    uint32_t keep = (r >= TAIL) ? 0u : ((TAIL - r) * UI_WAVE_H) / TAIL;
+                    if (keep < h) h = keep;
+                }
+            }
             if (h < 2u) h = 2u;
 
             uint16_t c = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
