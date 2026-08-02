@@ -31,7 +31,7 @@ Two files in that folder ship with the core and aren't yours to edit:
 ## Playing
 
 If a playlist is on the card, the core loads its first track at launch and waits
-— press **A** or **Start** to play.
+— press **A** to play.
 
 Otherwise press the **Analogue** button and choose **Load MP3** for a single
 track or **Load Playlist** for an `.m3u`. The same menu switches tracks or
@@ -39,7 +39,8 @@ playlists at any time.
 
 | Pocket | Action |
 |---|---|
-| **A** / **Start** | Play / pause |
+| **A** | Play / pause |
+| **Start** | Stop — returns to 0:00 |
 | **Left** / **Right** | *Tap* — previous / next track |
 | **Left** / **Right** | *Hold* — seek back / forward |
 | **Up** / **Down** | Volume, in 5% steps |
@@ -48,6 +49,9 @@ playlists at any time.
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
+
+Track changes and seeking both work while paused or stopped, so you can move
+around a playlist without playing anything.
 
 Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a

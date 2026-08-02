@@ -382,6 +382,9 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
 static uint8_t  boot_hold = 1u;          /* first track loads PAUSED           */
+static uint8_t  stopped;                 /* Start: at 0:00, not merely paused  */
+static uint8_t  hold_paused;             /* stay paused across a track change  */
+static uint32_t stop_req;
 
 #define PL_HOLD_MS 400u                  /* Left/Right held this long = skip  */
 
@@ -1375,7 +1378,7 @@ static void ui_draw_dynamic(void)
          * shuffle them sideways. */
         const uint32_t ly = UI_TRANSPORT_Y;
         const uint32_t lx = UI_MARGIN;
-        const uint32_t lbl_w = fb_text_width("PLAYING", TS_1X);
+        const uint32_t lbl_w = fb_text_width("STOPPED", TS_1X);
         const uint32_t ix = lx + lbl_w + 12u;
         const uint32_t iy = ly;
 
@@ -1388,7 +1391,8 @@ static void ui_draw_dynamic(void)
             uint16_t c = ui_mix(UI_PANEL, UI_WHITE, lvl, 31u);
             fb_rect(lx, ly, lbl_w + 8u, FB_CELL(TS_1X), tbg);
             fb_set_color(c, tbg);
-            fb_text_clipped(lx, ly, "PAUSED", TS_1X, TS_1X, lbl_w + 8u);
+            fb_text_clipped(lx, ly, stopped ? "STOPPED" : "PAUSED",
+                            TS_1X, TS_1X, lbl_w + 8u);
             fb_rect(ix, iy, UI_ARR_SPAN, UI_ICONBOX_H, tbg);
             ui_icon_pause(ix, iy, c);
             ui_last_pause = 0xFFFFFFFFu;      /* force a repaint on resume */
@@ -1569,7 +1573,16 @@ static void poll_input(void)
     uint32_t fall = prev & ~keys;        /* falling edges      */
     prev = keys;
 
-    if (edge & (KEY_A | KEY_START)) paused ^= 1u;
+    /* A plays and pauses. Start only ever STOPS -- pressing it again does
+     * nothing, which is what separates it from pause: stop is a state you
+     * leave with play, not a toggle. Stopping also returns to 0:00. */
+    if (edge & KEY_A) {
+        paused ^= 1u;
+        if (!(paused & 1u)) stopped = 0;      /* playing is never "stopped" */
+    }
+    if (edge & KEY_START) {
+        if (!stopped) { stopped = 1u; paused |= 1u; stop_req = 1u; }
+    }
     if (edge & KEY_B) {
         if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
         else                     restart_req = 1u;
@@ -2432,6 +2445,7 @@ int main(void)
         pl_report();
         paused |= 1u;              /* wait for the user to press play */
         boot_hold = 0;
+        stopped   = 1u;           /* at 0:00, never started */
     }
 
     for (;;) {
@@ -2479,11 +2493,12 @@ int main(void)
                 reload_armed = 0;
                 if (load_track()) {
                     idle = 0;
+                    if (hold_paused) { hold_paused = 0; paused |= 1u; stopped = 1u; }
                     /* The first track to arrive after launch is queued, not
                      * played: starting music the moment the core opens is
                      * startling, and there is nothing to stop it with until
                      * the UI is up. Every later track change plays normally. */
-                    if (boot_hold) { boot_hold = 0; paused |= 1u; }
+                    if (boot_hold) { boot_hold = 0; paused |= 1u; stopped = 1u; }
                 } else if (!idle) ui_load_failed();
                 continue;
             }
@@ -2516,6 +2531,11 @@ int main(void)
          * raises 008A and the ordinary reload path does the actual loading. */
         if (skip_req) {
             uint32_t d = skip_req; skip_req = 0;
+            /* load_track() clears `paused`, so a track changed while paused or
+             * stopped would start playing on its own. Browsing a playlist
+             * without committing to hearing it is the point of allowing this
+             * while paused. */
+            hold_paused = (paused & 1u) ? 1u : 0u;
             if (pl_skip(d == 1u ? 1 : -1)) {
                 ui_toast_set("TRACK", (uint32_t)(pl_pos + 1u), 0);
                 ui_mode_dirty = 1;
@@ -2562,6 +2582,49 @@ int main(void)
             continue;
         }
 
+        /* Start = stop: back to the beginning, still paused. Uses the same
+         * reposition the probe correction does, so it does not re-read the
+         * head and cannot disturb the tag. */
+        if (stop_req) {
+            stop_req = 0;
+            pcm_flush();
+            refill_drain();
+            file_pos  = audio_start;
+            ring_fill = 0; ring_rd = 0;
+            frames = 0; min_level = 0xFFFFFFFFu;
+            ui_sec = 0; ui_sec_acc = 0;
+            ui_last_sec = 0xFFFFFFFFu; ui_prog_sec = 0xFFFFFFFFu;
+            ui_last_pause = 0xFFFFFFFFu;      /* repaint the transport label */
+            if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+            ui_draw_dynamic();
+            continue;
+        }
+
+        /* Seeking is allowed while paused or stopped -- moving through a track
+         * without having to play it is the point of a transport. This sits
+         * ABOVE the paused check for that reason; it used to be below it, so
+         * the controls did nothing unless audio was running. */
+        if (seek_req) {
+            uint32_t step = ui_byte_rate() * 5u;
+            if (seek_req == 1u) file_pos += step;
+            else file_pos = (file_pos > audio_start + step)
+                          ? file_pos - step : audio_start;
+            seek_req = 0;
+            stopped  = 0;                 /* no longer at 0:00 */
+
+            uint32_t rate = ui_byte_rate();
+            ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
+            ui_sec_acc  = 0;
+            ui_last_sec = 0xFFFFFFFFu;
+            ui_prog_sec = 0xFFFFFFFFu;
+
+            pcm_flush();
+            refill_drain();
+            ring_fill = 0; ring_rd = 0;
+            if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+            if (paused) { ui_draw_dynamic(); continue; }
+        }
+
         /* Nothing to decode. poll_input() and the reload handling above still
          * run, so Load MP3 / Load Playlist work from here. */
         if (idle) continue;
@@ -2595,32 +2658,6 @@ int main(void)
             }
         }
         ui_was_paused = 0;
-
-        if (seek_req) {
-            /* ~5 s at the AUTHORITATIVE byte rate. Using the first frame's
-             * bitrate made a "5 second" seek move by some other amount on any
-             * VBR file -- the same error that made the total length wrong. */
-            uint32_t step = ui_byte_rate() * 5u;
-            if (seek_req == 1u) file_pos += step;
-            else file_pos = (file_pos > audio_start + step)
-                          ? file_pos - step : audio_start;
-            seek_req = 0;
-
-            /* Re-anchor the clock to the new POSITION. Elapsed time is
-             * accumulated from the frame counter, which a seek does not touch,
-             * so the readout and the bar otherwise ignored the jump. */
-            uint32_t rate = ui_byte_rate();
-            ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
-            ui_sec_acc  = 0;
-            ui_last_sec = 0xFFFFFFFFu;
-            ui_prog_sec = 0xFFFFFFFFu;
-
-            /* Same bleed-through problem as a track change. */
-            pcm_flush();
-            refill_drain();
-            ring_fill = 0; ring_rd = 0;
-            if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
-        }
 
         /* Advance the asynchronous refill: start one if the ring has dropped
          * to half, or collect one that has landed. Never blocks. */
