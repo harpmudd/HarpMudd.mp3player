@@ -1369,6 +1369,7 @@ static void ui_draw_dynamic(void)
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
         }
         ui_wave_force = 1;              /* recolour even while paused      */
+        vu_face       = 0;              /* the VU face is cached on screen */
         ui_last_prog  = 0xFFFFFFFFu;    /* progress fill                   */
         ui_last_pause = 0xFFFFFFFFu;    /* PLAYING label                   */
         ui_icon_next  = cycles();       /* arrows, on the next tick        */
@@ -1485,8 +1486,15 @@ static void ui_draw_dynamic(void)
                         int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
                         if (ay < (int32_t)UI_WAVE_Y) continue;
                         if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
+                        /* Everything on the face is a TONE OF THE ACCENT.
+                         * Fixed grey and red meant changing colour only moved
+                         * the needle and the labels, and the meter looked
+                         * unchanged. The peak zone is the accent at full
+                         * strength against a dimmed scale, so it still reads as
+                         * "the loud end" in any palette. */
                         fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
-                                (t >= 60u) ? UI_RED : UI_FAINT);
+                                (t >= 60u) ? ui_accent
+                                           : ui_mix(bed, ui_accent, 2u, 5u));
                     }
                     for (uint32_t t = 0; t <= 4u; t++) {
                         uint32_t i = t * 4u;
@@ -1496,7 +1504,8 @@ static void ui_draw_dynamic(void)
                             int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
                             if (ay < (int32_t)UI_WAVE_Y) continue;
                             fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
-                                    (t >= 3u) ? UI_RED : UI_DIM);
+                                    (t >= 3u) ? ui_accent
+                                              : ui_mix(bed, ui_accent, 3u, 5u));
                         }
                     }
                     fb_set_color(ui_accent, bed);
@@ -1515,7 +1524,7 @@ static void ui_draw_dynamic(void)
                 for (int pass = vu_face ? 0 : 1; pass < 2; pass++) {
                     int32_t  sn, cs;
                     vu_angle(pass ? now : shown, &sn, &cs);
-                    uint16_t col = pass ? ((*v >= 192u) ? UI_RED : ui_accent) : bed;
+                    uint16_t col = pass ? ((*v >= 192u) ? UI_WHITE : ui_accent) : bed;
                     for (uint32_t k = 2; k <= VU_STEPS; k++) {
                         int32_t rr = ((int32_t)nlen * (int32_t)k) / (int32_t)VU_STEPS;
                         int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
@@ -1527,7 +1536,7 @@ static void ui_draw_dynamic(void)
                     }
                 }
                 fb_rect(pivx - 2u, pivy - 2u, 5, 5,
-                        (*v >= 192u) ? UI_RED : ui_accent);
+                        (*v >= 192u) ? UI_WHITE : ui_accent);
                 fb_rect(pivx - 1u, pivy - 1u, 3, 3, bed);
 
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
