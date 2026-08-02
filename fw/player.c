@@ -635,7 +635,9 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU, VIZ_COU
  * both cheaper and smaller than the trigonometry. */
 #define VU_ATT   180u             /* Q8 rise per frame toward the target */
 #define VU_DEC    40u             /* ~370 ms full-scale fall: VU ballistics */
-#define VU_STEPS  10u             /* segments the needle is drawn from   */
+#define VU_STEPS  28u             /* segments: 1.9 px apart, so the needle
+                                   * is solid. At 10 they sat 5.4 px apart and
+                                   * the needle read as a dotted line. */
 static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
@@ -1443,8 +1445,12 @@ static void ui_draw_dynamic(void)
                     int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
                     if (ay < (int32_t)UI_WAVE_Y) continue;
                     if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
+                    /* UI_TRACK is luma 26 against a luma 11 background --
+                     * near-invisible, which is why only the red section showed.
+                     * UI_FAINT reads as a drawn scale without competing with
+                     * the needle. */
                     fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
-                            (t >= 60u) ? UI_RED : UI_TRACK);
+                            (t >= 60u) ? UI_RED : UI_FAINT);
                 }
 
                 /* Ticks: longer marks inside the arc at fifths of the sweep. */
@@ -1456,7 +1462,7 @@ static void ui_draw_dynamic(void)
                         int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
                         if (ay < (int32_t)UI_WAVE_Y) continue;
                         fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
-                                (t >= 3u) ? UI_RED : UI_TRACK);
+                                (t >= 3u) ? UI_RED : UI_DIM);
                     }
                 }
 
@@ -1471,7 +1477,7 @@ static void ui_draw_dynamic(void)
                     if (ny < (int32_t)UI_WAVE_Y) continue;
                     /* Tapered: thin at the tip, so it looks like a needle
                      * rather than a bar. */
-                    uint32_t th = (k > VU_STEPS - 3u) ? 1u : 2u;
+                    uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;   /* taper the tip */
                     fb_rect((uint32_t)nx, (uint32_t)ny, th, th, ncol);
                 }
                 fb_rect(pivx - 2u, pivy - 2u, 5, 5, ncol);      /* hub */
