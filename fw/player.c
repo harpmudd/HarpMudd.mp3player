@@ -2130,6 +2130,21 @@ static void tag_probe_apply(void)
         id3_find_text(tagbuf, TAG_SIZE, skip, "TPE2", a, sizeof(a));
     }
 
+    /* A probe may CORRECT a title, never erase one.
+     *
+     * This scans only the 4 KB it just read, so it is strictly less capable
+     * than the load path, which falls back to walking the whole tag. On a file
+     * whose text frames sit past a large picture the probe finds nothing --
+     * and it used to write that nothing over a title the walk had already
+     * recovered, so the caption showed correctly and then turned into NOTIT a
+     * second or two later. Album, year and track survived because the probe
+     * does not touch them, which is what made the cause obvious.
+     *
+     * Finding no title means this probe learned nothing, not that the file is
+     * untagged. Walking the tag here instead would cost ~23 reads in the
+     * middle of playback, in the budget that keeps the decoder fed. */
+    if (st != ID3_OK || !t[0]) return;
+
     if (title_is_stale(t)) return;      /* still the previous file */
 
     int same_title = 1;
