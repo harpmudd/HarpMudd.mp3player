@@ -593,7 +593,7 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * All three run off what the decoder already produces -- there are no frequency
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over
  * TIME, LEVELS shows the two channels right now. */
-enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_COUNT };
+enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU, VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
  * the vertical -- the standard goniometer orientation, and the reason it reads
@@ -623,6 +623,28 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_COUNT };
  * The window starts at a rising zero crossing so successive frames line up
  * instead of sliding; without that the trace skates sideways and reads as
  * noise. */
+/* VU: two analogue meters, left and right.
+ *
+ * Ballistics matter more than the drawing. A real VU integrates over ~300 ms;
+ * a needle tracking instantaneous peaks twitches and reads as an artefact
+ * rather than a meter. Fast attack, slow decay, in a Q8 accumulator so the
+ * movement is smooth at any frame rate.
+ *
+ * Deflection is by SIN TABLE rather than a divide per pixel: the needle is
+ * drawn as a run of short segments along the angle, and 16 entries at Q12 is
+ * both cheaper and smaller than the trigonometry. */
+#define VU_ATT   180u             /* Q8 rise per frame toward the target */
+#define VU_DEC    40u             /* ~370 ms full-scale fall: VU ballistics */
+#define VU_STEPS  10u             /* segments the needle is drawn from   */
+static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
+
+/* sin/cos over 0..90 degrees in 16 steps, Q12. A needle sweeping -50..+50
+ * degrees indexes this; deriving both from one table keeps it to 16 entries. */
+static const int16_t vu_sin[17] = {
+        0,  400,  799, 1194, 1583, 1966, 2340, 2703, 3053,
+     3389, 3709, 4011, 4294, 4557, 4798, 5016, 5211
+};
+
 #define WAVE_COLS 64u
 #define WAVE_SPAN 4u              /* samples per column -- 256 sample window */
 static signed char wav_v[WAVE_COLS];
@@ -1364,6 +1386,66 @@ static void ui_draw_dynamic(void)
             goto viz_done;
         }
 
+        /* ---- VU METERS ----------------------------------------------------
+         * Two analogue movements side by side. Geometry is derived from
+         * ui_wave_w() every pass rather than assumed: hiding the album art
+         * widens the box from ~246 to ~360, and a fixed layout would leave the
+         * pair huddled at the left -- the same trap the waterfall fell into. */
+        if (viz_mode == VIZ_VU) {
+            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+
+            for (int ch = 0; ch < 2; ch++) {
+                uint32_t half = ww / 2u;
+                uint32_t ox   = UI_MARGIN + (uint32_t)ch * half;
+                uint32_t pivx = ox + half / 2u;
+                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 3u;   /* pivot at the base */
+                uint32_t len  = UI_WAVE_H - 12u;
+
+                /* Target from this channel's peak, then ballistics. */
+                uint32_t pkc = ch ? peak_r : peak_l;
+                uint32_t tgt = (pkc * 255u) / 32768u;
+                if (tgt > 255u) tgt = 255u;
+                uint32_t *v = ch ? &vu_r : &vu_l;
+                if (paused) tgt = 0;
+                if (tgt > *v) { *v += VU_ATT; if (*v > tgt) *v = tgt; }
+                else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
+                                if (*v < tgt) *v = tgt; }
+
+                /* Scale arc: ticks along the sweep, brighter past 3/4 where a
+                 * real meter turns red. */
+                for (uint32_t t = 0; t <= 8u; t++) {
+                    uint32_t d  = (t * 255u) / 8u;
+                    uint32_t ai = (d * 16u) / 255u;
+                    int32_t  sx2 = vu_sin[ai], cx2 = vu_sin[16u - ai];
+                    int32_t  dx = ((int32_t)len * (sx2 - 2048)) / 4096;
+                    int32_t  dy = ((int32_t)len * cx2) / 5211;
+                    uint16_t tc = (t >= 6u) ? UI_RED : UI_TRACK;
+                    fb_rect((uint32_t)((int32_t)pivx + dx),
+                            (uint32_t)((int32_t)pivy - dy), 2, 2, tc);
+                }
+
+                /* Needle: short segments out from the pivot. */
+                uint32_t ai = (*v * 16u) / 255u;
+                int32_t  sx2 = vu_sin[ai], cx2 = vu_sin[16u - ai];
+                for (uint32_t k = 1; k <= VU_STEPS; k++) {
+                    int32_t rr = ((int32_t)len * (int32_t)k) / (int32_t)VU_STEPS;
+                    int32_t dx = (rr * (sx2 - 2048)) / 4096;
+                    int32_t dy = (rr * cx2) / 5211;
+                    int32_t nx = (int32_t)pivx + dx, ny = (int32_t)pivy - dy;
+                    if (nx < (int32_t)UI_MARGIN || nx >= (int32_t)(UI_MARGIN + ww)) continue;
+                    if (ny < (int32_t)UI_WAVE_Y) continue;
+                    fb_rect((uint32_t)nx, (uint32_t)ny, 2, 2,
+                            (*v >= 192u) ? UI_RED : ui_accent);
+                }
+                fb_rect(pivx - 1u, pivy - 1u, 3, 3, UI_WHITE);   /* hub */
+
+                fb_set_color(UI_FAINT, bed);
+                fb_text_clipped(ox + 4u, UI_WAVE_Y + 2u, ch ? "R" : "L",
+                                TS_1X, TS_1X, 16u);
+            }
+            goto viz_done;
+        }
+
         /* ---- OSCILLOSCOPE -------------------------------------------------
          * One clear, then one vertical rect per column: ~65 commands, fewer
          * than the bars. */
@@ -1934,7 +2016,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_WATER  ? "METER: WATERFALL"
                    : viz_mode == VIZ_LEVELS ? "METER: L/R LEVELS"
                    : viz_mode == VIZ_SCOPE  ? "METER: PHASE SCOPE"
-                                            : "METER: OSCILLOSCOPE");
+                   : viz_mode == VIZ_WAVE   ? "METER: OSCILLOSCOPE"
+                                            : "METER: VU");
         settings_mark_dirty();
     }
     if (edge & KEY_START) {
