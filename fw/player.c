@@ -714,7 +714,6 @@ static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
  * is wanted, so the next track that has some brings it back. */
 static uint8_t  art_pref = 1, art_have;
 static uint32_t art_file_id;      /* 0190 identity the stash was decoded for */
-static uint32_t size_key, size_cached;       /* measured length, per file    */
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -2378,6 +2377,32 @@ static int probe_readable(uint32_t off)
     return 1;
 }
 
+/* Incremental file-size search: one read per main-loop pass. */
+static uint8_t  sp_stage;          /* 0 idle, 1 growing, 2 bisecting */
+static uint32_t sp_lo, sp_hi;
+
+static void sp_start(void)
+{
+    sp_lo = 0; sp_hi = 1u << 22; sp_stage = 1;
+}
+
+/* One step. Returns with sp_stage 0 once slot_size has been set. */
+static void sp_step(void)
+{
+    if (sp_stage == 1) {
+        if (sp_hi < (1u << 26) && probe_readable(sp_hi)) { sp_lo = sp_hi; sp_hi <<= 1; }
+        else sp_stage = 2;
+        return;
+    }
+    if (sp_hi - sp_lo > 4096u) {
+        uint32_t mid = sp_lo + (sp_hi - sp_lo) / 2u;
+        if (probe_readable(mid)) sp_lo = mid; else sp_hi = mid;
+        return;
+    }
+    slot_size = sp_lo + 4096u;
+    sp_stage  = 0;
+}
+
 /* Measure the file. APF only reports a size with a RELOAD notification, so a
  * track loaded at boot has none -- which is why the progress bar and the
  * end-of-track check need this. Binary-searching the last readable offset
@@ -2953,41 +2978,30 @@ static int load_track(void)
     }
     keep_size = 0;
     force_size_probe = 0;
+    sp_stage = 0;          /* abandon a search from the previous track */
 
     uint32_t t0 = cycles(), tphase = t0;
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
     ld_head = LD_MS(cycles() - tphase); tphase = cycles();
     if (audio_start) { st0 |= (1u << 1); REG(R_STAT0) = st0; }
 
-    /* The size probe is a ~20-read binary search and it runs with the FIFO
-     * empty -- measured at 481 ms on a file with no Xing header, the single
-     * largest avoidable part of a load. Two ways to not pay it:
+    /* The size probe is ~20 blocking reads -- measured at 480 ms, and it runs
+     * with the FIFO empty, which is most of the hiccup. Two attempts at caching
+     * it away both silently failed to hit, so the answer is not a better cache:
+     * an operation that long simply cannot live here.
      *
-     *   1. The file already said how long it is. A Xing/VBRI BYTES field is
-     *      exact, so there is nothing to search for.
-     *   2. We already measured this file. Keyed on the 0190 identity, so a
-     *      restart or a return to the same track reuses the answer and a
-     *      genuine new file still measures once. */
+     * It is now INCREMENTAL. The main loop performs one read per pass, only
+     * when the buffer is full, so the search spreads harmlessly across a couple
+     * of seconds of playback instead of stalling the start of it. Nothing needs
+     * the size immediately: it feeds the total time, the progress bar and the
+     * end-of-track check, none of which matter in the first second.
+     *
+     * A file that declares its own length still skips all of this. */
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
-    /* Keyed on facts read out of the FILE, not on cur_file_id. The 0190
-     * identity turned out not to be usable here -- the probe kept running on a
-     * reload, so that hash is either unstable for this slot or zero when the
-     * command does not answer, and either way a cache that silently never hits
-     * is worse than no cache. Tag length plus the first four bytes of the file
-     * are stable across loads and differ between files. */
-    uint32_t skey = audio_start ^ (((uint32_t)head_bytes[0] << 24) |
-                                   ((uint32_t)head_bytes[1] << 16) |
-                                   ((uint32_t)head_bytes[2] << 8)  |
-                                    (uint32_t)head_bytes[3]);
-    if (slot_size <= audio_start && skey && skey == size_key)
-        slot_size = size_cached;
     if (slot_size <= audio_start) {
-        slot_size = probe_file_size();
-        if (skey && slot_size > audio_start) {
-            size_key    = skey;
-            size_cached = slot_size;
-        }
+        slot_size = 0;
+        sp_start();
     }
     ld_size = LD_MS(cycles() - tphase); tphase = cycles();
 
@@ -3189,6 +3203,14 @@ int main(void)
         /* Only when nothing is loading: a write is an SD round trip, and the
          * quiet window means it never lands in the middle of a track change. */
         if (!reload_armed && !reload_pending) settings_pump();
+
+        /* One step of the file-size search, and only with the buffer full: a
+         * single 512-byte read fits easily inside 43 ms of FIFO, where the
+         * whole search never could. */
+        if (sp_stage && !reload_armed && !reload_pending &&
+            (paused || (pcm_level() >= 1792u &&
+                        ring_fill - ring_rd >= RING_SIZE / 2u)))
+            sp_step();
 
         if (art_toggle) {
             art_toggle = 0;
