@@ -353,6 +353,13 @@ static uint32_t track_kbps, track_hz;
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
 static uint8_t  size_suspect;     /* directory disagrees with the file itself   */
 static uint8_t  ui_size_warned;
+/* Load timing, in milliseconds, for the phases between pcm_flush() and
+ * prefill(). Everything in that window runs with the FIFO empty, so whatever
+ * dominates it is the hiccup. Measured rather than reasoned about: four
+ * attempts at this were aimed by theory and three of them made it worse. */
+static uint16_t ld_head, ld_size, ld_art, ld_pre, ld_total;
+static uint8_t  ui_ld_shown;
+#define LD_MS(c) ((uint16_t)((c) / (CLK_HZ / 1000u)))
 /* Total frames declared by a Xing/Info/VBRI header, 0 when the file has none.
  * Duration from size/bitrate is only right for CBR -- on a VBR file the first
  * frame's bitrate is not the file's average, which is why both the total time
@@ -1202,6 +1209,7 @@ static void ui_draw_chrome(void)
      * rate_set clears it instead. */
     ui_underrun_shown = 0;
     ui_size_warned    = 0;
+    ui_ld_shown       = 0;
 }
 
 /* A load failure used to spin in `for(;;){}`, which is the worst possible
@@ -1816,6 +1824,20 @@ static void ui_draw_dynamic(void)
     /* Loud, and it stays: a wrong file size means the card's directory is
      * damaged, which will not fix itself and puts every file in that folder in
      * question -- not something to mention in a toast that scrolls away. */
+    /* TEMPORARY: load timing, so the hiccup is a number rather than a theory.
+     * H=head read (tag parse), S=size probe, A=album art, P=prefill, T=total. */
+    if (ld_total && !ui_ld_shown) {
+        ui_ld_shown = 1;
+        char b[40], *q = b;
+        *q++='H'; q=ui_dec(q, ld_head);  *q++=' ';
+        *q++='S'; q=ui_dec(q, ld_size);  *q++=' ';
+        *q++='A'; q=ui_dec(q, ld_art);   *q++=' ';
+        *q++='P'; q=ui_dec(q, ld_pre);   *q++=' ';
+        *q++='T'; q=ui_dec(q, ld_total); *q++='m'; *q++='s'; *q=0;
+        fb_set_color(UI_WHITE, UI_PANEL);
+        fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X, ui_text_w);
+    }
+
     if (size_suspect && !ui_size_warned) {
         ui_size_warned = 1;
         fb_set_color(UI_RED, UI_PANEL);
@@ -1825,7 +1847,7 @@ static void ui_draw_dynamic(void)
 
     /* Format line, drawn once the decoder has told us what the stream is. */
     uint32_t info = track_kbps * 1000u + track_hz / 100u;
-    if (track_kbps && info != ui_last_info && !size_suspect) {
+    if (track_kbps && info != ui_last_info && !size_suspect && !ld_total) {
         ui_last_info = info;
         char b[32], *q = b;
         q = ui_dec(q, track_kbps);
@@ -2922,10 +2944,13 @@ static int load_track(void)
     slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
     force_size_probe = 0;
 
+    uint32_t t0 = cycles(), tphase = t0;
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
+    ld_head = LD_MS(cycles() - tphase); tphase = cycles();
     if (audio_start) { st0 |= (1u << 1); REG(R_STAT0) = st0; }
 
     if (slot_size <= audio_start) slot_size = probe_file_size();
+    ld_size = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Cover art BEFORE the chrome, because whether it exists decides the
      * layout: no art means no panel and a full-width waveform. Also before
@@ -2953,6 +2978,7 @@ static int load_track(void)
         art_file_id = cur_file_id;
     }
     art_ready = 1;
+    ld_art = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
      * rather than animated -- a track change should not look like a slide. */
@@ -2967,6 +2993,8 @@ static int load_track(void)
     tag_next        = cycles() + CLK_HZ;
 
     if (!prefill()) { REG(R_STAT2) = 0xD0000000u; return 0; }
+    ld_pre   = LD_MS(cycles() - tphase);
+    ld_total = LD_MS(cycles() - t0);
     return 1;
 }
 
