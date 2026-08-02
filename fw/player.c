@@ -202,10 +202,17 @@ static void fb_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t col
  * fb_set_color() once for the run of characters. */
 /* SDRAM -> SDRAM block move. Source rides in the colour registers because a
  * copy has no use for them. */
-static void fb_copy(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
-                    uint32_t w, uint32_t h)
+/* The engine stages each row in glyphbuf, which is 128 entries addressed by
+ * wsrc_addr[6:0]. A copy wider than that wraps the read address while still
+ * writing the full width, so it emits garbage AND runs past where the caller
+ * thinks it stopped. A 246 px scroll wrote straight through into the album art,
+ * which shares those scanlines. Splitting here rather than at the call sites
+ * means nothing else can hit it either. */
+#define FB_COPY_MAX 128u
+
+static void fb_copy_span(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
+                         uint32_t w, uint32_t h)
 {
-    if (!w || !h) return;
     uint32_t src = sy_ * FB_STRIDE + sx_;
     fb_wait();
     REG(R_FB_ADDR)  = dy * FB_STRIDE + dx;
@@ -213,6 +220,33 @@ static void fb_copy(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
     REG(R_FB_COLOR) = ((src >> 16) & 0x7u) | ((src & 0xFFFFu) << 16);
     fb_color_shadow = 0xFFFFFFFFu;      /* colour regs clobbered -- invalidate */
     REG(R_FB_GO)    = FB_OP_COPY;
+}
+
+static void fb_copy(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
+                    uint32_t w, uint32_t h)
+{
+    if (!w || !h) return;
+
+    /* Overlapping copies must run away from the direction of travel, or a
+     * later chunk reads source pixels an earlier one already overwrote. */
+    if (dx > sx_) {
+        uint32_t done = 0;
+        while (done < w) {
+            uint32_t n = w - done;
+            if (n > FB_COPY_MAX) n = FB_COPY_MAX;
+            uint32_t off = w - done - n;
+            fb_copy_span(sx_ + off, sy_, dx + off, dy, n, h);
+            done += n;
+        }
+    } else {
+        uint32_t done = 0;
+        while (done < w) {
+            uint32_t n = w - done;
+            if (n > FB_COPY_MAX) n = FB_COPY_MAX;
+            fb_copy_span(sx_ + done, sy_, dx + done, dy, n, h);
+            done += n;
+        }
+    }
 }
 
 static void fb_char(uint32_t x, uint32_t y, char ch, uint32_t sx, uint32_t sy)
@@ -1668,6 +1702,7 @@ static void poll_input(void)
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
         }
+        if (art_ready && art_shown) ui_art_draw();
         ui_toast_msg(viz_mode == VIZ_BARS  ? "METER: BARS"
                    : viz_mode == VIZ_WATER ? "METER: WATERFALL"
                                            : "METER: L/R LEVELS");
