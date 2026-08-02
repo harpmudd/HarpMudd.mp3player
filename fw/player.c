@@ -593,7 +593,18 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * All three run off what the decoder already produces -- there are no frequency
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over
  * TIME, LEVELS shows the two channels right now. */
-enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_COUNT };
+enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_COUNT };
+
+/* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
+ * the vertical -- the standard goniometer orientation, and the reason it reads
+ * at a glance: a vertical line is mono, a wide cloud is a wide mix, a
+ * horizontal spread is out of phase.
+ *
+ * Points are captured during decode rather than read from pcm[] at draw time:
+ * the buffer is refilled every frame and the UI runs on its own schedule, so
+ * drawing from it directly would sample whatever happened to be there. */
+#define SCOPE_N 64u
+static signed char scope_x[SCOPE_N], scope_y[SCOPE_N];
 static uint8_t  viz_mode;
 static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
 static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
@@ -1323,6 +1334,37 @@ static void ui_draw_dynamic(void)
             goto viz_done;
         }
 
+        /* ---- STEREO PHASE SCOPE -------------------------------------------
+         * One rect to clear, then one per point: ~65 commands, fewer than the
+         * bars. The whole trace is redrawn each pass rather than erased point
+         * by point, which would double the count for no gain. */
+        if (viz_mode == VIZ_SCOPE) {
+            const uint32_t r  = UI_WAVE_H / 2u;          /* usable radius */
+            const uint32_t cx = UI_MARGIN + ww / 2u;
+            const uint32_t cy = UI_WAVE_Y + r;
+
+            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+
+            /* Centre cross: without it a quiet passage is an empty box, and
+             * there is no way to tell "silent" from "not working". */
+            fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H, UI_TRACK);
+            fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);
+
+            if (!paused) {
+                for (uint32_t k = 0; k < SCOPE_N; k++) {
+                    int32_t px = (int32_t)cx + scope_x[k];
+                    int32_t py = (int32_t)cy - scope_y[k];
+                    if (px < (int32_t)UI_MARGIN || px >= (int32_t)(UI_MARGIN + ww)) continue;
+                    if (py < (int32_t)UI_WAVE_Y || py >= (int32_t)(UI_WAVE_Y + UI_WAVE_H)) continue;
+                    /* Newest points brightest, so the trace has a direction
+                     * instead of looking like static. */
+                    uint16_t c = ui_mix(UI_TRACK, ui_accent, k + 1u, SCOPE_N);
+                    fb_rect((uint32_t)px, (uint32_t)py, 2, 2, c);
+                }
+            }
+            goto viz_done;
+        }
+
         /* ---- L/R LEVELS ---------------------------------------------------
          * The only mode that uses stereo information; the others collapse both
          * channels into one number. Two bars plus two peak-hold markers. */
@@ -1794,9 +1836,10 @@ static void poll_input(void)
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
         }
         if (art_ready && art_shown) ui_art_draw();
-        ui_toast_msg(viz_mode == VIZ_BARS  ? "METER: BARS"
-                   : viz_mode == VIZ_WATER ? "METER: WATERFALL"
-                                           : "METER: L/R LEVELS");
+        ui_toast_msg(viz_mode == VIZ_BARS   ? "METER: BARS"
+                   : viz_mode == VIZ_WATER  ? "METER: WATERFALL"
+                   : viz_mode == VIZ_LEVELS ? "METER: L/R LEVELS"
+                                            : "METER: PHASE SCOPE");
         settings_mark_dirty();
     }
     if (edge & KEY_START) {
@@ -2975,6 +3018,27 @@ int main(void)
             peak_amp = (uint32_t)pk;
             peak_l   = (uint32_t)pkl;
             peak_r   = (uint32_t)pkr;
+
+            /* Even spread across the frame, so the trace covers the whole
+             * period rather than clustering at its start. */
+            uint32_t pairs = (uint32_t)(stereo ? (n / 2) : n);
+            uint32_t step  = pairs / SCOPE_N;
+            if (step) {
+                for (uint32_t k = 0; k < SCOPE_N; k++) {
+                    uint32_t idx = k * step;
+                    int32_t l = pcm[stereo ? idx * 2u : idx];
+                    int32_t r = stereo ? pcm[idx * 2u + 1u] : l;
+                    /* mid/side: mono collapses onto x = 0.
+                     *
+                     * >>11, not >>10: mid and side are SUMS, so each reaches
+                     * twice full scale. At >>10 a loud passage peaked 64 px
+                     * from centre against a 36 px half-height and most points
+                     * were clipped away -- the scope emptying out exactly when
+                     * the music got loud. */
+                    scope_x[k] = (signed char)((l - r) >> 11);
+                    scope_y[k] = (signed char)((l + r) >> 11);
+                }
+            }
         }
 
         for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
