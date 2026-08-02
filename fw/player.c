@@ -640,6 +640,7 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU, VIZ_COU
                                    * the needle read as a dotted line. */
 static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
 static uint8_t  vu_face;          /* the static face is on screen        */
+static uint16_t vu_face_w;        /* ...and the width it was drawn for   */
 static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 
 
@@ -914,6 +915,13 @@ static void ui_art_placeholder(void)
  * previous width would otherwise stay on screen. */
 static void ui_wave_clear(void)
 {
+    /* The VU face is cached on screen rather than redrawn each pass, so
+     * whatever erases this region has to say so -- otherwise the arc,
+     * ticks and labels are wiped and never come back, while the needle
+     * carries on repainting itself. Hiding the album art did exactly
+     * that. */
+    vu_face = 0;
+
     uint32_t band = (FB_H + UI_BANDS - 1u) / UI_BANDS;
     for (uint32_t i = 0; i < UI_BANDS; i++) {
         uint32_t y = i * band;
@@ -1429,7 +1437,10 @@ static void ui_draw_dynamic(void)
              * everything each pass is what made the L and R labels flicker:
              * they were being erased and redrawn while the panel was being
              * scanned out. Only the needle is erased and redrawn now. */
-            if (wf) vu_face = 0;
+            /* Width changes with the art panel, and the face geometry is
+             * derived from it, so a cached face drawn at another width is
+             * stale even if nothing erased it. */
+            if (wf || ww != vu_face_w) vu_face = 0;
 
             if (!vu_face) fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
 
@@ -1511,6 +1522,7 @@ static void ui_draw_dynamic(void)
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
             }
             vu_face = 1;
+            vu_face_w = (uint16_t)ww;
             goto viz_done;
         }
 
