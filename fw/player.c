@@ -1339,7 +1339,12 @@ static void ui_draw_dynamic(void)
     /* Frozen, not decaying, while paused: shifting the history along with a
      * zero sample scrolled the whole waveform off the screen, which reads as
      * "lost the audio" rather than "stopped". */
-    if ((!paused || ui_wave_force) && ++ui_last_vu >= 2u) {
+    /* The VU keeps updating while paused until both needles reach rest: a
+     * meter that freezes mid-deflection looks broken, and the fall to zero is
+     * the most characterful thing an analogue movement does. Every other mode
+     * is genuinely static when paused and stays frozen. */
+    uint32_t vu_settling = (viz_mode == VIZ_VU) && (vu_l || vu_r);
+    if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
 
         uint32_t wf = ui_wave_force; ui_wave_force = 0;
@@ -1422,16 +1427,24 @@ static void ui_draw_dynamic(void)
                  * 33 samples across 17 table entries, interpolating between
                  * neighbours -- the previous 9 marks were what looked
                  * half-finished. */
-                for (uint32_t t = 0; t <= 32u; t++) {
-                    uint32_t i0 = t / 2u, i1 = (i0 < 16u) ? i0 + 1u : 16u;
-                    int32_t sn = (t & 1u) ? (vu_sn[i0] + vu_sn[i1]) / 2 : vu_sn[i0];
-                    int32_t cs = (t & 1u) ? (vu_cs[i0] + vu_cs[i1]) / 2 : vu_cs[i0];
-                    int32_t ar = (int32_t)len + 3;
+                /* 64 samples, not 33. The arc is ~99 px long at this radius,
+                 * so 33 single pixels sit 3 px apart and read as a dotted line
+                 * -- which is what looked partially drawn. 80 steps of 2 px
+                 * dots overlap into a continuous curve; 64 still left 2.2 px
+                 * gaps, which is measured, not guessed. */
+                for (uint32_t t = 0; t <= 80u; t++) {
+                    uint32_t q = (t * 16u) / 80u;              /* table index   */
+                    uint32_t f = (t * 16u) % 80u;              /* fraction /80  */
+                    uint32_t q1 = (q < 16u) ? q + 1u : 16u;
+                    int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 80;
+                    int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 80;
+                    int32_t ar = (int32_t)len + 4;
                     int32_t ax = (int32_t)pivx + (ar * sn) / 4096;
                     int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
                     if (ay < (int32_t)UI_WAVE_Y) continue;
-                    fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
-                            (t >= 24u) ? UI_RED : UI_TRACK);
+                    if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
+                    fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
+                            (t >= 60u) ? UI_RED : UI_TRACK);
                 }
 
                 /* Ticks: longer marks inside the arc at fifths of the sweep. */
