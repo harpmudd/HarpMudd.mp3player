@@ -72,6 +72,7 @@ static int settings_load(void)
     if (v <= REP_ONE) rep_mode = (uint8_t)v;
 
     shuffle_on = b[SET_B_SHUFFLE] ? 1u : 0u;
+    art_pref   = b[SET_B_ART] ? 1u : 0u;
 
     v = b[SET_B_VIZ];
     if (v < VIZ_COUNT) viz_mode = (uint8_t)v;
@@ -92,7 +93,7 @@ static int settings_store(void)
     rec[SET_B_PALETTE] = (uint8_t)ui_pal_idx;
     rec[SET_B_REPEAT]  = rep_mode;
     rec[SET_B_SHUFFLE] = shuffle_on;
-    rec[SET_B_ART]     = art_shown ? 1u : 0u;
+    rec[SET_B_ART]     = art_pref ? 1u : 0u;
     rec[SET_B_VIZ]     = viz_mode;
 
     for (uint32_t w = 0; w < SET_BYTES / 4u; w++)

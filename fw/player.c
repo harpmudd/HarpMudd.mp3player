@@ -697,6 +697,11 @@ static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
 /* Shown by default; SELECT hides it. art_x is where the panel currently sits,
  * and FB_W means fully off the right edge. */
 static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
+/* art_shown is what is on screen; art_pref is what the USER asked for.
+ * Keeping them apart is what lets the choice survive a track change: a
+ * track with no artwork hides the panel without forgetting that the panel
+ * is wanted, so the next track that has some brings it back. */
+static uint8_t  art_pref = 1, art_have;
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -767,6 +772,12 @@ static void ui_art_bg_range(uint32_t x, uint32_t w)
  * scanline displays, i.e. corruption elsewhere rather than a clean cut. */
 static void ui_art_draw(void)
 {
+    /* The panel overlaps the meter area while it slides, so it can paint
+     * over a cached VU face -- which is how hiding the art left the right
+     * meter's arc erased for good: the width changed once, the face was
+     * redrawn once, and then the slide wiped it again. */
+    vu_face = 0;
+
     if (!art_ready || art_x >= FB_W) return;
     uint32_t w = FB_W - art_x;
     if (w > ART_W) w = ART_W;
@@ -2907,8 +2918,9 @@ static int load_track(void)
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
      * rather than animated -- a track change should not look like a slide. */
-    art_shown = (uint32_t)has_art;
-    art_x     = has_art ? ART_X : FB_W;
+    art_have  = (uint8_t)has_art;
+    art_shown = (uint32_t)(has_art && art_pref);
+    art_x     = art_shown ? ART_X : FB_W;
 
     ui_draw_chrome();   /* title/artist are populated now -- draw the UI */
 
@@ -3075,7 +3087,9 @@ int main(void)
 
         if (art_toggle) {
             art_toggle = 0;
-            art_shown ^= 1u;
+            art_pref  = (uint8_t)!art_pref;
+            art_shown = (uint32_t)(art_pref && art_have);
+            settings_mark_dirty();
             art_next   = cycles();          /* start moving immediately */
             /* Only the waveform changes shape; repainting the whole chrome
              * here would flash the text for no reason. */
