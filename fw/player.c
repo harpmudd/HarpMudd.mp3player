@@ -2563,6 +2563,12 @@ static void refill_pump(void)
         return;
     }
 
+    /* No NEW I/O during a track transition: the slot may already be serving
+     * the incoming file, and a refill at the outgoing position would hand the
+     * decoder bytes from the middle of the wrong track. In-flight reads are
+     * still collected above. */
+    if (reload_armed || reload_pending) return;
+
     /* Ring first, always -- audio starvation beats a late tag update. */
     if (ring_fill - ring_rd >= RING_SIZE / 2u) {
         if (tag_probes_left && (int32_t)(cycles() - tag_next) >= 0) {
@@ -3123,6 +3129,15 @@ int main(void)
             stale_ref_file_id = cur_file_id;
             slot_size         = REG(R_SLOT_SZ);
 
+            /* Same cut as a skip, for the same reasons: the slot may already
+             * be serving the NEW file, so both continuing to decode the ring
+             * and refilling it are wrong. The old advice that the old track
+             * "keeps playing through the wait" predates 0192 and was never
+             * safe once the slot switches under the reader. */
+            pcm_flush();
+            refill_drain();
+            ring_fill = 0; ring_rd = 0;
+
             tag_fix_budget = 2;
             REG(R_RELOAD)  = 1;             /* ack */
             reload_pending = 0;
@@ -3179,6 +3194,12 @@ int main(void)
         if (pl_reload_pending) {
             pl_reload_pending = 0;
             REG(R_RELOAD) = RL_PL_RELOAD;            /* ack just this bit */
+            /* Same cut as a skip: pl_load() blocks on slot-3 reads for longer
+             * than the FIFO holds, and picking a playlist means leaving the
+             * current track anyway. */
+            pcm_flush();
+            refill_drain();
+            ring_fill = 0; ring_rd = 0;
             pl_load();
             pl_report();
             if (pl_count) pl_play_at(0);
@@ -3195,7 +3216,20 @@ int main(void)
              * without committing to hearing it is the point of allowing this
              * while paused. */
             hold_paused = (paused & 1u) ? 1u : 0u;
+            /* Cut the outgoing track AT THE PRESS. pl_open_name blocks on 0190
+             * and 0192 for longer than the 43 ms the FIFO holds, so leaving
+             * the old track running meant it dipped to silence, faded BACK IN
+             * for the settle window, then was cut again -- a stutter heard in
+             * the outgoing song on every skip. A skip means the user is done
+             * with this track; end it cleanly at the button. */
+            pcm_flush();
+            refill_drain();
             if (pl_skip(d == 1u ? 1 : -1)) {
+                /* Slot now serves the NEW file: the ring's remaining bytes are
+                 * the only old-track audio left, and refilling at the old
+                 * offset would read the wrong file. Drop them; stay silent
+                 * until the reload lands. */
+                ring_fill = 0; ring_rd = 0;
                 ui_toast_set("TRACK", (uint32_t)(pl_pos + 1u), 0);
                 ui_mode_dirty = 1;
             }
@@ -3335,7 +3369,8 @@ int main(void)
             /* End of file: everything APF says the file holds has been read
              * and the ring is drained. Repeat -- with a playlist this is where
              * it advances instead, which is why it is a soft restart. */
-            if (((slot_size && file_pos >= slot_size) || eof_hit) && !rd_pending) {
+            if (((slot_size && file_pos >= slot_size) || eof_hit) &&
+                !rd_pending && !reload_armed && !reload_pending) {
                 /* With a playlist this advances; pl_advance_auto() returns 0
                  * when it deliberately did not (repeat-one, or the end of a
                  * non-repeating list), and the old replay-this-track behaviour
