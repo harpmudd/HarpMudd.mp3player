@@ -2037,6 +2037,68 @@ static int id3_find_text(const uint8_t *ring, uint32_t avail,
     return ID3_NO_FRAME;
 }
 
+/* The same search, but WALKING the tag instead of scanning a buffer.
+ *
+ * id3_find_text() only sees the first REFILL_CHUNK (4 KB) the head read brought
+ * in. That covers most files, because text frames normally come before any
+ * embedded picture -- but nothing requires it. A file with a 15 KB APIC at
+ * offset 100 puts TIT2 at 15618, far outside the window, and the caption then
+ * reads NOTIT even though the tag is perfectly well formed.
+ *
+ * Reading each 10-byte header on its own and skipping by the declared size
+ * needs no buffer, so tag size stops mattering. Same technique art_find_apic()
+ * already uses. It costs one small read per frame, so it is the FALLBACK --
+ * the buffer scan stays the fast path for the common layout.
+ */
+static int id3_walk_text(uint32_t tag_len, const char *frame_id,
+                         char *out, uint32_t out_size)
+{
+    out[0] = 0;
+    if (tag_len < 20u) return ID3_NO_TAG;
+    if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) return ID3_NO_TAG;
+    if (tagbuf[0] != 'I' || tagbuf[1] != 'D' || tagbuf[2] != '3') return ID3_NO_TAG;
+    uint8_t major = tagbuf[3];
+
+    uint32_t p = 10;
+    while (p + 10u <= tag_len) {
+        if (!target_read_slot(MP3_SLOT_ID, p, TAG_OFF, 16u)) return ID3_NO_FRAME;
+        if (tagbuf[0] == 0) return ID3_NO_FRAME;              /* padding reached */
+
+        uint32_t fsize = (major >= 4)
+            ? (((uint32_t)(tagbuf[4] & 0x7Fu) << 21) | ((uint32_t)(tagbuf[5] & 0x7Fu) << 14) |
+               ((uint32_t)(tagbuf[6] & 0x7Fu) << 7)  |  (uint32_t)(tagbuf[7] & 0x7Fu))
+            : (((uint32_t)tagbuf[4] << 24) | ((uint32_t)tagbuf[5] << 16) |
+               ((uint32_t)tagbuf[6] << 8)  |  (uint32_t)tagbuf[7]);
+        if (!fsize || p + 10u + fsize > tag_len) return ID3_NO_FRAME;
+
+        int hit = (tagbuf[0] == (uint8_t)frame_id[0] && tagbuf[1] == (uint8_t)frame_id[1] &&
+                   tagbuf[2] == (uint8_t)frame_id[2] && tagbuf[3] == (uint8_t)frame_id[3]);
+
+        if (hit && fsize > 1u) {
+            uint32_t want = fsize;
+            if (want > out_size + 1u) want = out_size + 1u;   /* encoding byte + text */
+            if (!target_read_slot(MP3_SLOT_ID, p + 10u, TAG_OFF, want))
+                return ID3_NO_FRAME;
+
+            uint8_t enc = tagbuf[0];
+            if (enc == 1u || enc == 2u) return ID3_UNSUPPORTED_ENCODING;
+
+            uint32_t n = want - 1u;
+            if (n > out_size - 1u) n = out_size - 1u;
+            uint32_t i;
+            for (i = 0; i < n; i++) {
+                uint8_t c = tagbuf[1 + i];
+                if (c == 0) break;
+                out[i] = (char)c;
+            }
+            out[i] = 0;
+            return (i > 0) ? ID3_OK : ID3_NO_FRAME;
+        }
+        p += 10u + fsize;
+    }
+    return ID3_NO_FRAME;
+}
+
 /* "This is still the file we were told we are leaving."
  *
  * Compares the parsed TITLE, not the raw head bytes: the first four bytes of
@@ -2178,12 +2240,30 @@ static int read_track_head(void)
                       track_album, sizeof(track_album));
         id3_find_text(ring, ring_fill, skip, "TRCK",
                       track_trk, sizeof(track_trk));
+
+        /* Everything above only saw the first 4 KB of the tag. If the title is
+         * not in there, the text frames sit past a large picture -- so walk the
+         * tag properly rather than reporting a well-formed file as untagged.
+         * Only the fields actually missing are looked up again. */
+        if (title_status != ID3_OK) {
+            title_status = id3_walk_text(skip, "TIT2",
+                                         track_title, sizeof(track_title));
+            if (!track_artist[0]) id3_walk_text(skip, "TPE2",
+                                                track_artist, sizeof(track_artist));
+            if (!track_album[0])  id3_walk_text(skip, "TALB",
+                                                track_album, sizeof(track_album));
+            if (!track_trk[0])    id3_walk_text(skip, "TRCK",
+                                                track_trk, sizeof(track_trk));
+        }
         for (uint32_t i = 0; i < sizeof(track_trk); i++)
             if (track_trk[i] == '/') { track_trk[i] = 0; break; }  /* "5/12" -> "5" */
         if (id3_find_text(ring, ring_fill, skip, "TDRC",
                           track_year, sizeof(track_year)) != ID3_OK)
             id3_find_text(ring, ring_fill, skip, "TYER",
                           track_year, sizeof(track_year));
+        if (!track_year[0] && id3_walk_text(skip, "TDRC",
+                                            track_year, sizeof(track_year)) != ID3_OK)
+            id3_walk_text(skip, "TYER", track_year, sizeof(track_year));
         track_year[4] = 0;
     }
 
