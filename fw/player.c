@@ -3105,7 +3105,7 @@ int main(void)
             refill_drain();
             frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
             track_kbps = 0; track_hz = 0;
-                    file_pos  = audio_start;
+            file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
             continue;
