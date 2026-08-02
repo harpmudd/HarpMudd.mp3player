@@ -344,20 +344,6 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
  * C requires a declaration to be visible before first use. */
 static HMP3Decoder dec;
 static uint32_t frames, errs, rate_set, min_level;
-/* Fade-in after a discontinuity, in samples.
- *
- * MP3's bit reservoir lets a frame reference main_data from frames before it.
- * Straight after a restart, seek or track change that data is not there, so the
- * first frames decode to whatever the empty reservoir produces -- a short burst
- * before the music proper, and the reason the hiccup was intermittent.
- *
- * DISCARDING those frames was the obvious fix and made it WORSE: pcm_flush
- * leaves the DAC holding its last sample, so dropping ~50 ms of output extends
- * that hold and enlarges the step into real audio. Ramping instead removes the
- * garbage AND the step, and adds no delay at all. ~46 ms at 44.1 kHz; the
- * divisor is a power of two so the gain is a shift. */
-#define FADE_SAMPLES 2048u
-static uint32_t fade_left;
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
 /* Up here with the other UI-visible state: the progress bar needs both, and C
  * needs them declared before ui_draw_dynamic(). */
@@ -585,7 +571,7 @@ static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone *
 #define UI_PROG_H   5u
 #define UI_INNER_W  (FB_W - 2u * UI_MARGIN)
 
-#define UI_SHOW_UNDERRUN 1   /* red square, top-right: audio FIFO ran dry */
+#define UI_SHOW_UNDERRUN 0   /* red square, top-right: audio FIFO ran dry */
 #define UI_UNDERRUN_SZ 10u
 #define UI_UNDERRUN_X  (FB_W - UI_MARGIN - UI_UNDERRUN_SZ)
 #define UI_UNDERRUN_Y  UI_MARGIN
@@ -2260,7 +2246,6 @@ static int      rd_kind;
 
 /* Periodic ID3 re-probe: a light backstop behind the 0190 identity gate. */
 static uint32_t tag_next;
-static uint32_t tag_walk_at;   /* tag length pending a full walk, 0 = none */
 static uint32_t tag_probes_left;
 
 static int  target_read_poll(void);
@@ -2849,15 +2834,11 @@ static int read_track_head(void)
          * not in there, the text frames sit past a large picture -- so walk the
          * tag properly rather than reporting a well-formed file as untagged.
          * Only the fields actually missing are looked up again. */
-        /* DEFER the walk. It is dozens of SD reads, and everything here runs
-         * between pcm_flush() and prefill() with the FIFO empty -- which is
-         * what made the track needing it tic. Note it and let the main loop do
-         * it once audio is flowing and the buffer is full.
-         *
-         * This tic was self-inflicted: before the walk existed that track
-         * loaded fast and simply showed no title. Fixing the title bought a
-         * hiccup, which is why it appeared out of nowhere. */
-        if (title_status != ID3_OK) tag_walk_at = skip ? skip : 1u;
+        /* Walked HERE, not deferred to the main loop. Deferring moved dozens
+         * of blocking SD reads into playback, where 43 ms of FIFO cannot cover
+         * them -- audibly worse than doing it during the load, and it made the
+         * caption arrive late. One pass collects every missing field. */
+        if (title_status != ID3_OK) title_status = id3_walk_all(skip);
         for (uint32_t i = 0; i < sizeof(track_trk); i++)
             if (track_trk[i] == '/') { track_trk[i] = 0; break; }  /* "5/12" -> "5" */
         if (id3_find_text(ring, ring_fill, skip, "TDRC",
@@ -2923,7 +2904,6 @@ static int load_track(void)
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
     track_kbps = 0; track_hz = 0;
-    fade_left = FADE_SAMPLES;
     bytes_per_sec = 16000u;
     paused = 0;
     seek_req = 0; restart_req = 0; soft_restart_req = 0;
@@ -3139,17 +3119,6 @@ int main(void)
          * quiet window means it never lands in the middle of a track change. */
         if (!reload_armed && !reload_pending) settings_pump();
 
-        /* The deferred tag walk, on the same terms as a settings write: only
-         * with the buffer full, so its reads cannot empty the FIFO. Paused is
-         * free -- there is nothing to starve. */
-        if (tag_walk_at && !reload_armed && !reload_pending &&
-            (paused || (pcm_level() >= 1792u &&
-                        ring_fill - ring_rd >= RING_SIZE / 2u))) {
-            uint32_t sk = tag_walk_at; tag_walk_at = 0;
-            if (id3_walk_all(sk) == ID3_OK) title_status = ID3_OK;
-            ui_draw_chrome();          /* the caption changed underneath us */
-        }
-
         if (art_toggle) {
             art_toggle = 0;
             art_pref  = (uint8_t)!art_pref;
@@ -3182,8 +3151,7 @@ int main(void)
             refill_drain();
             frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
             track_kbps = 0; track_hz = 0;
-            fade_left = FADE_SAMPLES;
-            file_pos  = audio_start;
+                    file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
             if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
             continue;
@@ -3228,10 +3196,7 @@ int main(void)
             pcm_flush();
             refill_drain();
             ring_fill = 0; ring_rd = 0;
-            /* A seek keeps the decoder but lands somewhere the bit reservoir
-             * does not describe, so it needs the same warm-up as a reset. */
-            fade_left = FADE_SAMPLES;
-            if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+                    if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
             if (paused) { ui_draw_dynamic(); continue; }
         }
 
@@ -3428,15 +3393,6 @@ int main(void)
             if (vol_gain != 256) {
                 l = (l * vol_gain) >> 8;
                 r = (r * vol_gain) >> 8;
-            }
-            /* Ramp up out of a discontinuity. Folded in here rather than as a
-             * second pass so it costs one shift per sample and only while the
-             * fade is running. */
-            if (fade_left) {
-                int32_t g = (int32_t)((FADE_SAMPLES - fade_left) >> 3);  /* 0..256 */
-                l = (l * g) >> 8;
-                r = (r * g) >> 8;
-                fade_left--;
             }
             /* Block while the FIFO is full -- pcm_fifo silently DROPS pushes
              * when full, so skipping this corrupts the audio rather than
