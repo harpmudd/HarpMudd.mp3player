@@ -460,7 +460,6 @@ static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
 
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
-static uint32_t restart_req;       /* B button: full reload, re-reads the tag */
 static uint32_t soft_restart_req;  /* probe: reposition only, keeps the known-good tag */
 static uint32_t reload_pending;
 static int      reload_armed;      /* reload seen, waiting out the settle delay */
@@ -499,7 +498,6 @@ static char     last_title[48];        /* title the current load settled on */
 static char     track_file[64];        /* filename APF reports for the slot  */
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
-static uint8_t  keep_size;             /* same file: keep the size we have    */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
 static uint32_t reload_retries;
 static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
@@ -2117,7 +2115,7 @@ static short pcm[MAX_NCHAN * MAX_NGRAN * MAX_NSAMP];
 /* ------------------------------------------------------------- controls --
  * A / Start : play-pause          Left / Right      : tap  = seek -/+ ~5 s
  * Up / Down : volume                                  hold = previous/next
- * B         : full reload (re-reads the tag)
+ * B         : restart this track from 0:00
  * Select    : show/hide art       Select + L        : cycle repeat off/all/one
  * L / R     : accent colour       Select + R        : shuffle on/off
  *
@@ -2171,7 +2169,8 @@ static void poll_input(void)
     }
     if (edge & KEY_B) {
         if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
-        else                     restart_req = 1u;
+        else                     stop_req = 1u;    /* restart = reposition,
+                                                    * NOT a cold reload */
     }
 
     /* ---- Left/Right: tap changes track, hold seeks ----
@@ -2973,7 +2972,7 @@ static int load_track(void)
     track_kbps = 0; track_hz = 0;
     bytes_per_sec = 16000u;
     paused = 0;
-    seek_req = 0; restart_req = 0; soft_restart_req = 0;
+    seek_req = 0; soft_restart_req = 0;
     st0 = 0; REG(R_STAT0) = 0; REG(R_STAT1) = 0; REG(R_STAT2) = 0; REG(R_STAT3) = 0;
     st0 |= (1u << 0); REG(R_STAT0) = st0;            /* decoder up */
 
@@ -2982,15 +2981,7 @@ static int load_track(void)
      * NOT after a core-initiated 0192 open, which raises no such edge and
      * would leave the PREVIOUS track's size here: wrong total time, wrong
      * end-of-track, and an end-of-track that fires early or never. */
-    /* A restart is the SAME file, so the size already measured is still right
-     * -- no need to re-read a stale R_SLOT_SZ and then re-measure. Exact, where
-     * the content-keyed cache below is a heuristic. */
-    if (keep_size && slot_size > audio_start) {
-        /* keep it */
-    } else {
-        slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
-    }
-    keep_size = 0;
+    slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
     force_size_probe = 0;
 
     uint32_t t0 = cycles(), tphase = t0;
@@ -3227,16 +3218,6 @@ int main(void)
             ui_wave_clear();
         }
 
-        /* B = restart. A FULL reload rather than a rewind, so it re-resolves
-         * both the tag and audio_start -- the manual escape hatch for a stale
-         * post-reload read. */
-        if (restart_req) {
-            restart_req = 0;
-            keep_size = 1;      /* B replays THIS file; its length has not changed */
-            if (!load_track()) ui_load_failed();
-            continue;
-        }
-
         /* Probe-driven correction: jump to the audio_start it just proved
          * right, keeping the tag it just recovered. Deliberately does not go
          * through load_track(), which would re-read the head. */
@@ -3255,11 +3236,20 @@ int main(void)
             continue;
         }
 
-        /* Start = stop: back to the beginning, still paused. Uses the same
-         * reposition the probe correction does, so it does not re-read the
-         * head and cannot disturb the tag. */
+        /* Reposition to 0:00 -- serves BOTH Start (stop, stays paused) and B
+         * (restart, keeps playing). One body, differing only in the pause
+         * flags poll_input set.
+         *
+         * B used to run a FULL cold load here -- fresh decoder, head reads,
+         * art -- and that path clicked where this one does not. The proof was
+         * the user's own experiment: stop-then-play lands on the identical
+         * audio at the identical position through this body and is clean, so
+         * restart now IS this body. The cold reload was a relic of the
+         * stale-tag era; for the SAME file there is nothing to re-resolve.
+         * Track CHANGES still load cold, as they must. */
         if (stop_req) {
             stop_req = 0;
+            if (idle) continue;             /* nothing loaded to reposition */
             pcm_flush();
             refill_drain();
             file_pos  = audio_start;
