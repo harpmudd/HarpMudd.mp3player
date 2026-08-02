@@ -414,6 +414,7 @@ static uint32_t paused, volume = 65u;    /* overridden by settings.bin if presen
  * breaks that bargain, so resume must ramp like everything else. */
 #define FADE_SAMPLES 2048u
 static uint32_t fade_left;
+static uint8_t  under_shadow;   /* underrun already faded this flush epoch */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -2274,7 +2275,8 @@ static void poll_input(void)
 static inline void pcm_flush(void)
 {
     REG(R_PCM_ST) = 1u;
-    fade_left = FADE_SAMPLES;     /* every flush is a discontinuity */
+    fade_left    = FADE_SAMPLES;  /* every flush is a discontinuity */
+    under_shadow = 0;             /* flush clears the sticky underrun flag */
 }
 
 static uint32_t rd_seq0, rd_deadline, rd_len;
@@ -2284,6 +2286,7 @@ static int      rd_pending, rd_ok;
  * both consumers share the slot and completion dispatches on this. */
 enum { RD_RING, RD_TAG };
 static int      rd_kind;
+static uint8_t  eof_hit;  /* a refill ran off the end: the file's true extent */
 
 /* Periodic ID3 re-probe: a light backstop behind the 0190 identity gate. */
 static uint32_t tag_next;
@@ -2381,31 +2384,6 @@ static int probe_readable(uint32_t off)
     return 1;
 }
 
-/* Incremental file-size search: one read per main-loop pass. */
-static uint8_t  sp_stage;          /* 0 idle, 1 growing, 2 bisecting */
-static uint32_t sp_lo, sp_hi;
-
-static void sp_start(void)
-{
-    sp_lo = 0; sp_hi = 1u << 22; sp_stage = 1;
-}
-
-/* One step. Returns with sp_stage 0 once slot_size has been set. */
-static void sp_step(void)
-{
-    if (sp_stage == 1) {
-        if (sp_hi < (1u << 26) && probe_readable(sp_hi)) { sp_lo = sp_hi; sp_hi <<= 1; }
-        else sp_stage = 2;
-        return;
-    }
-    if (sp_hi - sp_lo > 4096u) {
-        uint32_t mid = sp_lo + (sp_hi - sp_lo) / 2u;
-        if (probe_readable(mid)) sp_lo = mid; else sp_hi = mid;
-        return;
-    }
-    slot_size = sp_lo + 4096u;
-    sp_stage  = 0;
-}
 
 /* Measure the file. APF only reports a size with a RELOAD notification, so a
  * track loaded at boot has none -- which is why the progress bar and the
@@ -2557,7 +2535,30 @@ static void refill_pump(void)
     if (rd_pending) {
         if (!target_read_poll()) return;
         rd_pending = 0;
-        if (!rd_ok) { st0 |= (1u << 4); REG(R_STAT0) = st0; return; }
+        if (!rd_ok) {
+            /* A RING read past the end of the file FAILS on this host --
+             * probe_file_size() was built on exactly that behaviour. So a
+             * failed refill IS the end of the file announcing itself, and this
+             * is where the size of a headerless file gets discovered: at the
+             * end, where the stream reports it for free, instead of by twenty
+             * BLOCKING reads at the start of playback -- which were the tic on
+             * the one track with no Xing header. These reads are async; the
+             * decoder never waits on them.
+             *
+             * Halve toward the true boundary so the tail is not lost: a 4 KB
+             * read straddling EOF fails outright rather than shortening. */
+            if (rd_kind == RD_RING) {
+                if (rd_len > 512u) {
+                    target_read_start(file_pos, RING_OFF + ring_fill, rd_len / 2u);
+                    return;
+                }
+                eof_hit = 1u;
+                if (!slot_size || slot_size > file_pos) slot_size = file_pos;
+                return;
+            }
+            st0 |= (1u << 4); REG(R_STAT0) = st0;
+            return;
+        }
         if (rd_kind == RD_TAG) tag_probe_apply();
         else { file_pos += rd_len; ring_fill += rd_len; }
         return;
@@ -2576,6 +2577,7 @@ static void refill_pump(void)
         }
         return;
     }
+    if (eof_hit) return;                    /* nothing past the end to fetch */
     rd_kind = RD_RING;
 
     if (ring_fill + REFILL_CHUNK > RING_SIZE) {
@@ -2605,6 +2607,7 @@ static void refill_pump(void)
 
 static int prefill(void)
 {
+    eof_hit = 0;              /* every reposition passes through here */
     uint32_t want = PREFILL_CHUNKS * REFILL_CHUNK;
     if (want > RING_SIZE) want = RING_SIZE;
     while (ring_fill < want && ring_fill + REFILL_CHUNK <= RING_SIZE)
@@ -2989,7 +2992,6 @@ static int load_track(void)
     }
     keep_size = 0;
     force_size_probe = 0;
-    sp_stage = 0;          /* abandon a search from the previous track */
 
     uint32_t t0 = cycles(), tphase = t0;
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
@@ -3010,10 +3012,8 @@ static int load_track(void)
      * A file that declares its own length still skips all of this. */
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
-    if (slot_size <= audio_start) {
-        slot_size = 0;
-        sp_start();
-    }
+    if (slot_size <= audio_start)
+        slot_size = 0;      /* unknown -- EOF will announce itself; see refill_pump */
     ld_size = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Cover art BEFORE the chrome, because whether it exists decides the
@@ -3215,13 +3215,6 @@ int main(void)
          * quiet window means it never lands in the middle of a track change. */
         if (!reload_armed && !reload_pending) settings_pump();
 
-        /* One step of the file-size search, and only with the buffer full: a
-         * single 512-byte read fits easily inside 43 ms of FIFO, where the
-         * whole search never could. */
-        if (sp_stage && !reload_armed && !reload_pending &&
-            (paused || (pcm_level() >= 1792u &&
-                        ring_fill - ring_rd >= RING_SIZE / 2u)))
-            sp_step();
 
         if (art_toggle) {
             art_toggle = 0;
@@ -3352,7 +3345,7 @@ int main(void)
             /* End of file: everything APF says the file holds has been read
              * and the ring is drained. Repeat -- with a playlist this is where
              * it advances instead, which is why it is a soft restart. */
-            if (slot_size && file_pos >= slot_size && !rd_pending) {
+            if (((slot_size && file_pos >= slot_size) || eof_hit) && !rd_pending) {
                 /* With a playlist this advances; pl_advance_auto() returns 0
                  * when it deliberately did not (repeat-one, or the end of a
                  * non-repeating list), and the old replay-this-track behaviour
@@ -3416,6 +3409,16 @@ int main(void)
             }
             rate_set = 1;
             st0 |= (1u << 2); REG(R_STAT0) = st0;
+        }
+
+        /* If the FIFO ran dry, its output has glided toward zero and the
+         * samples about to be pushed are mid-waveform: ramp them in. The flag
+         * is sticky until the next flush, so this catches the FIRST underrun
+         * of an epoch -- the net under the causes removed elsewhere, not a
+         * licence to underrun. */
+        if (!under_shadow && pcm_underrun()) {
+            under_shadow = 1u;
+            fade_left    = FADE_SAMPLES;
         }
 
         int n = fi.outputSamps;                  /* interleaved L,R */
