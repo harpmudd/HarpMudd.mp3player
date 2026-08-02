@@ -1107,6 +1107,67 @@ static void ui_splash(void)
     fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
 }
 
+/* Boot animation: a pulse sweeps the meter while the title fades up.
+ *
+ * Runs BEFORE the track is opened, so it has the whole CPU -- nothing is
+ * decoding yet and there is no audio to protect. That is the one moment in this
+ * core where drawing cost genuinely does not matter, which is why the meter can
+ * be redrawn in full every frame here and nowhere else.
+ *
+ * Fixed length rather than "until the track loads": tying it to load time means
+ * it is a different animation on every card, and a stutter if the load is
+ * quick. ~0.8 s, then the splash stays put until playback is ready. */
+static void ui_splash_anim(void)
+{
+    ui_gradient();
+
+    const uint32_t bed_y = UI_WAVE_Y * UI_BANDS / FB_H;
+    uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, bed_y, UI_BANDS);
+    uint16_t tbg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, 120u * UI_BANDS / FB_H,
+                          UI_BANDS);
+    uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
+    uint32_t ww = ui_wave_w();
+
+    const uint32_t STEPS = 40u, TAIL = 7u;
+    for (uint32_t t = 0; t < STEPS; t++) {
+        /* Title fades in over the first half, then holds. */
+        uint32_t f = (t * 2u < STEPS) ? (t * 2u) : STEPS;
+        fb_set_color(ui_mix(tbg, ui_accent, f, STEPS), tbg);
+        fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
+
+        /* A travelling pulse: each bar peaks as the crest passes it and decays
+         * behind, so the meter reads as sweeping rather than flashing. */
+        uint32_t pos = (t * (UI_WAVE_N + TAIL)) / STEPS;
+        for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+            uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
+            uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
+            uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
+
+            uint32_t d = (pos > i) ? (pos - i) : (i - pos);
+            uint32_t h = (d < TAIL) ? ((TAIL - d) * UI_WAVE_H) / TAIL : 0u;
+            if (h < 2u) h = 2u;
+
+            uint16_t c = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
+            fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h, c);
+            if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+        }
+
+        uint32_t next = cycles() + CLK_HZ / 50u;      /* ~20 ms a frame */
+        while ((int32_t)(cycles() - next) < 0) { }
+    }
+
+    /* Leave the meter at its floor so the transition into playback is a rise
+     * from rest, not a jump from wherever the pulse happened to stop. */
+    for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+        uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
+        uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
+        uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
+        fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - 2u, bed);
+        fb_rect(x, UI_WAVE_Y + UI_WAVE_H - 2u, lit, 2u,
+                ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
+    }
+}
+
 static void ui_idle_screen(void)
 {
     ui_splash();
@@ -2560,7 +2621,7 @@ int main(void)
     /* Something deliberate on screen BEFORE the slow work -- reading the
      * playlist, opening a track, decoding cover art. Previously the first
      * paint came after all of that. */
-    ui_splash();
+    ui_splash_anim();
 
     /* Before the track, deliberately: reading the playlist slot makes APF drop
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
