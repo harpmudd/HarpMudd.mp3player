@@ -2283,7 +2283,7 @@ static int      rd_pending, rd_ok;
 
 /* What the in-flight read is for. Only one APF command can be outstanding, so
  * both consumers share the slot and completion dispatches on this. */
-enum { RD_RING, RD_TAG };
+enum { RD_RING, RD_TAG, RD_PROBE };
 static int      rd_kind;
 static uint8_t  eof_hit;  /* a refill ran off the end: the file's true extent */
 
@@ -2414,6 +2414,74 @@ static uint32_t probe_file_size(void)
     return lo + 4096u;
 }
 
+/* ---- ASYNC file-size search ------------------------------------------------
+ * The same binary search probe_file_size() does, restructured as a state
+ * machine driven by refill_pump: one 512-byte read at a time, through the same
+ * single command slot as refills, issued only when the buffer is full and
+ * throttled. The decoder never waits on it.
+ *
+ * This exists because both earlier forms were wrong. Blocking in load_track
+ * cost 480 ms of the silent gap; blocking during playback (sp_step) starved
+ * the FIFO and ticked. Deleting it entirely traded away the total time, the
+ * progress bar fill and scrub anchoring on files with no Xing header -- a
+ * worse deal than it looked. Async is what it should have been from the start.
+ *
+ * Idempotent by design: the offset to test is derived from state at issue time
+ * and again at completion, so a completion swallowed by refill_drain() (seek,
+ * track change) just means the same offset is asked again. */
+enum { ASP_OFF = 0, ASP_CLAMP, ASP_GROW, ASP_BISECT };
+static uint8_t  asp_stage;
+static uint32_t asp_lo, asp_hi;
+static uint32_t asp_next_at;
+
+static void asp_start(void)
+{
+    asp_stage   = ASP_CLAMP;
+    asp_next_at = cycles() + CLK_HZ / 2u;   /* let playback settle first */
+}
+
+static uint32_t asp_offset(void)
+{
+    if (asp_stage == ASP_CLAMP) return 60u << 20;   /* far past any real file */
+    if (asp_stage == ASP_GROW)  return asp_hi;
+    return asp_lo + (asp_hi - asp_lo) / 2u;
+}
+
+static void asp_advance(void)
+{
+    volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+    int landed   = rd_ok && (*w != 0xA5A5A5A5u);
+    int readable = landed && (!probe_clamps || *w != probe_clamp_ref);
+
+    switch (asp_stage) {
+    case ASP_CLAMP:
+        /* A read far past any plausible size that still lands means this host
+         * CLAMPS past-EOF reads instead of failing them; remember what a
+         * hopeless offset returns so later probes can recognise it. */
+        probe_clamps = landed ? 1 : 0;
+        if (landed) probe_clamp_ref = *w;
+        asp_lo = 0; asp_hi = 1u << 22;
+        asp_stage = ASP_GROW;
+        break;
+    case ASP_GROW:
+        if (readable) {
+            if (asp_hi >= (1u << 26)) { asp_stage = ASP_OFF; break; } /* runaway */
+            asp_lo = asp_hi; asp_hi <<= 1;
+        } else
+            asp_stage = ASP_BISECT;
+        break;
+    default: {                                   /* ASP_BISECT */
+        uint32_t mid = asp_lo + (asp_hi - asp_lo) / 2u;
+        if (readable) asp_lo = mid; else asp_hi = mid;
+        if (asp_hi - asp_lo <= 4096u) {
+            if (!slot_size) slot_size = asp_lo + 4096u;
+            asp_stage = ASP_OFF;
+        }
+        break;
+    }
+    }
+}
+
 static void slot_filename(char *out, uint32_t out_size);
 
 /* Ask APF which file is CURRENTLY in the slot (0190) and reduce its response
@@ -2534,6 +2602,7 @@ static void refill_pump(void)
     if (rd_pending) {
         if (!target_read_poll()) return;
         rd_pending = 0;
+        if (rd_kind == RD_PROBE) { asp_advance(); return; }
         if (!rd_ok) {
             /* A RING read past the end of the file FAILS on this host --
              * probe_file_size() was built on exactly that behaviour. So a
@@ -2579,6 +2648,14 @@ static void refill_pump(void)
              * load-time tool; on the streaming path it starves the decoder. */
             rd_kind  = RD_TAG;
             target_read_start(0, TAG_OFF, TAG_SIZE);
+        } else if (asp_stage && pcm_level() >= 1792u &&
+                   (int32_t)(cycles() - asp_next_at) >= 0) {
+            asp_next_at = cycles() + CLK_HZ / 8u;      /* ~8 probes a second */
+            volatile uint32_t *w =
+                (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+            *w = 0xA5A5A5A5u;                          /* poison, then look */
+            rd_kind = RD_PROBE;
+            target_read_start_slot(MP3_SLOT_ID, asp_offset(), TAG_OFF, 512u);
         }
         return;
     }
@@ -3007,10 +3084,14 @@ static int load_track(void)
      * end-of-track check, none of which matter in the first second.
      *
      * A file that declares its own length still skips all of this. */
+    asp_stage = ASP_OFF;                 /* cancel the previous track's search */
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
-    if (slot_size <= audio_start)
-        slot_size = 0;      /* unknown -- EOF will announce itself; see refill_pump */
+    if (slot_size <= audio_start) {
+        slot_size = 0;
+        asp_start();     /* measure in the background; total time, progress and
+                          * scrubbing light up when it converges (~2 s in) */
+    }
     ld_size = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Cover art BEFORE the chrome, because whether it exists decides the

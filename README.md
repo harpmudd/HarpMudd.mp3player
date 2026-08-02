@@ -143,10 +143,10 @@ back with one path component changed. Nothing about the layout is assumed.
 
 ## Known limitations
 
-- **Files with no Xing/Info/VBRI header show `--:--` for total time** and an
-  empty progress bar. Such a file never states its length, and measuring it
-  up front meant blocking SD reads that could be heard — the length is learned
-  when the end of the file is actually reached instead.
+- **Files with no Xing/Info/VBRI header show `--:--` for a couple of seconds**
+  after they start. Such a file never states its length, so it is measured in
+  the background once playback is running; the total time, progress bar and
+  scrub position appear when the measurement lands.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II
   are not handled.
 - **JPEG album art only.** PNG cover art is detected and skipped.
