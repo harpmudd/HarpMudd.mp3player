@@ -2285,6 +2285,8 @@ static uint32_t rd_seq0, rd_deadline, rd_len;
 static int      rd_pending, rd_ok;
 
 static uint8_t  eof_hit;  /* a refill ran off the end: the file's true extent */
+static uint32_t eof_at;   /* offset the failures are accumulating at        */
+static uint32_t eof_fails;
 
 /* Periodic ID3 re-probe: a light backstop behind the 0190 identity gate. */
 
@@ -2545,6 +2547,19 @@ static void refill_pump(void)
                 target_read_start(file_pos, RING_OFF + ring_fill, rd_len / 2u);
                 return;
             }
+            /* CONFIRM before believing it. A read failing once does not mean
+             * end-of-file: right after a 0192 the slot is still settling and a
+             * refill can fail transiently. Treating that as EOF set slot_size
+             * to the current position and the main loop restarted the track --
+             * exactly the "plays half a second, jumps back to the beginning"
+             * report, and impossible on stop/restart because no file changes
+             * there. Three consecutive failures at the SAME offset, which a
+             * real end always produces and a settling slot does not. */
+            if (eof_at != file_pos) { eof_at = file_pos; eof_fails = 0; }
+            if (++eof_fails < 3u) {
+                target_read_start(file_pos, RING_OFF + ring_fill, 512u);
+                return;
+            }
             eof_hit = 1u;
             if (!slot_size || slot_size > file_pos) slot_size = file_pos;
             return;
@@ -2592,7 +2607,7 @@ static void refill_pump(void)
 
 static int prefill(void)
 {
-    eof_hit = 0;              /* every reposition passes through here */
+    eof_hit = 0; eof_fails = 0; eof_at = 0xFFFFFFFFu;   /* every reposition passes here */
     uint32_t want = PREFILL_CHUNKS * REFILL_CHUNK;
     if (want > RING_SIZE) want = RING_SIZE;
     while (ring_fill < want && ring_fill + REFILL_CHUNK <= RING_SIZE)
@@ -2713,6 +2728,43 @@ static int read_track_head(void)
     int attempt = 0, have_prev = 0;
     uint32_t skip = 0, prev_skip = 0;
     char prev_try[48];
+    /* PROVE THE SLOT HAS SETTLED before reading anything we will act on.
+     *
+     * After a 0192 the slot does not switch instantly, and the old design
+     * loaded immediately and then tried to DETECT having read the wrong file --
+     * stale-title compares, retry budgets, periodic re-probes. Every one of
+     * those was a way of noticing a bad read after committing to it, and a
+     * wrong tag length means a wrong audio_start, which means the first audio
+     * read lands mid-frame: a single loud click, exactly as reported, and
+     * impossible on stop/restart where no file changes.
+     *
+     * Cheaper and surer: read the first 16 bytes twice, ~30 ms apart, and
+     * require them to agree. A slot mid-switch does not return the same bytes
+     * twice running; a settled one always does. Up to ~1 s, then proceed
+     * anyway -- the retry loop below is the existing backstop.
+     *
+     * Costs nothing on the common path: the first two reads agree and it
+     * proceeds, and it does not run at all for a restart, which never gets
+     * here. */
+    {
+        uint8_t prev[16];
+        for (uint32_t i = 0; i < sizeof(prev); i++) prev[i] = 0u;
+        uint32_t tries = 0, agree = 0;
+        while (tries++ < 32u && agree < 2u) {
+            if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) { agree = 0; continue; }
+            uint32_t same = 1;
+            for (uint32_t i = 0; i < sizeof(prev); i++) {
+                if (tagbuf[i] != prev[i]) same = 0;
+                prev[i] = tagbuf[i];
+            }
+            agree = same ? agree + 1u : 0u;
+            if (agree < 2u) {
+                uint32_t wait = cycles() + CLK_HZ / 32u;   /* ~30 ms */
+                while ((int32_t)(cycles() - wait) < 0) { }
+            }
+        }
+    }
+
     /* ONCE, before the loop -- not on every retry.
      *
      * Flushing makes APF forget the slot's cluster chain, so the next read has
