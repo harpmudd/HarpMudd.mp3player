@@ -45,7 +45,8 @@ playlists at any time.
 | **Left** / **Right** | *Hold* — seek back / forward |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter: bars, waterfall, L/R levels, phase scope, oscilloscope, VU |
+| **X** | Cycle the meter (nine styles) |
+| **Select** + **X** | Cycle the meter backwards |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
@@ -97,7 +98,8 @@ everything once before repeating any.
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **Six meters**, cycled with **X** and remembered between sessions:
+- **Nine meters**, cycled with **X** (**Select**+**X** goes back) and remembered
+  between sessions:
   - **Bars** — scrolling loudness history with peak-hold markers.
   - **Waterfall** — a strip scrolling left, colour tracking loudness, building a
     picture of the track's dynamics.
@@ -108,6 +110,10 @@ everything once before repeating any.
     zero crossing so the trace holds still.
   - **VU** — twin analogue needles with real ballistics, a 100° sweep, and a
     fall to rest when you pause.
+  - **Waveform** — a scrolling envelope mirrored about a centre line, like a
+    DAW's overview of a track.
+  - **Mirrored bars** — the bar history grown up and down from the centre.
+  - **Peak dots** — only the peak markers, tracing the loudness contour.
 
   None of them is a spectrum: the decoder doesn't expose frequency bins, so
   these show loudness, waveform and stereo rather than frequency content.

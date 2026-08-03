@@ -616,7 +616,8 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * All three run off what the decoder already produces -- there are no frequency
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over
  * TIME, LEVELS shows the two channels right now. */
-enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU, VIZ_COUNT };
+enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
+       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
  * the vertical -- the standard goniometer orientation, and the reason it reads
@@ -1452,6 +1453,68 @@ static void ui_draw_dynamic(void)
          *
          * Colour encodes loudness, so the strip becomes a picture of the
          * track's dynamics rather than an instantaneous reading. */
+        /* ---- SCROLLING WAVEFORM -------------------------------------------
+         * The waterfall's COPY-scroll, but the new column is drawn MIRRORED
+         * about a centre line instead of colour-coded from the bottom -- a
+         * DAW-style envelope building up left to right. ~5 commands a frame,
+         * because COPY moves the whole strip for the price of one. */
+        if (viz_mode == VIZ_SCROLL) {
+            const uint32_t x0 = UI_MARGIN, w = ww;
+            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
+            const uint32_t half = UI_WAVE_H / 2u - 1u;
+            if (!paused) {
+                fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
+
+                uint32_t a = (peak_amp * half) / 32768u;
+                if (a > half) a = half;
+
+                uint32_t cx = x0 + w - 1u;
+                fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H, bed);      /* clear column */
+                if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u,
+                               ui_mix(UI_TRACK, ui_accent, a, half));
+                else   fb_rect(cx, cy, 1, 1, UI_TRACK);         /* silence line */
+            }
+            goto viz_done;
+        }
+
+        /* ---- MIRRORED BARS ------------------------------------------------
+         * The same wave[] history the bars use, grown up AND down from a
+         * centre line. Same cost as the bars; different shape entirely. */
+        if (viz_mode == VIZ_MIRROR) {
+            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
+            const uint32_t half = UI_WAVE_H / 2u - 1u;
+            for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+                uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
+                uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
+                uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
+                uint32_t h   = (wave[i] * half) / UI_WAVE_H;
+                if (!h) h = 1u;
+                uint16_t lc  = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
+                uint16_t c   = ui_mix(UI_TRACK, lc, i + 1u, UI_WAVE_N);
+                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H, bed);
+                fb_rect(x, cy - h, lit, h * 2u + 1u, c);
+            }
+            goto viz_done;
+        }
+
+        /* ---- PEAK DOTS ----------------------------------------------------
+         * Only the peak-hold markers, no bars: a row of floating dots tracing
+         * the loudness contour. ~2 commands a column and the sparsest mode
+         * here. */
+        if (viz_mode == VIZ_DOTS) {
+            for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+                uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
+                uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
+                uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
+                uint32_t pk  = wave_pk[i];
+                if (pk < 2u) pk = 2u;
+                uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
+                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H, bed);
+                fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 2u, c);
+            }
+            goto viz_done;
+        }
+
         if (viz_mode == VIZ_WATER) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             if (!paused) {
@@ -2152,7 +2215,13 @@ static void poll_input(void)
         if (!(paused & 1u)) stopped = 0;      /* playing is never "stopped" */
     }
     if (edge & KEY_X) {
-        viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        /* Select+X steps BACK. Nine modes on one button is a lot of taps to
+         * reach the one before the current; a reverse is four lines. */
+        if (keys & KEY_SELECT) {
+            sel_used = 1;
+            viz_mode = (uint8_t)((viz_mode + VIZ_COUNT - 1u) % VIZ_COUNT);
+        } else
+            viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
         ui_wave_clear();                 /* modes do not share a screen layout */
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
@@ -2164,7 +2233,10 @@ static void poll_input(void)
                    : viz_mode == VIZ_LEVELS ? "METER: L/R LEVELS"
                    : viz_mode == VIZ_SCOPE  ? "METER: PHASE SCOPE"
                    : viz_mode == VIZ_WAVE   ? "METER: OSCILLOSCOPE"
-                                            : "METER: VU");
+                   : viz_mode == VIZ_VU     ? "METER: VU"
+                   : viz_mode == VIZ_SCROLL ? "METER: WAVEFORM"
+                   : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
+                                            : "METER: PEAK DOTS");
         settings_mark_dirty();
     }
     if (edge & KEY_START) {
