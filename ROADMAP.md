@@ -81,6 +81,80 @@ distinguishes the two formats, so the dispatch point exists.
 Worth measuring first: how many covers in a real library are actually PNG. If
 it's a handful, the effort is better spent elsewhere.
 
+## Preset EQ — feasible, but belongs in the RTL
+
+Worth doing, and the obvious implementation is the wrong one.
+
+**Not in firmware.** The free CPU budget is 8.7 M instr/s at worst case (36.4 M
+total at 60 MHz and 1.65 CPI, less the 27.7 M Helix needs for 320 kbps / 48 kHz).
+A 5-band stereo biquad at 44.1 kHz is 441,000 biquad evaluations a second, and a
+Direct Form I biquad on RV32 is ~15-20 instructions once loads, stores and
+saturation are counted — 6.6 to 8.8 M instr/s, i.e. essentially all of it. It
+would also be spending the exact budget that keeps the decoder fed, which is the
+one way to bring the audio tics back.
+
+**In the RTL it is nearly free.** Output is 48 kHz and clk_sys is 60 MHz, so there
+are ~1250 clocks per output sample. Twenty biquads (10 bands x 2 channels) at 5
+MACs each is ~100 MACs, which one pipelined multiplier retires in ~150 cycles —
+about 12% of the time available. Cost is one DSP block, a small coefficient ROM
+and 20 x 4 words of state. Zero CPU, and the decoder never knows it exists.
+
+Where it goes: between `pcm_fifo` and `sound_i2s`, which is already a clean
+16-bit stereo hand-off. Presets rather than per-band control keeps it to a ROM of
+coefficient sets and one selector.
+
+Two cautions. This is the first change in a long time that needs a **Quartus
+recompile** rather than a firmware rebuild, so budget a timing closure round.
+And generate the coefficients offline in python and paste the table in — a
+hand-written filter table is exactly the mistake that cost a hardware round on
+the VU needle's sine table.
+
+## FLAC — plausible, gated on one measurement
+
+The decode itself is the easy part: FLAC is Rice decoding plus an LPC filter,
+with no MDCT and no synthesis filterbank, so it is materially cheaper than MP3
+and integer throughout. No FPU needed, which is the usual killer on a soft core.
+
+**The binding constraint is SD throughput, and we have not measured it.** FLAC
+runs ~700-1000 kbps against MP3's 128-320, so roughly 112 KB/s sustained where
+40 KB/s is the most this core has ever had to hold. 40 KB/s is proven; 112 KB/s
+is unknown. That number decides the feature and nothing else should be built
+until it exists.
+
+Measuring it is cheap: time N sequential `REFILL_CHUNK` reads on the existing
+path and divide. Note that the figure must come from SEQUENTIAL reads — the
+~480 ms the old size probe spent on ~20 reads is not representative, because
+those were random offsets that made APF re-walk the cluster chain each time.
+
+RAM is tight but survivable: a 4096-sample stereo block is 32 KB decoded, against
+~76 KB of heap of which Helix currently takes ~34. Only one decoder need be
+resident, so this is a swap rather than an addition. Limit scope to 16-bit /
+44.1 kHz — 24/96 is not worth attempting.
+
+## AAC — the hardest of the three, and the decoder is not why
+
+The decoder is the good news. Helix ships a fixed-point AAC decoder alongside the
+MP3 one, same lineage, same RPSL license already vendored here, same integration
+shape. That part is close to a solved problem.
+
+Two things make it hard anyway.
+
+**CPU headroom.** AAC-LC decode is comparable to MP3 and often somewhat above it,
+against 24% free at worst case. It may simply not fit at 60 MHz. There is a real
+escape route — STAGE0 measured VexRiscv's fmax at 141 MHz, so the CPU itself has
+plenty of room — but clk_sys is not the CPU's private clock, and moving it drags
+the video, SDRAM and bridge timing along with it. Not free.
+
+**The container, which is the actual cost.** AAC in the wild means `.m4a`, i.e.
+MP4: atom parsing, sample tables, and random access into the file to resolve
+them. Random access is the expensive operation on this platform, for the reason
+noted above. Raw ADTS `.aac` streams would be trivial by comparison and are rare
+in real libraries, so supporting only those would be a feature almost nobody
+could use.
+
+Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
+risk), then FLAC (one measurement decides it), then AAC.
+
 ## Gapless playback
 
 Track changes currently have a short silence — the new file has to be opened,
