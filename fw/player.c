@@ -501,7 +501,6 @@ static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
 static uint32_t reload_retries;
 static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
-static int      tag_fix_budget;    /* probe-triggered restarts left; see tag_probe_apply */
 
 /* ------------------------------------------------------------ UI layout ---
  * No album art (would need a JPEG decoder for ID3 APIC frames -- out of
@@ -2285,15 +2284,9 @@ static inline void pcm_flush(void)
 static uint32_t rd_seq0, rd_deadline, rd_len;
 static int      rd_pending, rd_ok;
 
-/* What the in-flight read is for. Only one APF command can be outstanding, so
- * both consumers share the slot and completion dispatches on this. */
-enum { RD_RING, RD_TAG };
-static int      rd_kind;
 static uint8_t  eof_hit;  /* a refill ran off the end: the file's true extent */
 
 /* Periodic ID3 re-probe: a light backstop behind the 0190 identity gate. */
-static uint32_t tag_next;
-static uint32_t tag_probes_left;
 
 static int  target_read_poll(void);
 static void refill_drain(void);
@@ -2346,7 +2339,6 @@ static int target_read_poll(void)
  * is no audio to starve. The steady-state path must NOT use this. */
 static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint32_t len)
 {
-    rd_kind = RD_RING;                  /* retires here, not in the pump */
     target_read_start_slot(slot, off, dst_off, len);
     while (!target_read_poll()) { }
     rd_pending = 0;
@@ -2520,7 +2512,6 @@ static int refill_one(void)
     return 1;
 }
 
-static void tag_probe_apply(void);
 
 /* Issue a read, then go back to decoding and collect it later.
  *
@@ -2550,20 +2541,15 @@ static void refill_pump(void)
              *
              * Halve toward the true boundary so the tail is not lost: a 4 KB
              * read straddling EOF fails outright rather than shortening. */
-            if (rd_kind == RD_RING) {
-                if (rd_len > 512u) {
-                    target_read_start(file_pos, RING_OFF + ring_fill, rd_len / 2u);
-                    return;
-                }
-                eof_hit = 1u;
-                if (!slot_size || slot_size > file_pos) slot_size = file_pos;
+            if (rd_len > 512u) {
+                target_read_start(file_pos, RING_OFF + ring_fill, rd_len / 2u);
                 return;
             }
-            st0 |= (1u << 4); REG(R_STAT0) = st0;
+            eof_hit = 1u;
+            if (!slot_size || slot_size > file_pos) slot_size = file_pos;
             return;
         }
-        if (rd_kind == RD_TAG) tag_probe_apply();
-        else { file_pos += rd_len; ring_fill += rd_len; }
+        file_pos += rd_len; ring_fill += rd_len;
         return;
     }
 
@@ -2575,19 +2561,9 @@ static void refill_pump(void)
 
     /* Ring first, always -- audio starvation beats a late tag update. */
     if (ring_fill - ring_rd >= RING_SIZE / 2u) {
-        if (tag_probes_left && (int32_t)(cycles() - tag_next) >= 0) {
-            tag_probes_left--;
-            tag_next = cycles() + CLK_HZ * 2u;
-            /* NO slot-cache flush here: flushing makes APF forget the cluster
-             * chain, so every following refill has to re-walk it. That is a
-             * load-time tool; on the streaming path it starves the decoder. */
-            rd_kind  = RD_TAG;
-            target_read_start(0, TAG_OFF, TAG_SIZE);
-        }
         return;
     }
     if (eof_hit) return;                    /* nothing past the end to fetch */
-    rd_kind = RD_RING;
 
     if (ring_fill + REFILL_CHUNK > RING_SIZE) {
         if (ring_rd == 0) return;                           /* genuinely full */
@@ -2693,65 +2669,6 @@ static int title_is_stale(const char *title)
         if (!title[i]) break;
     }
     return 1;
-}
-
-/* Applies a completed periodic head re-read. A stale post-reload read gets
- * BOTH the tag and the start offset wrong together, so this does not merely
- * refresh the caption: if the probed tag disagrees, the offset being played
- * from was wrong too. */
-static void tag_probe_apply(void)
-{
-    uint32_t skip = id3_len(tagbuf);
-    char t[48] = { 0 }, a[48] = { 0 };
-    int  st = ID3_NO_TAG;
-    if (skip) {
-        st = id3_find_text(tagbuf, TAG_SIZE, skip, "TIT2", t, sizeof(t));
-        id3_find_text(tagbuf, TAG_SIZE, skip, "TPE2", a, sizeof(a));
-    }
-
-    /* A probe may CORRECT a title, never erase one.
-     *
-     * This scans only the 4 KB it just read, so it is strictly less capable
-     * than the load path, which falls back to walking the whole tag. On a file
-     * whose text frames sit past a large picture the probe finds nothing --
-     * and it used to write that nothing over a title the walk had already
-     * recovered, so the caption showed correctly and then turned into NOTIT a
-     * second or two later. Album, year and track survived because the probe
-     * does not touch them, which is what made the cause obvious.
-     *
-     * Finding no title means this probe learned nothing, not that the file is
-     * untagged. Walking the tag here instead would cost ~23 reads in the
-     * middle of playback, in the budget that keeps the decoder fed. */
-    if (st != ID3_OK || !t[0]) return;
-
-    if (title_is_stale(t)) return;      /* still the previous file */
-
-    int same_title = 1;
-    for (uint32_t i = 0; i < sizeof(t); i++)
-        if (t[i] != track_title[i]) { same_title = 0; break; }
-
-    /* Consistent -> nothing to change. Deliberately does NOT stop probing: a
-     * stale probe agrees with the equally-stale caption, so stopping here once
-     * switched the mechanism off in exactly the case it exists for. */
-    if (same_title && skip == audio_start) return;
-
-    for (uint32_t i = 0; i < sizeof(t); i++) track_title[i]  = t[i];
-    for (uint32_t i = 0; i < sizeof(t); i++) last_title[i]   = t[i];
-    for (uint32_t i = 0; i < sizeof(a); i++) track_artist[i] = a[i];
-    title_status = st;
-    for (int i = 0; i < 4; i++) head_bytes[i] = tagbuf[i];
-    tag_corrections++;
-
-    ui_draw_chrome();
-
-    if (skip != audio_start && tag_fix_budget > 0) {
-        tag_fix_budget--;
-        audio_start = skip;
-        /* SOFT restart -- reposition only, do NOT re-read the head. Running a
-         * full load here re-reads offset 0, and a second stale read overwrote
-         * the very title this probe had just recovered. */
-        soft_restart_req = 1;
-    }
 }
 
 /* Look for a VBR header in the first audio bytes. Searching for the ASCII tag
@@ -3060,10 +2977,6 @@ static int load_track(void)
 
     ui_draw_chrome();   /* title/artist are populated now -- draw the UI */
 
-    /* Light backstop only; the reload waits on 0190's authoritative identity. */
-    tag_probes_left = 4;
-    tag_next        = cycles() + CLK_HZ;
-
     if (!prefill()) { REG(R_STAT2) = 0xD0000000u; return 0; }
 
     /* Warm the decoder BEFORE playback, still inside the silent gap.
@@ -3136,7 +3049,6 @@ int main(void)
      * while doing it mid-stream would make every refill re-walk the cluster
      * chain. No playlist on the card simply leaves pl_count at 0. */
     pl_load();
-    tag_fix_budget = 2;
 
     /* Try whatever is already in the slot -- a file picked from the Pocket's
      * browser, or one left there by a previous session. If that comes to
@@ -3181,7 +3093,6 @@ int main(void)
             refill_drain();
             ring_fill = 0; ring_rd = 0;
 
-            tag_fix_budget = 2;
             REG(R_RELOAD)  = 1;             /* ack */
             reload_pending = 0;
             reload_armed    = 1;

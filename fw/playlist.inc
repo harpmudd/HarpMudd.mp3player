@@ -418,7 +418,6 @@ static int pl_play_at(uint16_t pos)
     force_size_probe = 1;
     slot_size        = 0;
 
-    tag_fix_budget  = 2;
     reload_pending  = 0;
     reload_armed    = 1;
     reload_probe_at = cycles();
