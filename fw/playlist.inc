@@ -391,6 +391,16 @@ static int pl_play_at(uint16_t pos)
     /* Captured BEFORE the open: after it, 0190 answers with the new file. */
     uint32_t leaving_id = cur_file_id;
 
+    /* Snapshot the head of the song we are LEAVING, so read_track_head can
+     * wait for the slot to return something else. Audio is already cut at this
+     * point, so a blocking 16-byte read costs nothing audible. */
+    sw_have_prev = 0;
+    if (target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) {
+        for (uint32_t i = 0; i < sizeof(sw_prev_head); i++)
+            sw_prev_head[i] = tagbuf[i];
+        sw_have_prev = 1;
+    }
+
     if (!pl_open_name(name)) {
         pl_pos = prev_pos;                  /* stay where we were */
         switch (pl_open_err) {

@@ -2285,6 +2285,8 @@ static uint32_t rd_seq0, rd_deadline, rd_len;
 static int      rd_pending, rd_ok;
 
 static uint8_t  eof_hit;  /* a refill ran off the end: the file's true extent */
+static uint8_t  sw_prev_head[16];   /* head of the song being left */
+static uint8_t  sw_have_prev;
 static uint32_t eof_at;   /* offset the failures are accumulating at        */
 static uint32_t eof_fails;
 
@@ -2747,22 +2749,44 @@ static int read_track_head(void)
      * proceeds, and it does not run at all for a restart, which never gets
      * here. */
     {
+        /* Wait until the slot returns something DIFFERENT from the song we
+         * just left, then stable.
+         *
+         * Requiring only stability was useless: a slot still serving the
+         * PREVIOUS file returns identical bytes every time, so the check
+         * passed instantly on exactly the stale data it existed to reject.
+         * Proving "settled" is not the same as proving "switched".
+         *
+         * sw_prev_head is the outgoing file's first 16 bytes, captured before
+         * the 0192. Sixteen, not four: every ID3v2.3 tag begins "ID3" plus a
+         * version, so four bytes are the same constant for every tagged file --
+         * the discriminator-that-does-not-discriminate this project has been
+         * caught by before. Sixteen reaches the tag LENGTH and the first frame
+         * id, which do differ.
+         *
+         * Then two agreeing reads, so a half-switched slot is not trusted
+         * either. ~1 s cap, after which the existing retry loop takes over. */
         uint8_t prev[16];
+        uint32_t tries = 0, agree = 0, differs = !sw_have_prev;
         for (uint32_t i = 0; i < sizeof(prev); i++) prev[i] = 0u;
-        uint32_t tries = 0, agree = 0;
-        while (tries++ < 32u && agree < 2u) {
+        while (tries++ < 32u && !(differs && agree >= 2u)) {
             if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) { agree = 0; continue; }
+            if (!differs) {
+                for (uint32_t i = 0; i < sizeof(prev); i++)
+                    if (tagbuf[i] != sw_prev_head[i]) { differs = 1; break; }
+            }
             uint32_t same = 1;
             for (uint32_t i = 0; i < sizeof(prev); i++) {
                 if (tagbuf[i] != prev[i]) same = 0;
                 prev[i] = tagbuf[i];
             }
             agree = same ? agree + 1u : 0u;
-            if (agree < 2u) {
+            if (!(differs && agree >= 2u)) {
                 uint32_t wait = cycles() + CLK_HZ / 32u;   /* ~30 ms */
                 while ((int32_t)(cycles() - wait) < 0) { }
             }
         }
+        sw_have_prev = 0;         /* one switch, one use */
     }
 
     /* ONCE, before the loop -- not on every retry.
