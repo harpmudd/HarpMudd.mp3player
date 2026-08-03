@@ -541,6 +541,19 @@ static const uint16_t ui_palette[] = {
     0xEF1Au,   /* cream   */
 };
 #define UI_PALETTE_N (sizeof(ui_palette) / sizeof(ui_palette[0]))
+
+/* Shown in the toast when L/R changes the accent -- the colour was the only
+ * control that changed something without saying what it changed to.
+ *
+ * A parallel array is a correspondence a later edit can break in silence: add a
+ * colour, forget the name, and the label reads off the end. The assert makes that
+ * a build error instead of a bug someone finds on hardware. Keep the order. */
+static const char *const ui_palette_name[] = {
+    "AMBER", "LIME", "MINT", "SEAFOAM", "SKY", "INDIGO",
+    "LILAC", "BLUSH", "CORAL", "CRIMSON", "GOLD", "CREAM",
+};
+_Static_assert(sizeof(ui_palette_name) / sizeof(ui_palette_name[0]) == UI_PALETTE_N,
+               "ui_palette_name[] must name every colour in ui_palette[]");
 #define UI_ACCENT  0xFC65u
 static uint16_t ui_accent = UI_ACCENT;
 static uint32_t ui_pal_idx;
@@ -2318,10 +2331,14 @@ static void poll_input(void)
         if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
                              ui_accent_changed = 1u;
+                             ui_toast_set("COLOUR: ", 0xFFFFFFFFu,
+                                          ui_palette_name[ui_pal_idx]);
                              settings_mark_dirty(); }
         if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
                              ui_accent_changed = 1u;
+                             ui_toast_set("COLOUR: ", 0xFFFFFFFFu,
+                                          ui_palette_name[ui_pal_idx]);
                              settings_mark_dirty(); }
     }
 

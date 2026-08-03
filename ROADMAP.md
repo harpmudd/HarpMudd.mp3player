@@ -112,30 +112,6 @@ the names are already parsed into `pl_text[]`, so this is a UI job — a
 scrollable list, and a decision about whether it overlays the now-playing
 screen or replaces it.
 
-## Colour name on change
-
-Changing the accent with **L**/**R** is the only control that gives no feedback.
-Meter, volume, repeat, shuffle and seek all raise a transient label in the info
-bar above the progress meter; the colour just changes and you are left to infer
-which of the twelve you landed on. Same treatment, same place.
-
-The mechanism already exists and needs nothing new: `ui_toast_msg()` at
-[fw/player.c:840](fw/player.c#L840) draws exactly this label and fades it, and the
-two call sites are the L1/R1 handlers at
-[fw/player.c:2318-2325](fw/player.c#L2318-L2325), beside the
-`settings_mark_dirty()` already there.
-
-The only actual work is that the names exist **only as source comments** on
-`ui_palette[]` — amber, lime, mint, seafoam, sky, indigo, lilac, blush, coral,
-crimson, gold, cream. They need a parallel `static const char *ui_palette_name[]`
-kept in the same order, which is a correspondence a future edit can silently
-break: add a colour, forget the name, and the label goes stale or reads off the
-end. Worth a `_Static_assert` that the two arrays match in length.
-
-Cheap — a table and two calls. Grouped here rather than done inline because it
-touches the palette, and the palette is what the accent-invalidation logic keys
-off.
-
 ## Cleanup: retire what the click hunt left behind
 
 Fixing the track-change click took many attempts, and several mechanisms
