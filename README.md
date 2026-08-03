@@ -8,9 +8,9 @@ The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
 > **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, saved settings, tags, album art, nine meters and the transport all work
-> on real hardware. Not released yet — see
-> [Known limitations](#known-limitations).
+> repeat, tags, album art, nine meters and the transport all work on real
+> hardware. Saving settings is **disabled** — it is implicated in filesystem
+> damage, see [Known limitations](#known-limitations). Not released yet.
 
 ## Installing
 
@@ -26,8 +26,8 @@ They can live anywhere on the card, but keeping them there puts them next to
 the core and makes them quick to find in the file browser.
 
 `mp3player.rom` in that folder is the firmware — the core won't start without
-it. `settings/settings.bin` holds your volume, colour and playback modes.
-Neither is yours to edit, and nothing else belongs in `settings/`.
+it. `settings/settings.bin` holds your volume, colour and playback modes; the
+core reads it at launch but does not currently write it.
 
 ## Playing
 
@@ -65,10 +65,11 @@ Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
 
-Volume, accent colour, repeat, shuffle, the meter style and the art panel are
-remembered between sessions, saved to `settings/settings.bin` beside the core.
-Writing happens when playback is paused or stopped, or as you open the Analogue
-menu, so it never interrupts a track.
+Volume, accent colour, repeat, shuffle, the meter style and the art panel all
+reset when the core restarts. They *can* be preset by editing
+`settings/settings.bin`, which the core reads at launch — but it no longer writes
+that file, so changes made with the controls last only for the session. See
+[Known limitations](#known-limitations) for why.
 
 Hiding the album art is a preference, not a per-track state: a track with no
 artwork hides the panel without forgetting you want it, so the next track that
@@ -165,12 +166,14 @@ back with one path component changed. Nothing about the layout is assumed.
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
-- **The saved-settings file lives in its own folder**, `settings/`, and is the
-  only thing this core ever writes. It is kept apart from your music
-  deliberately: earlier builds wrote it alongside the `.mp3` files and twice
-  every file in that folder came back reporting the same wrong size, with the
-  audio itself intact — the signature of a damaged directory entry rather than a
-  damaged file. Keep `.mp3` files out of `settings/`.
+- **Settings are not saved.** The core reads `settings/settings.bin` at launch
+  but writes nothing to the card. Writing has been disabled because it is
+  implicated in filesystem damage: on three occasions every `.mp3` sharing the
+  card with it came back with the same wrong size, and on the third the files'
+  cluster chains ran on into unrelated data. The write is the only thing this
+  core ever sent to the card, and it stays off until the mechanism is understood
+  — a music player that might damage a library is not worth a convenience.
+  Tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Credits
 

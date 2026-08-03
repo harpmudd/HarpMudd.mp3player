@@ -20,45 +20,45 @@
  * overwritten does not look like that; a directory sector being rewritten with
  * bad size fields does, and every file in that folder shares one.
  *
- * The third event is the informative one, in two ways.
+ * The third event is the one that produced a mechanism, because the filesystem
+ * turned out to be FINE. chkdsk reports no problems: the directory entries and
+ * the cluster chains agree with each other. The files really ARE 20,382,465
+ * bytes. Nothing is corrupt in the FAT sense -- they were EXTENDED, and the
+ * extension was recorded correctly.
  *
- * It happened WITH the subdirectory mitigation in place (see below), so
- * isolating our file by directory does not isolate the damage. The best reading
- * is that the sector being rewritten is not the one holding our file but the one
- * APF last had CACHED -- and APF's fragment cache is dropped and refilled from
- * the music directory on every track change. Isolation by location cannot help
- * if the target is chosen by cache state.
+ * Three facts then line up on 0184:
  *
- * And it was worse than a wrong size. Walking each file's frame chain showed
- * every one running past its real end into foreign data -- so the cluster chains
- * are extended, not merely mis-sized -- and one file's audio no longer starts
- * with a frame header at all. Earlier events left the audio intact. This one did
- * not, which retires "the sizes are wrong but the music is fine."
+ *   - All four files ended at the SAME size despite being different lengths,
+ *     which is what happens when a write targets one fixed offset in each: the
+ *     resulting size is offset + length, independent of what was there before.
+ *   - That common size minus SET_BYTES (32) is a whole number, 20,382,433. The
+ *     settings blob is 32 bytes. The arithmetic is ours.
+ *   - The settings magic ("SPM3", 0x53504D33) is present INSIDE one of the .mp3
+ *     files, at offset 5,505,024 -- a 128 KB cluster boundary immediately past
+ *     that file's real audio, in the region the extension added.
  *
- * The 0184 write is the ONLY thing this core writes to the card, and both
- * events coincided with it. That is not proof it is at fault, but a music
- * player that might damage a user's library is not shippable on a maybe, and
- * the cost of being wrong in each direction is not symmetric: leaving it off
- * costs a convenience, leaving it on risks someone's files.
+ * The gap between each file's real end and its new end is filled with unrelated
+ * data, because exFAT does not zero newly allocated clusters. That is why one
+ * file's audio also stopped decoding: the damage is not confined to the tail.
  *
- * Reading stays enabled, so a settings.bin placed on the card by hand is still
- * honoured -- only the write-back is gone.
+ * So the write is landing in the wrong file, at an offset that is not ours to
+ * choose, and extending it. Whether the fault is our slot handling or APF's
+ * resolution of a slot opened by 0192 is not yet established -- but it is our
+ * 32 bytes doing it, and that is enough to stop.
  *
  * The subdirectory mitigation stays in place -- settings.bin lives alone in
  * .../common/settings/ -- because it costs nothing and the layout is already
- * shipped. It is no longer claimed to help.
+ * shipped. It never had a chance: the write is not landing where it is aimed, so
+ * where the target sits in the directory tree is irrelevant.
  *
  * Reading stays enabled, so a settings.bin placed on the card by hand is still
  * honoured. Only the write-back is gone.
  *
- * TO RE-ENABLE, the bar is a MECHANISM, not another mitigation. Two mitigations
- * have now been reasoned from the signature and both failed, which is what
- * reasoning from a signature buys. The next step is to determine what 0184
- * actually writes and where -- capture the card's FAT and directory sectors
- * before and after a single write, with nothing else running, and diff them. If
- * the write lands outside our own file's chain, this is APF's bug and the core
- * must not use 0184 at all; settings would then need a mechanism that never
- * writes the card. Until that diff exists, this stays 0. */
+ * TO RE-ENABLE: record every .mp3's size, perform ONE write with nothing else
+ * running, and re-record. If any .mp3 grows, 0184 cannot be used by this core at
+ * all and settings need an approach that never writes the card. Only if the
+ * sizes hold is it worth asking which offset we are actually passing. Until that
+ * test has been run and passed, this stays 0. */
 #define SETTINGS_WRITE 0
 
 #define SET_SLOT_ID  4u
