@@ -8,8 +8,9 @@ The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
 > **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, saved settings, tags, album art and the UI all work on real hardware.
-> It has not been released — see [Known limitations](#known-limitations).
+> repeat, saved settings, tags, album art, nine meters and the transport all work
+> on real hardware. Not released yet — see
+> [Known limitations](#known-limitations).
 
 ## Installing
 
@@ -55,6 +56,11 @@ playlists at any time.
 Track changes and seeking both work while paused or stopped, so you can move
 around a playlist without playing anything.
 
+Changing track ends the current one straight away and there is a short silence
+before the next begins — the core has to open the new file, read its tag and
+decode its artwork before it can play a note. Restarting a track, by contrast,
+is immediate, because nothing needs opening.
+
 Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
@@ -92,7 +98,7 @@ everything once before repeating any.
 
 ## What it shows
 
-<img src="docs/screenshot.png" width="280" align="right" alt="Now-playing screen: title, artist, album and bitrate above a spectrum meter, with cover art at the right; below, a PLAYING label with repeat and shuffle icons, the track position, elapsed and total time, and a progress bar">
+<img src="docs/screenshot.png" width="280" align="right" alt="Now-playing screen: title, artist, album and bitrate above a bar meter, with cover art at the right; below, a PLAYING label with repeat and shuffle icons, the track position, elapsed and total time, and a progress bar">
 
 - **Title and artist** from the ID3v2 tag, in a real proportional typeface with
   anti-aliased text.
