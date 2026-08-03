@@ -109,6 +109,36 @@ And generate the coefficients offline in python and paste the table in — a
 hand-written filter table is exactly the mistake that cost a hardware round on
 the VU needle's sine table.
 
+## Read this before adding any high-fidelity format
+
+Two facts bound the whole question, and neither is CPU speed.
+
+**The output is fixed at ~16-bit / 48 kHz.** `sound_i2s` hands the APF audio
+interface 15 magnitude bits plus sign at 48 kHz. That is the Pocket's interface,
+not a choice this core makes and not something a better source format can lift.
+Every format is downconverted to that before it reaches the DAC, so lossless
+audio arrives at the same 16/48 output as a 320 kbps MP3, through a handheld
+headphone amplifier. The honest expected gain is small.
+
+**The buffering runs the wrong way as bitrate rises.** The compressed ring is a
+fixed 32 KB, so it holds 0.82 s at MP3's 320 kbps but only 0.29 s at FLAC's
+~900 kbps: protection against an SD stall falls ~2.8x at the same moment demand
+rises ~2.8x. Stalls are not hypothetical -- APF drops its fragment cache on every
+track change, and random reads are what made the old size probe cost 480 ms.
+
+**And the margin cannot be bought back in RAM.** Restoring 0.8 s of protection at
+FLAC rates needs a ~90 KB ring. There is ~76 KB of heap, and a FLAC decoder wants
+~32 KB of it for a decoded block. The room does not exist without taking it from
+something else.
+
+So the risk is a dropout in exchange for a difference most listeners would not
+hear on this hardware. That trade is bad, and it is the reason the EQ below is
+ranked first: EQ improves what you actually hear *within* the fixed ceiling, costs
+no CPU and carries no throughput risk at all.
+
+None of this makes lossless impossible. It means the case for it should be made
+with the throughput measurement in hand, and with eyes open about the payoff.
+
 ## FLAC — plausible, gated on one measurement
 
 The decode itself is the easy part: FLAC is Rice decoding plus an LPC filter,
