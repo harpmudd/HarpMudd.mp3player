@@ -160,7 +160,8 @@ back with one path component changed. Nothing about the layout is assumed.
   nearly all of them, approximate for a VBR file whose encoder wrote no header.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II
   are not handled.
-- **JPEG album art only.** PNG cover art is detected and skipped.
+- **JPEG album art only.** PNG cover art is detected and skipped — see
+  [ROADMAP.md](ROADMAP.md), where it is the first item.
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
