@@ -2994,8 +2994,27 @@ static int load_track(void)
      * lengthened the hold. The output now rests at true zero through the gap,
      * so the trade is purely: one inaudible frame for a steady-state start. */
     {
-        int guard = 8;                       /* never loop on a broken stream */
-        while (guard--) {
+        /* Discard until the RESERVOIR is genuinely populated, not just until
+         * one frame has decoded.
+         *
+         * MP3 lets a frame reference up to 511 bytes of main_data from frames
+         * BEFORE it. After a decoder reset that data does not exist, so early
+         * frames are synthesised from an empty reservoir -- garbage, at full
+         * amplitude. Discarding a single frame covers that only if one frame
+         * exceeds 511 bytes, which holds at 256 kbps and fails at 112.
+         *
+         * This is why the fault tracked the Xing header rather than anything
+         * about the loads: a Xing header IS a real frame containing silence, so
+         * on those files the reservoir warms up on inaudible content before any
+         * music is decoded. Headerless files start straight into audio and had
+         * no such runway.
+         *
+         * Consume at least 512 bytes of successfully decoded frames -- one
+         * frame at high bitrates, two or three at low, adaptive rather than a
+         * fixed count, and 26-78 ms of a track's very start. */
+        int guard = 12;                      /* never loop on a broken stream */
+        uint32_t warmed = 0;                 /* bytes of DECODED frames so far */
+        while (guard-- && warmed < 512u) {
             int bl = (int)(ring_fill - ring_rd);
             if (bl < 512) break;
             int off = MP3FindSyncWord(&ring[ring_rd], bl);
@@ -3004,9 +3023,10 @@ static int load_track(void)
             unsigned char *ib = &ring[ring_rd];
             int before = bl;
             int e = MP3Decode(dec, &ib, &bl, pcm, 0);
-            ring_rd += (uint32_t)(before - bl);
-            if (e == 0) break;               /* state is warm; frame discarded */
-            if (before - bl <= 0) ring_rd++;
+            uint32_t used = (uint32_t)(before - bl);
+            ring_rd += used;
+            if (e == 0) warmed += used;      /* only real frames count */
+            else if (!used) ring_rd++;       /* no progress: step past it */
         }
     }
 
