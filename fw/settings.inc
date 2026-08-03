@@ -26,25 +26,27 @@
  * bytes. Nothing is corrupt in the FAT sense -- they were EXTENDED, and the
  * extension was recorded correctly.
  *
- * Three facts then line up on 0184:
+ * What is established:
  *
- *   - All four files ended at the SAME size despite being different lengths,
- *     which is what happens when a write targets one fixed offset in each: the
- *     resulting size is offset + length, independent of what was there before.
- *   - That common size minus SET_BYTES (32) is a whole number, 20,382,433. The
- *     settings blob is 32 bytes. The arithmetic is ours.
- *   - The settings magic ("SPM3", 0x53504D33) is present INSIDE one of the .mp3
- *     files, at offset 5,505,024 -- a 128 KB cluster boundary immediately past
- *     that file's real audio, in the region the extension added.
+ *   - The user's ORIGINAL files are intact and correct (5,462,016 / 5,480,448 /
+ *     11,767,853 / 1,801,236). The copies on the card were grown from those, so
+ *     this is damage, not a bad copy.
+ *   - The card is never physically ejected -- it is mounted over Analogue's USB
+ *     mode -- so an interrupted host write is not the explanation.
+ *   - The settings magic ("SPM3", 0x53504D33) appears INSIDE one .mp3, at offset
+ *     5,505,024: a 128 KB cluster boundary immediately past that file's real
+ *     audio. Our bytes are in a file that is not ours.
+ *   - The added region carries unrelated data, because exFAT does not zero newly
+ *     allocated clusters. One file's audio no longer starts with a frame header,
+ *     so "sizes wrong but audio intact" is retired.
  *
- * The gap between each file's real end and its new end is filled with unrelated
- * data, because exFAT does not zero newly allocated clusters. That is why one
- * file's audio also stopped decoding: the damage is not confined to the tail.
- *
- * So the write is landing in the wrong file, at an offset that is not ours to
- * choose, and extending it. Whether the fault is our slot handling or APF's
- * resolution of a slot opened by 0192 is not yet established -- but it is our
- * 32 bytes doing it, and that is enough to stop.
+ * What is NOT established -- and a theory recorded here was WRONG, so read this
+ * before building on it. All four files landing on one size looks like a write to
+ * a fixed offset, where the result is offset + length regardless of the original.
+ * But settings_store() passes OFFSET 0 and LENGTH 32. A write at offset 0 cannot
+ * extend a file to 20 MB. So the parameters we set do not explain the size, and
+ * the fault is either in what the registers actually carry by the time APF sees
+ * them, or in APF's own handling. Do not assume it is the offset.
  *
  * The subdirectory mitigation stays in place -- settings.bin lives alone in
  * .../common/settings/ -- because it costs nothing and the layout is already
