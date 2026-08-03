@@ -109,6 +109,9 @@ And generate the coefficients offline in python and paste the table in — a
 hand-written filter table is exactly the mistake that cost a hardware round on
 the VU needle's sine table.
 
+Full design outline, including the fixed-point formats, the 97%-full block RAM
+constraint and the verification plan: **[docs/EQ_DESIGN.md](docs/EQ_DESIGN.md)**.
+
 ## Read this before adding any high-fidelity format
 
 Two facts bound the whole question, and neither is CPU speed.
