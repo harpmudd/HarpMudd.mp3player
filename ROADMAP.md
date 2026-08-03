@@ -3,6 +3,49 @@
 Things worth doing next, with enough context that picking one up doesn't mean
 re-deriving why it's on the list. Ordered by value per effort, not by ambition.
 
+## Settings persistence — RELEASE BLOCKER
+
+`SETTINGS_WRITE` is **0**. The core reads `settings/settings.bin` at launch and
+writes nothing to the card. This is the one item standing between the core and a
+release: everything else is HW-confirmed.
+
+Three times, every `.mp3` sharing the card with it came back reporting the same
+size — 21,037,825, then 21,365,505, then 20,382,465 — while `settings.bin` itself
+stayed 32 bytes.
+
+What the third event established, by measurement rather than inference:
+
+- **`chkdsk` passes.** This was never FAT corruption. The files really are that
+  size: they were *extended*, and the extension was recorded correctly.
+- **The originals are fine.** The card copies had been grown from good files, so
+  this is damage rather than a bad copy.
+- **Our magic is inside someone else's file.** `"SPM3"` (0x53504D33) appears in
+  one `.mp3` at offset 5,505,024 — a 128 KB cluster boundary immediately past
+  that file's real audio.
+- **The audio does not survive.** exFAT doesn't zero newly allocated clusters, so
+  the added region carries unrelated data; one file's audio no longer began with
+  a frame header. The earlier reading — "sizes wrong, audio intact" — is retired.
+
+Two mitigations were reasoned from that signature and **both failed**: deferring
+writes to paused/stopped, then isolating `settings.bin` in its own subdirectory.
+A third mitigation is not the answer.
+
+One recorded theory was **wrong** and is called out so it isn't rebuilt: four
+files landing on one size looks like a write to a fixed offset, where the size
+becomes offset + length. But `settings_store()` passes **offset 0, length 32**,
+and a write at offset 0 cannot extend a file to 20 MB. The fault lies either in
+what the target registers carry by the time APF reads them, or in APF's own
+handling — not in the offset we pass.
+
+**Next step, cheap and decisive, not yet run:** record every `.mp3` size, perform
+ONE write with nothing else running, re-record. If any `.mp3` grows, `0184` is
+unusable by this core and settings need an approach that never writes the card —
+which likely means giving up on saving them from the UI and treating
+`settings.bin` as a hand-edited preferences file, which already works.
+
+Details and the full reasoning live at the `SETTINGS_WRITE` definition in
+[fw/settings.inc](fw/settings.inc).
+
 ## PNG album art
 
 The cover-art decoder is [picojpeg](third_party/picojpeg/), baseline JPEG only.
@@ -68,17 +111,6 @@ excitement, widens the library.
 the names are already parsed into `pl_text[]`, so this is a UI job — a
 scrollable list, and a decision about whether it overlays the now-playing
 screen or replaces it.
-
-## Confirm the settings-write mitigation
-
-Twice, every `.mp3` sharing a directory with `settings.bin` came back reporting
-the same wrong size while its audio stayed intact — the signature of a damaged
-directory entry. The file now lives alone in `settings/`, on the theory that a
-directory sector rewrite can then only catch our own file.
-
-**This is reasoned, not proven.** If `.mp3` sizes ever converge on one value
-again, set `SETTINGS_WRITE` to 0 first and investigate second. The full
-reasoning is at that definition in [fw/settings.inc](fw/settings.inc).
 
 ## Cleanup: retire what the click hunt left behind
 
