@@ -3217,6 +3217,22 @@ int main(void)
                 reload_armed = 0;
                 if (load_track()) {
                     idle = 0;
+                    /* Hand off to the reposition body that is PROVEN clean.
+                     *
+                     * The user's evidence has been consistent for many rounds:
+                     * stop-then-play and restart never click, a track change
+                     * always does, and both end on the same audio at the same
+                     * position. Rather than keep hunting the specific defect
+                     * inside load_track's start-up -- one guess a round, none of
+                     * them right -- let load_track do only what it uniquely
+                     * must (open the file, read its tag, decode its art) and
+                     * then START it the way the working path starts things:
+                     * flush, rewind to audio_start, refill, prefill.
+                     *
+                     * Costs one extra prefill inside a gap that is already
+                     * silent. Buys the guarantee that every route into playback
+                     * is the same route. */
+                    stop_req = 1u;
                     if (hold_paused) { hold_paused = 0; paused |= 1u; stopped = 1u; }
                     /* The first track to arrive after launch is queued, not
                      * played: starting music the moment the core opens is
