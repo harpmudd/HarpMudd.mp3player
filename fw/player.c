@@ -3173,7 +3173,41 @@ static int load_track(void)
             int e = MP3Decode(dec, &ib, &bl, pcm, 0);
             uint32_t used = (uint32_t)(before - bl);
             ring_rd += used;
-            if (e == 0) warmed += used;      /* only real frames count */
+            if (e == 0) {
+                warmed += used;              /* only real frames count */
+
+                /* Establish the stream's real rate HERE, off the warm-up
+                 * frame, not on the first frame that plays.
+                 *
+                 * The hand-off ends load_track by running the reposition body,
+                 * which finishes with ui_draw_dynamic() -- and that used to run
+                 * before any frame had been decoded, so track_secs was 0 and
+                 * bytes_per_sec was still the 16000 placeholder. The total was
+                 * computed from a fake bitrate and drawn wrong on EVERY file,
+                 * where before only headerless ones were ever estimated.
+                 *
+                 * These frames are decoded and discarded anyway; taking the
+                 * frame info from them costs nothing and means the duration is
+                 * right before anything can draw it. */
+                if (!rate_set) {
+                    MP3FrameInfo wfi;
+                    MP3GetLastFrameInfo(dec, &wfi);
+                    if (wfi.samprate) {
+                        uint64_t inc = ((uint64_t)wfi.samprate << 32) / CLK_HZ;
+                        REG(R_PCM_RATE) = (uint32_t)inc;
+                        if (wfi.bitrate) bytes_per_sec = wfi.bitrate / 8u;
+                        samprate   = wfi.samprate;
+                        track_hz   = wfi.samprate;
+                        track_kbps = wfi.bitrate / 1000u;
+                        if (track_frames && wfi.nChans) {
+                            uint32_t spf = (uint32_t)wfi.outputSamps / (uint32_t)wfi.nChans;
+                            track_secs = (uint32_t)(((uint64_t)track_frames * spf)
+                                                    / wfi.samprate);
+                        }
+                        rate_set = 1;
+                    }
+                }
+            }
             else if (!used) ring_rd++;       /* no progress: step past it */
         }
     }
