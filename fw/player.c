@@ -2442,17 +2442,41 @@ static int      probe_clamps;
  * tail can still report success. */
 static int probe_readable(uint32_t off)
 {
+    /* Readable means "this offset returns data that BELONGS to this offset".
+     *
+     * The old test was "did anything land", with a clamp check anchored on one
+     * reference read at 60 MB -- and if that read failed outright it concluded
+     * the host does not clamp, then believed every clamped read below it. This
+     * host does clamp: the search climbed to ~20.4 MB for both headerless files
+     * regardless of their real 11.8 MB and 1.8 MB, and both showed a duration
+     * derived from a size belonging to neither.
+     *
+     * Comparing against the PREVIOUS probe was tried and simulated wrong: the
+     * first past-EOF probe still differs from the last in-file one, so it is
+     * believed, and the exponential has already doubled -- a 2x overshoot.
+     *
+     * This compares two offsets 512 apart in the same pass. Inside a file they
+     * hold different bytes; past the end a clamping host returns the same tail
+     * for both. Correct whether the host clamps or fails, verified in
+     * simulation against all three file sizes before building. Two reads a
+     * probe, in the silent part of a load.
+     */
     volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+    uint8_t first[16];
+
     *w = 0xA5A5A5A5u;
-    /* 512 bytes, not 4: a four-byte transfer is the sort of request a host may
-     * refuse or round, and if every probe fails the search reports "no size". */
     if (!target_read_slot(MP3_SLOT_ID, off, TAG_OFF, 512u)) return 0;
     if (*w == 0xA5A5A5A5u) return 0;              /* nothing landed: past EOF */
-    /* Some hosts CLAMP instead of failing -- a read past the end quietly
-     * returns the tail, so the sentinel always says "readable". When that is
-     * detected, treat "identical to a hopeless offset" as past-EOF instead. */
-    if (probe_clamps && *w == probe_clamp_ref) return 0;
-    return 1;
+    for (uint32_t i = 0; i < sizeof(first); i++) first[i] = tagbuf[i];
+
+    *w = 0xA5A5A5A5u;
+    if (!target_read_slot(MP3_SLOT_ID, off + 512u, TAG_OFF, 512u)) return 1;
+    if (*w == 0xA5A5A5A5u) return 1;              /* the far one is past the end */
+
+    uint32_t same = 1;
+    for (uint32_t i = 0; i < sizeof(first); i++)
+        if (tagbuf[i] != first[i]) { same = 0; break; }
+    return same ? 0 : 1;                          /* identical == both clamped */
 }
 
 
@@ -2483,6 +2507,10 @@ static uint32_t probe_file_size(void)
         uint32_t mid = lo + (hi - lo) / 2u;
         if (probe_readable(mid)) lo = mid; else hi = mid;
     }
+    /* Sanity: a result implying over three hours at this bitrate is not a file
+     * length, it is a failed search. Report "unknown" so the UI shows --:--
+     * rather than a confidently wrong number. */
+    if (bytes_per_sec && (lo / bytes_per_sec) > 3u * 3600u) return 0;
     return lo + 4096u;
 }
 
