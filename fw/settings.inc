@@ -12,15 +12,28 @@
  * things have been quiet for a moment.
  */
 
-/* WRITING IS ENABLED, but only because the file now lives ALONE in its own
- * directory. Read the note below before changing that.
+/* WRITING IS DISABLED. Do not re-enable it without a mechanism, not a theory.
  *
- * Twice now, every .mp3 in /Assets/mp3player/common/ has come back with the
- * SAME wrong size -- 21,037,825 the first time, 21,365,505 the second -- while
- * settings.bin itself stayed exactly 32 bytes and the audio data in those files
- * was intact. Files being individually overwritten does not look like that; a
- * directory sector being rewritten with bad size fields does, and every file in
- * that folder shares one.
+ * THREE times now, every .mp3 in /Assets/mp3player/common/ has come back with
+ * the SAME wrong size -- 21,037,825, then 21,365,505, then 20,382,465 -- while
+ * settings.bin itself stayed exactly 32 bytes. Files being individually
+ * overwritten does not look like that; a directory sector being rewritten with
+ * bad size fields does, and every file in that folder shares one.
+ *
+ * The third event is the informative one, in two ways.
+ *
+ * It happened WITH the subdirectory mitigation in place (see below), so
+ * isolating our file by directory does not isolate the damage. The best reading
+ * is that the sector being rewritten is not the one holding our file but the one
+ * APF last had CACHED -- and APF's fragment cache is dropped and refilled from
+ * the music directory on every track change. Isolation by location cannot help
+ * if the target is chosen by cache state.
+ *
+ * And it was worse than a wrong size. Walking each file's frame chain showed
+ * every one running past its real end into foreign data -- so the cluster chains
+ * are extended, not merely mis-sized -- and one file's audio no longer starts
+ * with a frame header at all. Earlier events left the audio intact. This one did
+ * not, which retires "the sizes are wrong but the music is fine."
  *
  * The 0184 write is the ONLY thing this core writes to the card, and both
  * events coincided with it. That is not proof it is at fault, but a music
@@ -31,15 +44,22 @@
  * Reading stays enabled, so a settings.bin placed on the card by hand is still
  * honoured -- only the write-back is gone.
  *
- * MITIGATION IN PLACE: settings.bin now lives in its own subdirectory,
- * .../common/settings/, containing nothing else. If the damage is collateral to
- * a directory sector being rewritten, the only entry in that sector is our own
- * file -- the user's music is in the parent directory and is not part of it.
+ * The subdirectory mitigation stays in place -- settings.bin lives alone in
+ * .../common/settings/ -- because it costs nothing and the layout is already
+ * shipped. It is no longer claimed to help.
  *
- * This is a reasoned mitigation, NOT a proven fix. The mechanism was never
- * confirmed, only inferred from the signature. If .mp3 sizes go wrong again,
- * set SETTINGS_WRITE back to 0 first and ask questions afterwards. */
-#define SETTINGS_WRITE 1
+ * Reading stays enabled, so a settings.bin placed on the card by hand is still
+ * honoured. Only the write-back is gone.
+ *
+ * TO RE-ENABLE, the bar is a MECHANISM, not another mitigation. Two mitigations
+ * have now been reasoned from the signature and both failed, which is what
+ * reasoning from a signature buys. The next step is to determine what 0184
+ * actually writes and where -- capture the card's FAT and directory sectors
+ * before and after a single write, with nothing else running, and diff them. If
+ * the write lands outside our own file's chain, this is APF's bug and the core
+ * must not use 0184 at all; settings would then need a mechanism that never
+ * writes the card. Until that diff exists, this stays 0. */
+#define SETTINGS_WRITE 0
 
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
