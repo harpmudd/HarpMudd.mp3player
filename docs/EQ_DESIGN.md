@@ -158,6 +158,90 @@ point: it still rounds. Users who leave EQ off should get exactly the audio they
 get today, provably, and that is also the thing that makes an A/B test
 meaningful when tuning the other presets.
 
+## What the user actually experiences
+
+**Y cycles presets.** `Y` is completely unused today — it is not even `#define`d,
+and bit 7 sits empty between `KEY_X` and `KEY_L1`. `input.json` declares no keymap
+restrictions, so the button already arrives in `cont1_key`; enabling it costs one
+line of firmware and no JSON change. `Select`+`Y` cycles backwards, exactly
+mirroring `X` / `Select`+`X` for the meters, so the gesture is already learned.
+
+Eight presets, wrapping:
+
+| # | Label | Character |
+|---|---|---|
+| 0 | `FLAT` | true bypass — bit-identical to today |
+| 1 | `BASS` | low shelf lift, gentle upper-mid dip |
+| 2 | `ROCK` | smile curve — lows and highs up, mids back |
+| 3 | `POP` | presence lift around 2-4 kHz |
+| 4 | `JAZZ` | warm lows, relaxed upper-mid |
+| 5 | `CLASSICAL` | near-flat with a slight high-shelf air lift |
+| 6 | `VOCAL` | mid forward, lows trimmed |
+| 7 | `TREBLE` | high shelf lift |
+
+Each press raises the same transient label the meters and colours use —
+`EQ: ROCK` in the info bar above the progress meter, ~1 s at full brightness then
+a ten-step fade. Nothing else on screen moves, and playback is not interrupted:
+the filter is in the RTL and the audio never stops flowing, so a preset change is
+seamless in a way a track change can never be.
+
+**A persistent indicator, not just a toast.** The label fades, so a user who
+walks away and comes back needs to be able to see the EQ state without pressing
+anything. An `EQ` tag joins the repeat/shuffle icons in the mode row, dimmed when
+`FLAT` and drawn in the accent colour otherwise — the same dimmed-not-hidden
+treatment those icons already use, which means it reads as "off" rather than
+"missing".
+
+**It works while paused or stopped.** The toast appears and the preset takes
+effect; there is simply nothing to hear until playback resumes. No special case
+needed.
+
+### Two things the user would notice that the engine alone does not solve
+
+**1. Changing preset will click unless it is handled.** Swapping biquad
+coefficients while the filter state is non-zero is a step discontinuity, and a
+step discontinuity is exactly the click this project spent ten rounds chasing in
+the FIFO. Do not ship it and hope.
+
+The cheap fix is a **~4 ms duck**: ramp the output gain to zero over ~2 ms, swap
+the coefficients and clear the state at the bottom, ramp back over ~2 ms. It
+reuses the preamp multiplier that is already in the datapath, costs no extra
+hardware, and 4 ms is below the threshold where it reads as anything but
+instant. A crossfade between old and new filter outputs is the higher-fidelity
+option but needs both filters resident, which doubles the state for a difference
+nobody could hear on a preset change.
+
+Whichever is chosen, it belongs in the simulation plan: assert that the output is
+continuous across a preset change, with no sample-to-sample step exceeding a
+threshold.
+
+**2. The meters will not react to the EQ.** They are computed in firmware from
+`pcm[]` — the decoder's output buffer, before it is pushed to the FIFO and
+therefore before the RTL filter. A bass preset would be plainly audible and
+completely invisible on the bars, the VU needles and the waveform.
+
+Three honest options:
+
+- **Accept and document it.** The meters show what the *file* contains; the EQ
+  shapes what the speaker does. Defensible, and free.
+- **Apply the EQ curve to the meter levels in firmware.** A per-band gain applied
+  to a level estimate is cheap and approximately right, but it is a second
+  implementation of the filter that can drift from the real one.
+- **Feed the meters from post-EQ audio.** Correct, and the most work: the RTL
+  would need to expose a peak/level register per channel for firmware to read
+  back, and the meters would move from a per-frame batch to a sampled value.
+
+The first is the right starting point. The third is the right answer if the EQ
+becomes something users lean on, and the RTL should reserve a register address
+for it so that change does not become a rework.
+
+### The honest current-state caveat
+
+`SETTINGS_WRITE` is 0, so **the EQ choice would reset to `FLAT` on every
+relaunch**, exactly as volume and accent colour do now. The settings byte should
+be added regardless — the record is versioned and the field is free — but the
+README must not describe EQ as remembered until the write blocker is resolved.
+
 ## Firmware interface
 
 One new register, decoded beside `R_PCM_RATE` in `mp3_soc.v`:
@@ -179,9 +263,7 @@ relaunch until that blocker is resolved. Add the settings byte anyway — the fi
 is free and the record is versioned — but do not describe it as persistent in the
 README until writing is safe again.
 
-Buttons are nearly exhausted (A, B, X, Start, Select, L, R, d-pad, and five
-Select combinations are all taken), so the binding needs thought rather than a
-free slot. Most likely candidate is a Select+Up/Down combination.
+The binding is `Y`, which is free — see above. No other control moves.
 
 ## Verification, before any hardware
 
