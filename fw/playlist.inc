@@ -264,6 +264,35 @@ static void pl_mark_dead(uint16_t f)
     if (pl_is_dead(f)) return;
     pl_dead[f >> 5] |= 1u << (f & 31u);
     pl_dead_n++;
+    /* The track count on screen is derived from this, so learning about an
+     * entry changes what is displayed -- and that display is drawn only when
+     * something is known to have changed. */
+    ui_mode_dirty = 1u;
+}
+
+/* How many tracks the user actually HAS, as opposed to how many lines are in
+ * the file. An entry that cannot be opened is not a song, so it must not be
+ * counted as one -- a 5-line list with one typo is a 4-track playlist.
+ *
+ * This can only ever be right about entries something has TRIED. Nothing in APF
+ * answers "does this file exist"; the only test is 0192, which opens it, and
+ * that costs a directory walk per entry and switches the MP3 slot as a side
+ * effect. So the count is exact for everything the walk has reached and
+ * optimistic beyond it, correcting itself as entries are visited. */
+static uint16_t pl_live_count(void)
+{
+    return (uint16_t)(pl_count - pl_dead_n);
+}
+
+/* Where `pos` sits among the LIVE entries, 1-based, so the position and the
+ * total are counted the same way. Showing "4 / 4" while standing on the third
+ * playable track would be worse than showing the raw numbers. */
+static uint16_t pl_live_ordinal(uint16_t pos)
+{
+    uint16_t n = 0;
+    for (uint16_t i = 0; i <= pos && i < pl_count; i++)
+        if (!pl_is_dead(pl_order[i])) n++;
+    return n ? n : 1u;
 }
 static void pl_dead_clear(void)
 {
@@ -656,7 +685,8 @@ static void pl_load(void)
  * rather than just not working. */
 static void pl_report(void)
 {
-    if (pl_count)                         ui_toast_set("PLAYLIST", pl_count, " TRACKS");
+    if (pl_count)                         ui_toast_set("PLAYLIST", pl_live_count(),
+                                                       " TRACKS");
     else if (pl_status == PL_ERR_NOFILE)  ui_toast_msg("NO PLAYLIST FILE");
     else                                  ui_toast_msg("PLAYLIST HAS NO TRACKS");
 }

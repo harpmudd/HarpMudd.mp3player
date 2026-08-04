@@ -456,6 +456,8 @@ static uint32_t stop_req;
  * sits above both includes. */
 static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
+static uint16_t pl_live_count(void);
+static uint16_t pl_live_ordinal(uint16_t pos);
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
 
@@ -2116,12 +2118,16 @@ static void ui_draw_dynamic(void)
                             shuffle_on ? ui_accent : UI_FAINT);
 
             /* "4 / 12", right-aligned so the numbers do not shuffle sideways as
-             * the track index gains a digit. */
+             * the track index gains a digit.
+             *
+             * Counted over LIVE entries, not lines in the file: an entry that
+             * will not open is not a song. Both halves use the same counting or
+             * the position could exceed the total. */
             if (pl_count) {
                 char pos[16]; char *q = pos;
-                q = ui_dec(q, (uint32_t)(pl_pos + 1u));
+                q = ui_dec(q, (uint32_t)pl_live_ordinal(pl_pos));
                 *q++ = ' '; *q++ = '/'; *q++ = ' ';
-                q = ui_dec(q, (uint32_t)pl_count);
+                q = ui_dec(q, (uint32_t)pl_live_count());
                 *q = 0;
                 uint32_t pw = fb_text_width(pos, TS_1X);
                 uint32_t px = FB_W - UI_MARGIN - pw;
@@ -3459,7 +3465,7 @@ int main(void)
                  * offset would read the wrong file. Drop them; stay silent
                  * until the reload lands. */
                 ring_fill = 0; ring_rd = 0;
-                ui_toast_set("TRACK", (uint32_t)(pl_pos + 1u), 0);
+                ui_toast_set("TRACK", (uint32_t)pl_live_ordinal(pl_pos), 0);
                 ui_mode_dirty = 1;
             }
             continue;
