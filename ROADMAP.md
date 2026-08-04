@@ -17,11 +17,24 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Settings write damaged the user's files — RELEASE BLOCKER, under observation
+## Settings write damaged the user's files — PARKED, still a release blocker
+
+**Active work paused 2026-08-04 by the user; kept in the backlog.** Nothing here
+is resolved and it still blocks a release — it is simply not what is being
+worked on. What resumes it: a recurrence (snapshot it, then decode the new size
+as `{version, volume, palette, repeat}` per the detector below), or a decision
+to ship, which cannot happen with this open.
+
+**Passive observation continues at zero cost:** the write is live and the
+baseline is in place, so the only thing needed is
+`python tools/card_snapshot.py after` then `diff` whenever the card happens to
+be mounted. Roughly a minute, and it is what turns a recurrence into evidence
+rather than lost music.
 
 **`SETTINGS_WRITE` is 1 again** as of 2026-08-04, on the user's instruction and
 before the blocker is understood. Saving works: settings survive a relaunch, and
-one full session of writes left every `.mp3` on the card byte-for-byte intact.
+two sessions of writes left every `.mp3` on the card byte-for-byte intact —
+verified against the user's untouched originals, not just against a snapshot.
 
 **This is not resolved.** Three times previously, every `.mp3` sharing the card
 came back extended and one file's audio was destroyed. Nothing found since
@@ -29,11 +42,8 @@ explains why, the mechanism that looked certain was tested and missed (below),
 and all three events followed *extended* use rather than a single session. So
 the current state is "writing is on and being watched", not "fixed".
 
-**Until it has survived a run of real sessions, take a snapshot around each
-one** — `python tools/card_snapshot.py before | after | diff`. Roughly a minute,
-and it is the only thing that turns a recurrence into evidence instead of lost
-music. Keep the originals backed up. `tools/settings_edit.py` remains the way to
-set values without trusting the write path at all.
+Keep the originals backed up. `tools/settings_edit.py` remains the way to set
+values without trusting the write path at all.
 
 To turn it back off: set `SETTINGS_WRITE` to `0` in
 [fw/settings.inc](fw/settings.inc) and rebuild — the write body compiles out and
@@ -177,7 +187,51 @@ Details and the full reasoning live at the `SETTINGS_WRITE` definition in
 
 # Enhancements
 
-## PNG album art
+## Preset EQ — feasible, but belongs in the RTL
+
+Worth doing, and the obvious implementation is the wrong one.
+
+**Not in firmware.** The free CPU budget is 8.7 M instr/s at worst case (36.4 M
+total at 60 MHz and 1.65 CPI, less the 27.7 M Helix needs for 320 kbps / 48 kHz).
+A 5-band stereo biquad at 44.1 kHz is 441,000 biquad evaluations a second, and a
+Direct Form I biquad on RV32 is ~15-20 instructions once loads, stores and
+saturation are counted — 6.6 to 8.8 M instr/s, i.e. essentially all of it. It
+would also be spending the exact budget that keeps the decoder fed, which is the
+one way to bring the audio tics back.
+
+**In the RTL it is nearly free.** Output is 48 kHz and clk_sys is 60 MHz, so there
+are ~1250 clocks per output sample. Twenty biquads (10 bands x 2 channels) at 5
+MACs each is ~100 MACs, which one pipelined multiplier retires in ~150 cycles —
+about 12% of the time available. Cost is one DSP block, a small coefficient ROM
+and 20 x 4 words of state. Zero CPU, and the decoder never knows it exists.
+
+Where it goes: between `pcm_fifo` and `sound_i2s`, which is already a clean
+16-bit stereo hand-off. Presets rather than per-band control keeps it to a ROM of
+coefficient sets and one selector.
+
+Two cautions. This is the first change in a long time that needs a **Quartus
+recompile** rather than a firmware rebuild, so budget a timing closure round.
+And generate the coefficients offline in python and paste the table in — a
+hand-written filter table is exactly the mistake that cost a hardware round on
+the VU needle's sine table.
+
+Full design outline, including the fixed-point formats, the 97%-full block RAM
+constraint and the verification plan: **[docs/EQ_DESIGN.md](docs/EQ_DESIGN.md)**.
+
+## PNG album art — MEASURED AND DEPRIORITISED
+
+**Measured 2026-08-04, as this entry asked: 19 `.mp3` files across the card,
+`Desktop\songs` and `Music`. Seven carry embedded art. All seven are
+`image/jpeg`. Zero PNG.**
+
+A 19-file sample is small and one PNG-heavy album would move it, so this is a
+deprioritisation rather than a deletion. But the cost below is a ~32 KB inflate
+window against a RAM budget that does not obviously have one, and nothing in the
+library being carried around would benefit. Re-measure before picking it up
+(`tools/` has no scanner; the throwaway one read APIC frame MIME types straight
+out of the ID3v2 tag, ~80 lines, and handles the v2.2/v2.3/v2.4 size encodings).
+
+The design notes below stand for whenever that changes.
 
 The cover-art decoder is [picojpeg](third_party/picojpeg/), baseline JPEG only.
 `art_find_apic()` checks the APIC frame's MIME type and skips anything that
@@ -211,37 +265,6 @@ distinguishes the two formats, so the dispatch point exists.
 
 Worth measuring first: how many covers in a real library are actually PNG. If
 it's a handful, the effort is better spent elsewhere.
-
-## Preset EQ — feasible, but belongs in the RTL
-
-Worth doing, and the obvious implementation is the wrong one.
-
-**Not in firmware.** The free CPU budget is 8.7 M instr/s at worst case (36.4 M
-total at 60 MHz and 1.65 CPI, less the 27.7 M Helix needs for 320 kbps / 48 kHz).
-A 5-band stereo biquad at 44.1 kHz is 441,000 biquad evaluations a second, and a
-Direct Form I biquad on RV32 is ~15-20 instructions once loads, stores and
-saturation are counted — 6.6 to 8.8 M instr/s, i.e. essentially all of it. It
-would also be spending the exact budget that keeps the decoder fed, which is the
-one way to bring the audio tics back.
-
-**In the RTL it is nearly free.** Output is 48 kHz and clk_sys is 60 MHz, so there
-are ~1250 clocks per output sample. Twenty biquads (10 bands x 2 channels) at 5
-MACs each is ~100 MACs, which one pipelined multiplier retires in ~150 cycles —
-about 12% of the time available. Cost is one DSP block, a small coefficient ROM
-and 20 x 4 words of state. Zero CPU, and the decoder never knows it exists.
-
-Where it goes: between `pcm_fifo` and `sound_i2s`, which is already a clean
-16-bit stereo hand-off. Presets rather than per-band control keeps it to a ROM of
-coefficient sets and one selector.
-
-Two cautions. This is the first change in a long time that needs a **Quartus
-recompile** rather than a firmware rebuild, so budget a timing closure round.
-And generate the coefficients offline in python and paste the table in — a
-hand-written filter table is exactly the mistake that cost a hardware round on
-the VU needle's sine table.
-
-Full design outline, including the fixed-point formats, the 97%-full block RAM
-constraint and the verification plan: **[docs/EQ_DESIGN.md](docs/EQ_DESIGN.md)**.
 
 ## Read this before adding any high-fidelity format
 

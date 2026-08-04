@@ -1,0 +1,237 @@
+"""Generate the preset EQ coefficient table, and prove it before any RTL exists.
+
+    python tools/gen_eq_coeffs.py            # report + ASCII response curves
+    python tools/gen_eq_coeffs.py --verilog  # emit the table to paste into RTL
+
+docs/EQ_DESIGN.md fixes the plan this implements, and the reason it is fixed:
+a hand-written sine table for the VU needle produced a 45-degree sweep instead
+of 100 and cost a hardware round. Filter coefficients are far less forgiving
+than that was, so nothing here is written by hand.
+
+What this does that a coefficient calculator does not:
+
+  * Everything is measured on the QUANTISED integers, never on the float
+    design. Q2.16 rounding shifts a filter's response, and the whole point is
+    to know the shipped curve rather than the intended one.
+  * The Q2.16 range is checked per coefficient and the script FAILS rather
+    than silently wrapping. a1 legitimately approaches -2, which is exactly
+    why the format has two integer bits, so the margin is worth watching.
+  * The preamp is derived from each preset's measured peak gain, so a boosted
+    preset cannot clip. EQ_DESIGN calls this not optional: a preset that
+    exceeds full scale hard-clips, which is much worse than the EQ is good.
+"""
+
+import argparse
+import cmath
+import math
+import sys
+
+FS = 48000.0            # fixed output rate; see EQ_DESIGN "what rate it runs at"
+QF = 16                 # Q2.16 -> 16 fractional bits
+QSCALE = 1 << QF
+QMIN, QMAX = -(1 << 17), (1 << 17) - 1        # 18-bit signed
+
+# Five bands: low shelf, three peaks, high shelf. Classic preset shape, and
+# what the named curves in EQ_DESIGN are actually describing.
+BANDS = [
+    ("lowshelf",   80.0,   0.70),
+    ("peak",       250.0,  1.00),
+    ("peak",       1000.0, 1.00),
+    ("peak",       4000.0, 1.00),
+    ("highshelf",  12000.0, 0.70),
+]
+
+# Gains in dB per band. FLAT is a true bypass in the RTL, not a unity biquad --
+# a unity biquad still rounds, so "off" would not be bit-identical to today.
+PRESETS = [
+    ("FLAT",      [0, 0, 0, 0, 0]),
+    ("BASS",      [+6, +3, 0, -1, 0]),
+    ("ROCK",      [+5, +2, -2, +2, +4]),
+    ("POP",       [-1, 0, +2, +3, +1]),
+    ("JAZZ",      [+3, +1, 0, -1, +2]),
+    ("CLASSICAL", [0, 0, 0, 0, +2]),
+    ("VOCAL",     [-3, -1, +3, +2, 0]),
+    ("TREBLE",    [0, 0, 0, +2, +6]),
+]
+
+
+def design(kind, f0, q, gain_db):
+    """RBJ audio EQ cookbook. Returns (b0,b1,b2,a1,a2) normalised by a0."""
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * f0 / FS
+    cw, sw = math.cos(w0), math.sin(w0)
+
+    if kind == "peak":
+        alpha = sw / (2.0 * q)
+        b0, b1, b2 = 1 + alpha * A, -2 * cw, 1 - alpha * A
+        a0, a1, a2 = 1 + alpha / A, -2 * cw, 1 - alpha / A
+    else:
+        # Shelf slope S expressed through Q, per the cookbook's note.
+        alpha = sw / 2.0 * math.sqrt((A + 1.0 / A) * (1.0 / q - 1.0) + 2.0)
+        tsa = 2.0 * math.sqrt(A) * alpha
+        if kind == "lowshelf":
+            b0 = A * ((A + 1) - (A - 1) * cw + tsa)
+            b1 = 2 * A * ((A - 1) - (A + 1) * cw)
+            b2 = A * ((A + 1) - (A - 1) * cw - tsa)
+            a0 = (A + 1) + (A - 1) * cw + tsa
+            a1 = -2 * ((A - 1) + (A + 1) * cw)
+            a2 = (A + 1) + (A - 1) * cw - tsa
+        else:
+            b0 = A * ((A + 1) + (A - 1) * cw + tsa)
+            b1 = -2 * A * ((A - 1) + (A + 1) * cw)
+            b2 = A * ((A + 1) + (A - 1) * cw - tsa)
+            a0 = (A + 1) - (A - 1) * cw + tsa
+            a1 = 2 * ((A - 1) - (A + 1) * cw)
+            a2 = (A + 1) - (A - 1) * cw - tsa
+    return (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+
+
+def quantise(c, where, errors):
+    q = int(round(c * QSCALE))
+    if not (QMIN <= q <= QMAX):
+        errors.append("%s: %.6f -> %d is outside Q2.16 [%d,%d]"
+                      % (where, c, q, QMIN, QMAX))
+        q = max(QMIN, min(QMAX, q))
+    return q
+
+
+def response_db(qcoefs, f):
+    """Magnitude of the QUANTISED cascade at f, in dB."""
+    z = cmath.exp(-2j * math.pi * f / FS)
+    h = 1.0 + 0j
+    for (b0, b1, b2, a1, a2) in qcoefs:
+        b0, b1, b2 = b0 / QSCALE, b1 / QSCALE, b2 / QSCALE
+        a1, a2 = a1 / QSCALE, a2 / QSCALE
+        num = b0 + b1 * z + b2 * z * z
+        den = 1.0 + a1 * z + a2 * z * z
+        if abs(den) < 1e-12:
+            return float("inf")
+        h *= num / den
+    return 20.0 * math.log10(abs(h)) if abs(h) > 0 else -999.0
+
+
+def stable(qcoefs):
+    """Poles inside the unit circle, checked on the quantised values."""
+    for (_b0, _b1, _b2, a1, a2) in qcoefs:
+        a1f, a2f = a1 / QSCALE, a2 / QSCALE
+        disc = a1f * a1f - 4.0 * a2f
+        if disc >= 0:
+            r = [(-a1f + math.sqrt(disc)) / 2, (-a1f - math.sqrt(disc)) / 2]
+            mags = [abs(x) for x in r]
+        else:
+            mags = [math.sqrt(a2f)] * 2      # complex pair, |p| = sqrt(a2)
+        if max(mags) >= 1.0:
+            return False
+    return True
+
+
+FREQS = [20 * (10 ** (i / 24.0)) for i in range(int(24 * math.log10(20000 / 20)) + 1)]
+
+
+def ascii_curve(name, qcoefs, preamp_db):
+    """The shipped curve, drawn. Reading the shape is the whole point of this,
+    so the grid stays out of the way: only the trace and the 0 dB line."""
+    lo, hi, rows, width = -14.0, 4.0, 19, 61
+    fmin, fmax = 20.0, 20000.0
+    cols = []
+    for x in range(width):
+        f = fmin * (fmax / fmin) ** (x / (width - 1.0))
+        cols.append(response_db(qcoefs, f) + preamp_db)
+
+    print("  %s   preamp %+.2f dB" % (name, preamp_db))
+    step = (hi - lo) / (rows - 1)
+    for r in range(rows):
+        db = hi - step * r
+        line = "".join("*" if abs(v - db) < step / 2
+                       else ("-" if abs(db) < step / 2 else " ")
+                       for v in cols)
+        label = "%+5.1f" % db if (r % 3 == 0) else "     "
+        print("   %s |%s" % (label, line))
+    axis = [" "] * width
+    for f in (100, 1000, 10000):
+        x = int(round(math.log10(f / fmin) / math.log10(fmax / fmin) * (width - 1)))
+        tag = "%dk" % (f // 1000) if f >= 1000 else str(f)
+        for i, ch in enumerate(tag):
+            if x + i < width:
+                axis[x + i] = ch
+    print("         +" + "-" * width)
+    print("          " + "".join(axis) + "   (20 Hz .. 20 kHz, log)")
+    print()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--verilog", action="store_true",
+                    help="emit the coefficient table for the RTL")
+    args = ap.parse_args()
+
+    errors, table = [], []
+    print("Preset EQ coefficients -- Q2.16 (18-bit signed), Fs = %g Hz" % FS)
+    print("Bands: " + ", ".join("%s %gHz Q%.2f" % (k, f, q) for k, f, q in BANDS))
+    print()
+
+    worst_margin = None
+    for name, gains in PRESETS:
+        qcoefs = []
+        for (kind, f0, q), g in zip(BANDS, gains):
+            c = design(kind, f0, q, g)
+            qc = tuple(quantise(v, "%s/%gHz" % (name, f0), errors) for v in c)
+            qcoefs.append(qc)
+            for v in qc:
+                m = min(QMAX - v, v - QMIN)
+                if worst_margin is None or m < worst_margin[0]:
+                    worst_margin = (m, "%s %gHz" % (name, f0))
+
+        peak = max(response_db(qcoefs, f) for f in FREQS)
+        preamp_db = -peak if peak > 0 else 0.0
+        preamp_q = quantise(10 ** (preamp_db / 20.0), "%s/preamp" % name, errors)
+
+        if not stable(qcoefs):
+            errors.append("%s: a pole is on or outside the unit circle" % name)
+
+        after = max(response_db(qcoefs, f) + preamp_db for f in FREQS)
+        table.append((name, qcoefs, preamp_q, preamp_db))
+        print("  %-10s peak %+6.2f dB -> preamp %+6.2f dB -> max %+5.2f dB  %s"
+              % (name, peak, preamp_db, after,
+                 "OK" if after <= 0.01 else "*** STILL CLIPS ***"))
+        if after > 0.01:
+            errors.append("%s exceeds full scale after preamp" % name)
+
+    print()
+    print("Tightest Q2.16 margin: %d counts (%s) -- 0 would mean the format is "
+          "too narrow." % (worst_margin[0], worst_margin[1]))
+    print()
+
+    print("=== magnitude response of the QUANTISED cascade, preamp applied ===")
+    print()
+    for name, qcoefs, _pq, pdb in table:
+        if name == "FLAT":
+            print("  FLAT        true bypass in the RTL -- not evaluated here,"
+                  " and not a unity biquad (which would still round).")
+            print()
+            continue
+        ascii_curve(name, qcoefs, pdb)
+
+    if args.verilog:
+        print("=== paste into the RTL ===")
+        print("// GENERATED by tools/gen_eq_coeffs.py -- DO NOT EDIT.")
+        print("// Q2.16 signed, Fs=%g. Order per band: b0 b1 b2 a1 a2." % FS)
+        for name, qcoefs, pq, pdb in table:
+            print("// %-10s preamp %+6.2f dB" % (name, pdb))
+            for (kind, f0, _q), qc in zip(BANDS, qcoefs):
+                print("//   %-9s %5gHz  " % (kind, f0)
+                      + " ".join("%7d" % v for v in qc))
+            print("//   preamp                %7d" % pq)
+
+    print()
+    if errors:
+        print("FAIL -- %d problem(s):" % len(errors))
+        for e in errors:
+            print("  - %s" % e)
+        return 1
+    print("all coefficient checks pass")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
