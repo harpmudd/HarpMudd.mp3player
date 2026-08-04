@@ -2,15 +2,27 @@
 
 The one test standing between this core and a release. Everything else is
 hardware-confirmed; `SETTINGS_WRITE` is 0 because three times the settings write
-extended every `.mp3` sharing the card, and two mitigations reasoned from that
-signature both failed. This is not a third mitigation. It answers one question
-and nothing else:
+extended every `.mp3` sharing the card.
 
-> **Does a single 0184, with nothing else running, damage a file?**
+**This is now a prediction, not a fishing trip.** The damaged sizes turned out to
+be *word 1 of the settings record* — `{version, volume, palette, repeat}` packed
+big-endian — so the test can name the number it expects before the button is
+pressed:
 
-If yes, 0184 is unusable by this core and settings must never write the card.
-If no, then 0184 alone is not the fault and the search moves to what else ran
-during the three events. Either answer closes the blocker's current form.
+| volume | predicted damaged size | |
+| --- | --- | --- |
+| 55 | `0x01370301` | 20,382,465 |
+| 60 | `0x013C0301` | 20,710,145 |
+| 65 | `0x01410301` | 21,037,825 &nbsp;← matches damage event 1 |
+| 70 | `0x01460301` | 21,365,505 &nbsp;← matches damage event 2 |
+
+So the question is no longer the vague "does a write damage a file". It is:
+
+> **Does one 0184 extend a file to exactly the value in word 1 of the record?**
+
+A file landing on precisely that number proves the mechanism. A file landing
+anywhere else refutes it, and the mechanism goes back in the bin — which is the
+point of predicting first.
 
 ## Read this first
 
@@ -53,9 +65,17 @@ damage sizes look unrelated in decimal but are `0x01410301`, `0x01460301`,
 `0x01370301`: **the same low 16 bits three times.** Never read a size on this
 card in decimal.
 
-**4. Run it, once.** Unmount, boot the core, and — this is the part that makes
-the measurement clean — **do not load anything**. No track, no playlist. Let it
-sit on the idle screen so nothing is streaming and no refill is in flight.
+**4. Write the prediction down first.** Boot the core and note the volume it
+comes up at (it is whatever `settings.bin` holds — 55 unless you change it).
+Word 1 is `0x01`, volume, palette, repeat as four bytes; the table at the top of
+this file has the common values. **Write the predicted size down before pressing
+anything.** A prediction recorded after the fact is not a prediction.
+
+Nudging the volume one step first is worth it: it moves the expected size off any
+of the three historical values, so a match cannot be confused with old damage.
+
+**5. Run it, once.** Do not load anything — no track, no playlist. Let it sit on
+the idle screen so nothing is streaming and no refill is in flight.
 
 Press **Select+Start**.
 
@@ -66,7 +86,7 @@ write destroys the "exactly one 0184" property the whole test rests on. The
 write itself is latched and only happens once, but a stray press still means you
 cannot be sure what the core did.
 
-**5. Snapshot again and compare.** Remount the card:
+**6. Snapshot again and compare.** Remount the card:
 
 ```bash
 python tools/card_snapshot.py after
@@ -75,17 +95,24 @@ python tools/card_snapshot.py diff
 
 ## Reading the answer
 
-**Any `.mp3` grew, or was rewritten.** 0184 is unusable by this core. Settings
-lose the ability to save from the UI; `settings.bin` stays what it already is, a
-hand-edited preferences file that `settings_load()` honours. Update
-`fw/settings.inc` and the roadmap to say so, and the blocker is closed as
-*answered*, not as fixed.
+**A file grew to EXACTLY the predicted size.** The mechanism is proven: 0184
+treats the bridge address as a parameter struct and reads word 1 as a size. That
+turns the blocker from "0184 is haunted" into a specific, addressable fault —
+either stage the payload where the write path does not parse it, or stop using
+0184. Do not enable `SETTINGS_WRITE` in the same session; write up the mechanism
+first, then design against it.
 
-Record the new sizes **in hex**. If the low 16 bits are `0x0301` a fourth time,
-that constant is the strongest lead anyone has had on this: a length ending in a
-fixed half is a 32-bit word assembled from two 16-bit halves, not anything
-computed from a 32-byte record, and it is a far narrower thing to chase than
-"the offset is wrong".
+**A file grew, but not to the predicted size.** The mechanism is refuted. Record
+the actual size in hex, and decode it against the record's other words before
+assuming anything — the prediction was worth making precisely because it can
+fail. 0184 is still unusable either way.
+
+**A file was rewritten at the same size, or damaged some other way.** Also fatal
+for 0184, and a different mechanism again. Note exactly what changed.
+
+In any of those three, 0184 stays off: settings lose the ability to save from the
+UI, and `settings.bin` remains what it already is — a hand-edited preferences
+file that `settings_load()` honours.
 
 **Nothing changed, and APF reported success.** One isolated write is safe, so
 the damage needed something else present — the debounced pump firing repeatedly,

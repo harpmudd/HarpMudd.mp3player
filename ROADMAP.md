@@ -86,9 +86,9 @@ and a write at offset 0 cannot extend a file to 20 MB. The fault lies either in
 what the target registers carry by the time APF reads them, or in APF's own
 handling — not in the offset we pass.
 
-### The sizes, in hex
+### Mechanism found: the damaged size IS word 1 of the settings record
 
-Read as decimal for three events, and that is what hid this. They are
+Read as decimal for three events, and that is what hid it:
 
 ```text
 21,037,825 = 0x01410301
@@ -96,11 +96,39 @@ Read as decimal for three events, and that is what hid this. They are
 20,382,465 = 0x01370301
 ```
 
-**The low 16 bits are identical all three times**; only the high half moves. A
-length ending in a constant `0x0301` is not anything computed from a 32-byte
-record — it is a 32-bit word assembled from two 16-bit halves, one fixed and one
-varying. That is a far narrower thing to look for than "the offset is wrong", and
-it is the strongest lead available. Record the sizes in hex from now on.
+The low 16 bits are identical all three times. Now decode them as the record's
+word 1, which `settings_write_now()` packs big-endian as
+`{SET_VERSION, volume, palette, repeat}`:
+
+| size | version | volume | palette | repeat |
+| --- | --- | --- | --- | --- |
+| `0x01410301` | 1 | 65 | 3 | 1 (ALL) |
+| `0x01460301` | 1 | 70 | 3 | 1 (ALL) |
+| `0x01370301` | 1 | 55 | 3 | 1 (ALL) |
+
+Every field is in range and every one is right. Version is constant because it
+is a constant; palette and repeat are constant because they had not been
+changed; **volume** is the one that moves — and 65 is the firmware default, and
+volume is both the most-changed setting and the thing that triggers a write.
+
+Confirmed independently against the card: the `settings.bin` on it right now
+holds volume 55, palette 3, repeat ALL — bytes 04..07 are `01 37 03 01` =
+`0x01370301`, byte-for-byte the third damaged size.
+
+So APF is not writing 32 bytes of payload at offset 0. Something in the write
+path reads the word at *bridge address + 4* and uses it as a **size**. Compare
+`0192`, where the bridge address points at a parameter *struct* APF parses
+("filename and flag/size") rather than at raw bytes; `0184`'s source pointer
+appears to be treated the same way, so our word 1 lands in a size field.
+
+This accounts for everything the earlier theories could not: why all four `.mp3`
+files share one size (each is stamped in turn while it occupies the MP3 slot),
+why `settings.bin` stays exactly 32 bytes (it is not the file being sized), why
+the low half never moved, and why a mitigation about *where* `settings.bin` lives
+changed nothing.
+
+**Not yet acted on.** A mechanism derived from data still needs an experiment
+that predicts an outcome *before* seeing it — see below.
 
 ### Ruled out by inspection, so the measurement need not re-check it
 
@@ -121,12 +149,20 @@ it is the strongest lead available. Record the sizes in hex from now on.
 So the configuration is right and the command is issued correctly. It needs the
 measurement.
 
-### The test — built, not yet run
+### The test — built, not yet run, and now a prediction rather than a fishing trip
 
 `bash fw/build.sh probe` produces `mp3player.probe.rom`, in which **Select+Start
 performs exactly one 0184 and then latches**, painting the result code on screen.
 `tools/card_snapshot.py before | after | diff` records every file on the card —
 whole-file hashes, sizes in hex — and names the verdict.
+
+Because the mechanism above names a specific number, the run is now falsifiable:
+**write down word 1 of the record before pressing anything, and predict the
+damaged size.** With the card's current settings (volume 55, palette 3, repeat
+ALL) that is `0x01370301` = 20,382,465 bytes. A file landing on exactly that
+proves it; a file landing anywhere else refutes it and the mechanism goes back in
+the bin. Better still, set the volume to something distinctive first — one press
+of Up makes it 60 and the prediction becomes `0x013C0301` = 20,710,145.
 
 Full procedure, including why it must be run on an idle core with nothing loaded:
 **[tools/settings_probe.md](tools/settings_probe.md)**. It is destructive by

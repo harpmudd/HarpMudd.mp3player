@@ -100,21 +100,57 @@
  *     structure to its 0180 arm, latching target_20/24/28/2C at dequeue, and
  *     target_dataslot_id is 16 bits zero-extended into target_20.
  *
- * And one NEW measurement off the recorded sizes, which the earlier reasoning
- * missed by reading them as decimal:
+ * ===========================================================================
+ * MECHANISM FOUND (2026-08-04). The damaged file size IS WORD 1 OF THIS RECORD.
+ * ===========================================================================
+ *
+ * Read the three recorded sizes in HEX rather than decimal:
  *
  *     21,037,825 = 0x01410301
  *     21,365,505 = 0x01460301
  *     20,382,465 = 0x01370301
  *
- * The LOW 16 BITS ARE IDENTICAL across three separate events, months of use
- * apart, and only the high half moves. A file length that ends in a constant
- * 0x0301 is not a length anything computed from our 32-byte record -- it is a
- * 32-bit word assembled from two 16-bit halves, one fixed and one varying.
- * Whatever is being written into the size field, it is a PACKED PAIR, and that
- * is a much narrower thing to look for than "the offset is wrong". Worth
- * recording the exact new sizes in hex when the probe runs: if the low half is
- * 0x0301 a fourth time, that constant is the thread to pull. */
+ * The low 16 bits are identical all three times and only the high half moves.
+ * Now decode them as this record's word 1, which settings_write_now() packs
+ * big-endian as { SET_VERSION, volume, palette, repeat }:
+ *
+ *     0x01410301 -> version 1, volume  65, palette 3, repeat 1 (ALL)
+ *     0x01460301 -> version 1, volume  70, palette 3, repeat 1 (ALL)
+ *     0x01370301 -> version 1, volume  55, palette 3, repeat 1 (ALL)
+ *
+ * Every field is in range and every one is right. The version is constant
+ * because it is a constant. Palette and repeat are constant because the user
+ * had not changed them. VOLUME is the one that moves -- 65 is the firmware
+ * default, and volume is both the most-changed setting and the one that
+ * triggers a write. That is not a coincidence at one in four billion.
+ *
+ * Confirmed against the card, independently: the settings.bin on it right now
+ * holds volume 55, palette 3, repeat ALL -- bytes 04..07 are 01 37 03 01, which
+ * is 0x01370301, byte-for-byte the THIRD damaged size.
+ *
+ * So APF is not writing 32 bytes of payload at offset 0. Something in the write
+ * path reads the word at (bridge address + 4) and uses it as a SIZE. Compare
+ * 0192, where the bridge address points at a PARAMETER STRUCT that APF parses
+ * -- "filename and flag/size" -- rather than at raw bytes. 0184's source
+ * pointer appears to be treated the same way, so our word 1 lands in a size
+ * field and the file is extended to it.
+ *
+ * This explains every observation the earlier theories could not:
+ *   - why all four .mp3s share ONE size: they are stamped with the same bogus
+ *     size in turn, each while it occupies the MP3 slot;
+ *   - why settings.bin stays exactly 32 bytes: it is not the file being sized;
+ *   - why the low half never moved: palette and repeat never moved;
+ *   - why a mitigation about WHERE settings.bin lives changed nothing.
+ *
+ * DO NOT re-enable writing on the strength of this. It is a mechanism derived
+ * from data, which is the bar this comment sets, but it has not been confirmed
+ * by an experiment that PREDICTS an outcome before seeing it. That experiment
+ * is now cheap and sharp, and it replaces the old blind one-write test:
+ *
+ *   Run the probe (tools/settings_probe.md) with a known record and predict the
+ *   damaged size IN ADVANCE. If a file comes back at exactly word 1's value,
+ *   the mechanism is proven and the fix follows from it -- stage the payload
+ *   somewhere the write path does not parse, or stop using 0184 entirely. */
 
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
