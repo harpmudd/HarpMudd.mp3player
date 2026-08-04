@@ -2,9 +2,14 @@
  * Volume, accent colour, repeat, shuffle and the art panel, kept across
  * relaunches in a small file on the card.
  *
- * APF cannot CREATE a file -- 0184 writes into a slot that already has one --
- * so settings.bin ships with the core holding the defaults. A missing or
+ * settings.bin ships with the core holding the defaults, and a missing or
  * unreadable file is not an error: the built-in defaults simply stand.
+ *
+ * "APF cannot CREATE a file" was the stated reason for shipping one, and it is
+ * WRONG -- see the confirmed-cause section below. The faulty 0184 path created
+ * a 21 MB file on the card named after a TYPO that existed only in the user's
+ * playlist, garbage from its first byte. Shipping a defaults file is still the
+ * right call, but not for that reason.
  *
  * Saving is DEBOUNCED. Every write is an SD round trip, and holding Up on the
  * volume would otherwise issue one per repeat, in the same budget that keeps
@@ -185,6 +190,15 @@
  * points at a parameter STRUCT that APF parses. We have been handing it 32
  * bytes of settings where it expects a struct, and word 1 of our record lands
  * in its size field.
+ *
+ * AND IT CAN CREATE FILES. At the clean baseline the playlist named
+ * "Goose - Hungerstrike.mp3" -- a typo for a real track -- and no such file
+ * existed. Two hours later it did: 21,694,465 bytes, the damage size exactly,
+ * garbage from byte 0, with head bytes 8D E9 5D 73 that the core reported on
+ * screen as NOTAG 8DE95D73. Nothing but the write path can have made it. So the
+ * long-standing "APF cannot CREATE a file" note at the top of this file was
+ * wrong, and the blast radius of this fault is larger than "existing files get
+ * extended" -- a mistyped playlist entry is enough to conjure a 21 MB file.
  *
  * WHAT THIS MEANS. 0184 as used here is unusable, and the fault is ours rather
  * than APF's: the command is documented as taking a bridge SOURCE address, but
