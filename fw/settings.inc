@@ -221,7 +221,7 @@ enum {
     SET_B_MAGIC = 0,       /* 4 bytes */
     SET_B_VERSION = 4, SET_B_VOLUME = 5, SET_B_PALETTE = 6,
     SET_B_REPEAT = 7,  SET_B_SHUFFLE = 8, SET_B_ART = 9,
-    SET_B_VIZ = 10
+    SET_B_VIZ = 10,    SET_B_EQ = 11
 };
 
 static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
@@ -252,6 +252,11 @@ static int settings_load(void)
 
     v = b[SET_B_VIZ];
     if (v < VIZ_COUNT) viz_mode = (uint8_t)v;
+
+    /* Applied to the RTL here rather than waiting for the first Y press, so a
+     * saved preset is actually in effect from the first note. */
+    v = b[SET_B_EQ];
+    if (v < EQ_COUNT) { eq_idx = (uint8_t)v; REG(R_EQ) = eq_idx; }
     set_present = 1;
     return 1;
 }
@@ -273,6 +278,7 @@ static int settings_write_now(void)
     rec[SET_B_SHUFFLE] = shuffle_on;
     rec[SET_B_ART]     = art_pref ? 1u : 0u;
     rec[SET_B_VIZ]     = viz_mode;
+    rec[SET_B_EQ]      = eq_idx;
 
     for (uint32_t w = 0; w < SET_BYTES / 4u; w++)
         dt_write(SET_DT_W + w, ((uint32_t)rec[w*4+0] << 24) |

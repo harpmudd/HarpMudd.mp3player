@@ -125,8 +125,17 @@ module eq_biquad #(
             default: opnd = smp;
         endcase
     end
-    wire signed [AW-1:0] prod = $signed(cf) * $signed(opnd);
-    wire signed [AW-1:0] pre_prod = $signed(prom[preset]) * $signed(smp);
+    // The multiply is REGISTERED before the accumulate. Doing both in one
+    // cycle closed at only +0.425 ns on clk_sys, and slack on this design has
+    // been seen to move ~3 ns between fits, so that is a build away from
+    // failing. Splitting them costs one cycle per MAC -- ~160 of the 1250
+    // clocks per sample instead of ~80 -- which is free here and buys back the
+    // whole path.
+    wire signed [AW-1:0] mul_a = $signed(cf) * $signed(opnd);
+    wire signed [AW-1:0] mul_p = $signed(prom[preset]) * $signed(smp);
+
+    reg  signed [AW-1:0] p_reg;
+    reg                  ph;        // 0 = multiply into p_reg, 1 = accumulate
 
     // Round-to-nearest arithmetic shift, matching _rnd_shift() in the model.
     function signed [SW-1:0] rnd16;
@@ -156,6 +165,7 @@ module eq_biquad #(
         if (rst) begin
             busy <= 1'b0; bq <= 4'd0; k <= K_B0;
             smp  <= {SW{1'b0}}; acc <= {AW{1'b0}};
+            p_reg <= {AW{1'b0}}; ph <= 1'b0;
             eq_l <= 16'sd0; eq_r <= 16'sd0;
             out_l <= 16'sd0; out_r <= 16'sd0;
             r_hold <= 16'sd0;
@@ -165,16 +175,28 @@ module eq_biquad #(
                 busy   <= 1'b1;
                 bq     <= 4'd0;
                 k      <= K_B0;
+                ph     <= 1'b0;
                 r_hold <= in_r;
                 smp    <= {{(SW-16-FS){in_l[15]}}, in_l, {FS{1'b0}}};
             end
+        end else if (k <= K_A2) begin
+            // Two cycles per MAC: latch the product, then accumulate it.
+            if (!ph) begin
+                p_reg <= mul_a;
+                ph    <= 1'b1;
+            end else begin
+                ph <= 1'b0;
+                case (k)
+                    K_B0: acc <= p_reg;             // b0*x
+                    K_B1: acc <= acc + p_reg;       // + b1*x1
+                    K_B2: acc <= acc + p_reg;       // + b2*x2
+                    K_A1: acc <= acc - p_reg;       // - a1*y1
+                    K_A2: acc <= acc - p_reg;       // - a2*y2
+                endcase
+                k <= k + 3'd1;
+            end
         end else begin
             case (k)
-                K_B0: begin acc <= prod;        k <= K_B1; end
-                K_B1: begin acc <= acc + prod;  k <= K_B2; end
-                K_B2: begin acc <= acc + prod;  k <= K_A1; end
-                K_A1: begin acc <= acc - prod;  k <= K_A2; end   // -a1*y1
-                K_A2: begin acc <= acc - prod;  k <= K_WB; end   // -a2*y2
                 K_WB: begin
                     st[sbase + 1] <= x1;               // x2 <= x1
                     st[sbase + 0] <= smp;              // x1 <= this band's input
@@ -189,8 +211,14 @@ module eq_biquad #(
                     end
                 end
                 K_PRE: begin
-                    smp <= rnd16(pre_prod);            // preset preamp
-                    k   <= K_OUT;
+                    if (!ph) begin
+                        p_reg <= mul_p;                // preamp, same 2 cycles
+                        ph    <= 1'b1;
+                    end else begin
+                        ph  <= 1'b0;
+                        smp <= rnd16(p_reg);
+                        k   <= K_OUT;
+                    end
                 end
                 K_OUT: begin
                     if (bq < NBAND) begin              // finished left

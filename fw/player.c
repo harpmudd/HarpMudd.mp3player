@@ -49,6 +49,7 @@
 #define R_SLOT_SZ   0x8000005Cu   /* R: size of the file APF reported at reload */
 #define R_DT_ADDR   0x80000060u   /* W: datatable word address                  */
 #define R_DT_DATA   0x80000064u   /* R/W: datatable word at that address        */
+#define R_EQ        0x80000068u   /* R/W: EQ preset index, 0 = FLAT (bypass)    */
 
 /* Target command selector, written to R_TGT_GO bits [1:0]. */
 #define TGT_READ     0u   /* 0180 */
@@ -135,7 +136,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503311u   /* rev 17: 0184 write for settings   */
+#define EXPECT_VERSION 0x4D503312u   /* rev 18: preset EQ (R_EQ)          */
 
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */
@@ -377,6 +378,17 @@ static uint32_t ring_rd;        /* read cursor within the ring               */ 
 static uint32_t ui_info_y;            /* where chrome left room for the format line */
 static uint32_t ui_last_info, ui_last_prog, ui_pause_next, ui_breath, ui_icon_next;
 static uint32_t ui_arr_t, ui_wave_force, ui_accent_changed;
+
+/* ---- preset EQ ----
+ * The curve table and the names are GENERATED from the same quantised
+ * coefficients the RTL filters with (tools/gen_eq_coeffs.py --curves), so
+ * the shape on screen cannot drift from the shape being applied. */
+#include "eq_curve.h"
+static uint8_t  eq_idx;              /* 0 = FLAT = RTL bypass          */
+static uint32_t eq_show_until;       /* curve is up until this cycle   */
+static uint32_t eq_morph;            /* frames left melting back       */
+#define EQ_HOLD_MS   1100u
+#define EQ_MORPH_N   10u
 static uint32_t ui_sec, ui_sec_acc, ui_last_frames, ui_prog_sec;
 static int      ui_was_paused;
 static uint32_t peak_amp;         /* max |sample| in the most recently decoded frame, 0..32767 */
@@ -467,6 +479,7 @@ static uint8_t set_flush_now;
  * clears it, so the combo does nothing and the core still contains no 0184. */
 static uint8_t set_probe_req;
 static void settings_probe_pump(void);
+static uint8_t eq_apply;             /* preset changed: tell the RTL */
 
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
 static uint32_t soft_restart_req;  /* probe: reposition only, keeps the known-good tag */
@@ -970,6 +983,56 @@ static void ui_art_placeholder(void)
      * rather than a solid grey slab. */
     fb_rect(ART_PAD, ART_STASH_Y + ART_PAD, ART_IMG, ART_IMG, UI_TRACK);
     art_ready = 1;
+}
+
+/* The selected preset's response, drawn across the meter band.
+ *
+ * `blend` runs EQ_MORPH_N (pure curve) down to 0 (pure live meter), so the same
+ * routine does both the hold and the melt back. Bars are drawn from the CENTRE
+ * line -- boost above, cut below -- because filled-from-the-bottom bars bury
+ * the shape under a solid mass. That was established by rendering both as ASCII
+ * before any of this was written.
+ *
+ * Two rects per bar rather than one: the lit part, and the background above or
+ * below it. Painting the background explicitly is what lets this run without an
+ * erase pass, which on a single-buffered framebuffer is what stops it flickering
+ * when scanout catches the gap. */
+static void ui_eq_curve_draw(uint32_t blend)
+{
+    const uint32_t ww  = ui_wave_w();
+    const uint32_t mid = UI_WAVE_Y + UI_WAVE_H / 2u;
+
+    for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+        uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
+        uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
+        uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
+
+        /* Curve height, then pulled toward whatever the live meter is showing
+         * so the two shapes cross-fade rather than swap. */
+        int32_t cv = eq_curve[eq_idx][i];
+        int32_t lv = (int32_t)wave[i] - (int32_t)(UI_WAVE_H / 2u);
+        int32_t v  = (cv * (int32_t)blend + lv * (int32_t)(EQ_MORPH_N - blend))
+                   / (int32_t)EQ_MORPH_N;
+
+        uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
+                              mid * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
+
+        if (v >= 0) {
+            uint32_t h = (uint32_t)v;
+            if (h > UI_WAVE_H / 2u - 1u) h = UI_WAVE_H / 2u - 1u;
+            fb_rect(x, mid - h, lit, h + 1u, c);
+            fb_rect(x, UI_WAVE_Y, lit, (mid - h) - UI_WAVE_Y, bed);
+            fb_rect(x, mid + 1u, lit, UI_WAVE_Y + UI_WAVE_H - mid - 1u, bed);
+        } else {
+            uint32_t h = (uint32_t)(-v);
+            if (h > UI_WAVE_H / 2u - 1u) h = UI_WAVE_H / 2u - 1u;
+            fb_rect(x, mid, lit, h + 1u, c);
+            fb_rect(x, UI_WAVE_Y, lit, mid - UI_WAVE_Y, bed);
+            fb_rect(x, mid + h + 1u, lit,
+                    UI_WAVE_Y + UI_WAVE_H - (mid + h + 1u), bed);
+        }
+    }
 }
 
 /* Clear the waveform band across the FULL inner width and force every bar to
@@ -1547,6 +1610,27 @@ static void ui_draw_dynamic(void)
      * meter that freezes mid-deflection looks broken, and the fall to zero is
      * the most characterful thing an analogue movement does. Every other mode
      * is genuinely static when paused and stays frozen. */
+    /* ---- EQ curve takes the meter band over on a preset change ----
+     * A name says WHICH preset; the curve says what it does. It reuses the same
+     * bars the meter already draws, at heights from a generated table instead
+     * of from pcm[], so it costs one meter frame and no new primitive.
+     *
+     * The return is a MORPH, not a cut: each bar walks from the curve to the
+     * live meter over EQ_MORPH_N frames, so the shape melts into the music. */
+    if (eq_show_until) {
+        if ((int32_t)(cycles() - eq_show_until) < 0) {
+            ui_eq_curve_draw(EQ_MORPH_N);       /* full curve, no blend yet */
+            return;
+        }
+        if (eq_morph) {
+            ui_eq_curve_draw(--eq_morph);
+            return;
+        }
+        eq_show_until = 0;
+        ui_wave_clear();                        /* hand the band back cleanly */
+        ui_wave_force = 1u;
+    }
+
     uint32_t vu_settling = (viz_mode == VIZ_VU) && (vu_l || vu_r);
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
@@ -2199,7 +2283,7 @@ static void ui_draw_dynamic(void)
             const uint32_t my = iy + (UI_ICONBOX_H > UI_MODE_H
                                     ? (UI_ICONBOX_H - UI_MODE_H) / 2u : 0u);
 
-            fb_rect(mx, iy, (UI_MODE_W + 10u) * 2u, UI_ICONBOX_H, tbg);
+            fb_rect(mx, iy, (UI_MODE_W + 10u) * 3u + 12u, UI_ICONBOX_H, tbg);
             /* Inactive modes stay visible but recede, so the controls advertise
              * themselves instead of only appearing once found. */
             ui_icon_repeat(mx, my,
@@ -2207,6 +2291,15 @@ static void ui_draw_dynamic(void)
                            rep_mode == REP_ONE);
             ui_icon_shuffle(mx + UI_MODE_W + 10u, my,
                             shuffle_on ? ui_accent : UI_FAINT);
+
+            /* EQ state, persistent. The curve on the meter is transient by
+             * design, so a user who walks away and comes back needs something
+             * that is still there. Dimmed rather than hidden when FLAT, the
+             * same treatment the repeat and shuffle icons already use: an icon
+             * that vanishes gives no hint the control exists. */
+            fb_set_color(eq_idx ? ui_accent : UI_FAINT, tbg);
+            fb_text_clipped(mx + (UI_MODE_W + 10u) * 2u, my - 2u, "EQ",
+                            TS_1X, TS_1X, 30u);
 
             /* "4 / 12", right-aligned so the numbers do not shuffle sideways as
              * the track index gains a digit.
@@ -2278,6 +2371,7 @@ static void ui_draw_dynamic(void)
 #define KEY_A       (1u << 4)
 #define KEY_B       (1u << 5)
 #define KEY_X       (1u << 6)
+#define KEY_Y       (1u << 7)   /* was entirely unused before the EQ */
 #define KEY_L1      (1u << 8)
 #define KEY_R1      (1u << 9)
 #define KEY_SELECT  (1u << 14)
@@ -2370,6 +2464,16 @@ static void poll_input(void)
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
                                             : "METER: PEAK DOTS");
         settings_mark_dirty();
+    }
+    if (edge & KEY_Y) {
+        /* Mirrors X / Select+X for the meters, so the gesture is already
+         * learned. Y was completely unused before this -- not even #defined. */
+        if (keys & KEY_SELECT) {
+            sel_used = 1;
+            eq_idx = (uint8_t)((eq_idx + EQ_COUNT - 1u) % EQ_COUNT);
+        } else
+            eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
+        eq_apply = 1u;
     }
     if (edge & KEY_START) {
         /* Select+Start is the settings-write probe. It also STOPS, deliberately:
@@ -3569,6 +3673,19 @@ int main(void)
                 ui_mode_dirty = 1;
             }
             continue;
+        }
+
+        /* EQ preset change. The filter is in the RTL and the audio never stops
+         * flowing, so this is seamless in a way a track change can never be --
+         * no flush, no reload, nothing to resynchronise. */
+        if (eq_apply) {
+            eq_apply = 0;
+            REG(R_EQ) = eq_idx;
+            ui_toast_set("EQ: ", 0xFFFFFFFFu, eq_name[eq_idx]);
+            eq_show_until = cycles() + CLK_HZ / 1000u * EQ_HOLD_MS;
+            eq_morph      = EQ_MORPH_N;
+            ui_mode_dirty = 1u;
+            settings_mark_dirty();
         }
 
         /* Only when nothing is loading: a write is an SD round trip, and the

@@ -353,7 +353,8 @@ module mp3_soc #(
                      R_INPUT   = 8'h3C, R_VERSION = 8'h40, R_RELOAD  = 8'h44,
                      R_FB_ADDR = 8'h48, R_FB_SIZE = 8'h4C, R_FB_COLOR= 8'h50,
                      R_FB_GO   = 8'h54, R_FB_STALL= 8'h58, R_SLOT_SZ = 8'h5C,
-                     R_DT_ADDR = 8'h60, R_DT_DATA = 8'h64;
+                     R_DT_ADDR = 8'h60, R_DT_DATA = 8'h64,
+                     R_EQ      = 8'h68;
 
     // Bitstream/firmware interlock. Firmware compares this against its own
     // expected value and refuses to run on a mismatch.
@@ -363,7 +364,7 @@ module mp3_soc #(
     // stale RTL. That has already happened three times here, each time looking
     // like a logic bug (dead peripheral, no audio, unresponsive buttons) rather
     // than what it was. BUMP THIS whenever the MMIO map changes.
-    localparam [31:0] CORE_VERSION = 32'h4D503311;   // "MP3" + rev 17 (0184 write for settings)
+    localparam [31:0] CORE_VERSION = 32'h4D503312;   // "MP3" + rev 18 (preset EQ, R_EQ)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -386,6 +387,8 @@ module mp3_soc #(
     reg  [31:0] pcm_rate;
     wire        pcm_full, pcm_empty, pcm_underrun;
     wire [11:0] pcm_level;
+    wire signed [15:0] fifo_l, fifo_r;
+    reg   [2:0] eq_preset;
 
     pcm_fifo #(.AW(11)) u_pcm (
         .clk      (clk),
@@ -397,9 +400,24 @@ module mp3_soc #(
         .empty    (pcm_empty),
         .level    (pcm_level),
         .rate_inc (pcm_rate),
-        .out_l    (audio_l),
-        .out_r    (audio_r),
+        .out_l    (fifo_l),
+        .out_r    (fifo_r),
         .underrun (pcm_underrun)
+    );
+
+    // Preset EQ, spliced between the FIFO and this module's audio outputs.
+    // Entirely inside clk_sys, so no new CDC -- sound_i2s already crosses into
+    // clk_74a through its own sync_fifo and this sits on the near side of that.
+    // Preset 0 is a true bypass inside eq_biquad, so with the EQ off the audio
+    // path is bit-identical to what it was before this existed.
+    eq_biquad #(.CLK_HZ(60_000_000), .RATE_HZ(48_000)) u_eq (
+        .clk    (clk),
+        .rst    (rst),
+        .in_l   (fifo_l),
+        .in_r   (fifo_r),
+        .preset (eq_preset),
+        .out_l  (audio_l),
+        .out_r  (audio_r)
     );
 
     always @(posedge clk) begin
@@ -422,11 +440,13 @@ module mp3_soc #(
             // Default to 48 kHz at 50 MHz so a plain sample write still makes
             // sound before firmware programs the real rate.
             pcm_rate <= 32'd3435974;   // 48 kHz at clk_sys = 60 MHz
+            eq_preset <= 3'd0;         // FLAT: bypass until asked otherwise
         end else if (d_req & d_is_mmio & dWE) begin
             case (mmio_reg)
                 R_CONSOLE: begin con_char <= dDAT_MOSI[7:0]; con_wr <= 1'b1; end
                 R_AUDIO:   ;   /* handled by pcm_push -> pcm_fifo */
                 R_PCM_RATE: pcm_rate <= dDAT_MOSI;
+                R_EQ:       eq_preset <= dDAT_MOSI[2:0];
                 R_PCM_ST:  ;   /* handled by pcm_flush -> pcm_fifo, above */
                 R_STAT0:   status0 <= dDAT_MOSI;
                 R_STAT1:   status1 <= dDAT_MOSI;
@@ -484,6 +504,7 @@ module mp3_soc #(
             R_DT_DATA: mmio_rdata = dt_q;
             R_FB_GO:   mmio_rdata = {31'd0, fb_cmd_full};
             R_FB_STALL: mmio_rdata = fb_stall_ctr;
+            R_EQ:      mmio_rdata = {29'd0, eq_preset};
             R_STAT0:   mmio_rdata = status0;
             R_STAT1:   mmio_rdata = status1;
             R_STAT2:   mmio_rdata = status2;

@@ -753,6 +753,8 @@ set_global_assignment -name VERILOG_FILE rtl/VexRiscv_Full.v
 set_global_assignment -name VERILOG_FILE core/mp3_soc.v
 set_global_assignment -name VERILOG_FILE core/tgt_cmd.v
 set_global_assignment -name VERILOG_FILE core/pcm_fifo.v
+set_global_assignment -name VERILOG_FILE core/eq_biquad.v
+set_global_assignment -name SEARCH_PATH core
 set_global_assignment -name SYSTEMVERILOG_FILE core/mp3_fb.sv
 set_global_assignment -name VERILOG_FILE core/font_rom.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram_fb.sv
