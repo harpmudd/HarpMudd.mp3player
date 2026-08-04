@@ -135,11 +135,27 @@ wanted.
 - **Coefficients: Q2.16 signed (18 bits).** `a1` reaches magnitude 2 for
   low-frequency high-Q sections, so two integer bits are required. Q1.17 would
   overflow on exactly the bands a bass preset needs.
-- **State: 32 bits.** Storing state at 16 bits is the classic fixed-point IIR
-  mistake — quantisation feeds back and produces limit cycles, audible as a low
-  rumble on silence. The extra width costs 640 bits of MLAB and removes the
-  entire failure mode.
-- **Accumulator: 40 bits**, ample headroom for five cascaded stages.
+- **State: 36 bits, Q20.16 — MEASURED, and the original 32 was wrong.**
+  Storing state at 16 bits is the classic fixed-point IIR mistake: quantisation
+  feeds back and produces limit cycles, audible as a low rumble on silence. What
+  the numbers added is *where* the cliff is, and it is a cliff rather than a
+  slope — sweeping the fractional bits in `tools/eq_model.py`:
+
+  | fractional bits | silence after a loud passage |
+  |---|---|
+  | 10, 11, 12, 13 | **never settles — rings indefinitely** |
+  | 14 | settles to exact zero in 23 ms |
+  | 16 | settles to exact zero in 23 ms |
+
+  13 bits rings forever and 14 settles; there is no gradual degradation to
+  notice on hardware. 16 is used, for two bits of margin on a threshold with a
+  cliff in it. Sixteen fractional bits plus the headroom needs 33 bits of state
+  against a worst case measured with full-scale sines parked on each band
+  centre, so **32 bits cannot hold both** — 36 leaves 18 dB above the worst
+  observed.
+- **Accumulator: 58 bits.** The original 40 predates fixing the state width and
+  cannot be right: an 18-bit coefficient times a 36-bit state is a 54-bit
+  product before five of them are summed. Measured worst case is 49 bits.
 - **Rounding: round-to-nearest**, not truncate. Truncation in an IIR feedback
   path biases toward a DC offset.
 
@@ -151,12 +167,21 @@ coefficients are generated, store it alongside them.
 
 ## Bypass must be bit-exact
 
-The "Flat" preset must be a **true bypass** — a multiplexer that routes
-`pcm_fifo`'s output to `audio_l`/`audio_r` untouched — and not a biquad loaded
-with unity coefficients. A unity biquad is not an identity function in fixed
-point: it still rounds. Users who leave EQ off should get exactly the audio they
-get today, provably, and that is also the thing that makes an A/B test
-meaningful when tuning the other presets.
+The "Flat" preset is a **true bypass** — a multiplexer that routes `pcm_fifo`'s
+output to `audio_l`/`audio_r` untouched.
+
+**The reason originally given for this was wrong, and the correction is worth
+keeping.** The claim was that a unity biquad "is not an identity function in
+fixed point: it still rounds". Tested against the bit-exact model, FLAT comes
+back byte-identical over 20,000 random samples. At 0 dB the cookbook produces a
+numerator numerically equal to the denominator, so `b1 == a1` and `b2 == a2`
+exactly and `b0` quantises to exactly 1.0; the recursion collapses to `y = x`
+with no rounding error at all.
+
+The mux stays regardless — it is free, it also skips the preamp multiply, and it
+keeps "off" provably identical even if a band is ever retuned. But it is now
+justified by cheapness and robustness rather than by an arithmetic claim that
+does not hold.
 
 ## What the user actually experiences
 
