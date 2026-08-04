@@ -75,7 +75,7 @@
  *
  * TO TURN IT BACK OFF: set this to 0. Nothing else has to change -- the write
  * body is compiled out and the release core then contains no 0184 at all. */
-#define SETTINGS_WRITE 1
+#define SETTINGS_WRITE 0
 
 /* That test, built. SETTINGS_PROBE=1 makes Select+Start perform exactly ONE
  * 0184 and then latch, so a whole session contains a single write with a known
@@ -157,36 +157,52 @@
  *   - why a mitigation about WHERE settings.bin lives changed nothing.
  *
  * ===========================================================================
- * THE PREDICTION WAS MADE AND IT FAILED (2026-08-04). Read this before reusing
- * the mechanism above -- it is NOT established.
+ * CONFIRMED 2026-08-04. The damaged size IS word 1 of this record. PROVEN.
  * ===========================================================================
  *
- * Writing was re-enabled and a real session run with a before/after snapshot of
- * the card. Settings changed to volume 55, palette 9, repeat ALL, meter BARS,
- * so word 1 was 0x01370901 and the mechanism predicted an .mp3 extended to
- * 20,384,001 bytes.
+ * The prediction was made, missed once on a light session, and then hit exactly
+ * on a heavy one. Do not read the earlier miss as a refutation: a single
+ * session of a few writes is simply not enough to trigger it.
  *
- *   settings.bin was rewritten correctly, in place, at exactly 32 bytes.
- *   ALL FIVE .mp3 FILES CAME BACK BYTE-FOR-BYTE IDENTICAL.
- *   Nothing grew. Nothing was rewritten. The prediction missed completely.
+ * The confirming event. settings.bin held
  *
- * So the word-1 theory is unconfirmed, and the striking part -- three damaged
- * sizes that each decode to a valid, plausible settings record, plus a
- * settings.bin on the card matching the third exactly -- is still unexplained.
- * Either it is a coincidence far larger than it looks, or the fault needs some
- * condition this session did not reproduce. Do not treat it as known either
- * way, and do NOT build a fix on it.
+ *     53 50 4D 33 | 01 4B 08 01 | ...
+ *                   ^^^^^^^^^^^ word 1 = version 1, volume 75, palette 8,
+ *                               repeat ALL  =  0x014B0801  =  21,694,465
  *
- * What the theory is still good for is DETECTION, and that is worth keeping:
- * if the damage ever recurs, decode the new size as {version, volume, palette,
- * repeat} at that moment. A second hit confirms it outright; a miss kills it.
- * That makes it falsifiable on the next event instead of on speculation.
+ * and EVERY .mp3 that had been in the MP3 slot came back at exactly
+ * 21,694,465 bytes. That number was computed and written down BEFORE the
+ * session, and checked against the card when nothing matched it.
  *
- * And the clean run does NOT clear 0184. One session of writes leaving the card
- * intact is necessary, not sufficient -- all three damage events followed
- * extended use, and the deferred-write and subdirectory mitigations were
- * already in place for the third. Keep snapshotting across real sessions
- * (tools/card_snapshot.py before | after | diff) before trusting this. */
+ * One file on the card was NOT damaged -- the one that never became the active
+ * slot file. That is the last piece: files are stamped one at a time, as each
+ * occupies the MP3 slot, which is why every damaged file shares one size and
+ * why the count grows with how much you skip around.
+ *
+ * So APF does NOT treat the 0184 bridge address as raw payload. Something in
+ * that path reads the word at (bridge address + 4) as a SIZE and applies it to
+ * the file in the slot -- the same shape as 0192, where the bridge address
+ * points at a parameter STRUCT that APF parses. We have been handing it 32
+ * bytes of settings where it expects a struct, and word 1 of our record lands
+ * in its size field.
+ *
+ * WHAT THIS MEANS. 0184 as used here is unusable, and the fault is ours rather
+ * than APF's: the command is documented as taking a bridge SOURCE address, but
+ * the observed behaviour is a parsed struct, and we never had a template to
+ * copy. 0192 was only ever solved by copying a real struct APF itself produced
+ * (via 0190). There is no equivalent source for 0184, so constructing one is
+ * exactly the guessing this file already warns against.
+ *
+ * Writing is OFF and stays off until someone has a 0184 parameter struct that
+ * APF produced. tools/settings_edit.py is the persistence mechanism.
+ *
+ * WHAT MADE IT WORSE, and it was my change: wiring the EQ preset to
+ * settings_mark_dirty() meant every Y press queued a write. Flipping presets
+ * while skipping tracks turned an occasional write into a steady stream, which
+ * is why this event damaged five files where earlier ones damaged four over
+ * much longer use. A settings field attached to a control the user operates
+ * repeatedly is a different risk profile from one attached to volume.
+ */
 
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u

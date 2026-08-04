@@ -17,37 +17,55 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Settings write damaged the user's files — PARKED, still a release blocker
+## Settings write damages the user's files — CAUSE FOUND, write disabled
 
-**Active work paused 2026-08-04 by the user; kept in the backlog.** Nothing here
-is resolved and it still blocks a release — it is simply not what is being
-worked on. What resumes it: a recurrence (snapshot it, then decode the new size
-as `{version, volume, palette, repeat}` per the detector below), or a decision
-to ship, which cannot happen with this open.
+**`SETTINGS_WRITE` is 0.** The cause is now known, proven by a prediction made
+in advance and hit exactly.
 
-**Passive observation continues at zero cost:** the write is live and the
-baseline is in place, so the only thing needed is
-`python tools/card_snapshot.py after` then `diff` whenever the card happens to
-be mounted. Roughly a minute, and it is what turns a recurrence into evidence
-rather than lost music.
+### CONFIRMED: the damaged size is word 1 of the settings record
 
-**`SETTINGS_WRITE` is 1 again** as of 2026-08-04, on the user's instruction and
-before the blocker is understood. Saving works: settings survive a relaunch, and
-two sessions of writes left every `.mp3` on the card byte-for-byte intact —
-verified against the user's untouched originals, not just against a snapshot.
+`settings.bin` held `53 50 4D 33 | 01 4B 08 01`, so word 1 —
+`{version 1, volume 75, palette 8, repeat ALL}` — was `0x014B0801` =
+**21,694,465**. That number was computed and written down *before* the session,
+and checked against the card when nothing matched it.
 
-**This is not resolved.** Three times previously, every `.mp3` sharing the card
-came back extended and one file's audio was destroyed. Nothing found since
-explains why, the mechanism that looked certain was tested and missed (below),
-and all three events followed *extended* use rather than a single session. So
-the current state is "writing is on and being watched", not "fixed".
+After a session of skipping tracks and flipping EQ presets, **every `.mp3` that
+had been in the MP3 slot came back at exactly 21,694,465 bytes.**
 
-Keep the originals backed up. `tools/settings_edit.py` remains the way to set
-values without trusting the write path at all.
+One file was untouched: the one that never became the active slot file. That is
+the last piece — files are stamped one at a time as each occupies the slot,
+which is why every damaged file shares a single size and why the count grows
+with how much you skip around.
 
-To turn it back off: set `SETTINGS_WRITE` to `0` in
-[fw/settings.inc](fw/settings.inc) and rebuild — the write body compiles out and
-the core then contains no `0184` at all.
+**So APF does not treat the `0184` bridge address as raw payload.** Something in
+that path reads the word at *bridge address + 4* as a size and applies it to the
+file in the slot — the same shape as `0192`, where that pointer is a parameter
+*struct* APF parses. We have been handing it 32 bytes of settings where it
+expects a struct, and word 1 of our record lands in its size field.
+
+The earlier miss was not a refutation: one light session is simply not enough
+writes to trigger it.
+
+### What I got wrong, and made worse
+
+Wiring the EQ preset to `settings_mark_dirty()` meant **every Y press queued a
+write**. Flipping presets while skipping tracks turned an occasional write into
+a steady stream — which is why this event damaged five files where earlier ones
+damaged four over far longer use. A settings field attached to a control the
+user operates repeatedly is a different risk profile from one attached to
+volume, and I did not think about that when adding it.
+
+### Where this leaves it
+
+`0184` is unusable as we are using it, and the fault is ours rather than
+Analogue's: the command is documented as taking a bridge *source* address, but
+the observed behaviour is a parsed struct, and we never had a template to copy.
+`0192` was only ever solved by copying a real struct APF itself produced (via
+`0190`). There is no equivalent source for `0184`, so constructing one is
+exactly the guessing this project keeps being punished for.
+
+Writing stays off until someone has a `0184` parameter struct that APF produced.
+`tools/settings_edit.py` is the persistence mechanism, and it works.
 
 Three times, every `.mp3` sharing the card with it came back reporting the same
 size — 21,037,825, then 21,365,505, then 20,382,465 — while `settings.bin` itself
