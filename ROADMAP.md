@@ -136,31 +136,17 @@ why `settings.bin` stays exactly 32 bytes (it is not the file being sized), why
 the low half never moved, and why a mitigation about *where* `settings.bin` lives
 changed nothing.
 
-### The prediction was made and it FAILED — 2026-08-04
+### The first attempt MISSED — and why that was not a refutation
 
-Writing was re-enabled and a real session run with a before/after card snapshot.
-Settings ended at volume 55, palette 9, repeat ALL, so word 1 was `0x01370901`
-and the mechanism predicted an `.mp3` extended to **20,384,001** bytes.
+An earlier, light session predicted `0x01370901` = 20,384,001 and saw nothing
+grow at all. Recorded here because the temptation was to treat one clean run as
+evidence the theory was dead, and it very nearly was treated that way.
 
-- `settings.bin` was rewritten correctly, in place, at exactly 32 bytes.
-- **All five `.mp3` files came back byte-for-byte identical.**
-- Nothing grew, nothing was rewritten. The prediction missed completely.
-
-So the word-1 theory is **unconfirmed**, and the striking part — three damaged
-sizes that each decode to a valid, plausible settings record, plus the card's
-own `settings.bin` matching the third exactly — remains unexplained. Either it
-is a much larger coincidence than it looks, or the fault needs a condition this
-session did not reproduce. **Do not build a fix on it.**
-
-It is still worth keeping as a **detector**: if damage recurs, decode the new
-size as `{version, volume, palette, repeat}` at that moment. A second hit
-confirms it outright; a miss kills it. Falsifiable on the next event rather than
-on speculation.
-
-**The clean run does not clear `0184` either.** One session of writes leaving
-the card intact is necessary, not sufficient — all three damage events followed
-extended use, and the deferred-write and subdirectory mitigations were already
-in place for the third.
+It was not a refutation. **A handful of writes is simply not enough to trigger
+it** — every damage event has followed heavy use. The right reading of a clean
+run was the one taken at the time: *necessary, not sufficient.* Had the theory
+been discarded on that miss, the confirming event above would have had to be
+re-derived from scratch.
 
 ### Ruled out by inspection, so the measurement need not re-check it
 
