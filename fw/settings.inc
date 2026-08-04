@@ -78,26 +78,10 @@
  * Take a card snapshot before and after (tools/card_snapshot.py) or the run
  * proves nothing and only costs files.
  *
- * TO TURN IT BACK OFF: set this to 0. Nothing else has to change -- the write
- * body is compiled out and the release core then contains no 0184 at all. */
-#define SETTINGS_WRITE 0
-
-/* That test, built. SETTINGS_PROBE=1 makes Select+Start perform exactly ONE
- * 0184 and then latch, so a whole session contains a single write with a known
- * before and after -- which normal operation cannot give you, because the
- * debounced pump fires on any settings change and there is no way to know
- * afterwards how many writes a session actually made.
- *
- * READ tools/settings_probe.md BEFORE RUNNING IT. The test is destructive by
- * design: if 0184 is what damages files, this damages them again. Put ONLY
- * expendable copies on the card.
- *
- * Set by `bash fw/build.sh probe`, never edited here: the checked-in source
- * must always build a core with no 0184 in it, and a diagnostic that is enabled
- * by editing a header is one that eventually ships enabled. */
-#ifndef SETTINGS_PROBE
-#define SETTINGS_PROBE 0
-#endif
+ * RESOLVED 2026-08-04: the write command is gone entirely. Settings now live
+ * in the datatable and APF saves them itself -- see settings_store() below.
+ * SETTINGS_WRITE and the SETTINGS_PROBE diagnostic are both removed; there is
+ * no longer a flag to turn on, and no 0184 anywhere in this core. */
 
 /* What has been RULED OUT by inspection, so the measurement does not get spent
  * re-checking it (2026-08-04):
@@ -258,10 +242,18 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
 
 static int settings_load(void)
 {
-    volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)(UNCACHED + TAG_OFF);
-    for (uint32_t i = 0; i < SET_BYTES; i++) b[i] = 0u;
+    /* Straight out of the datatable. APF loaded settings.bin there at boot
+     * because the slot is `nonvolatile` with its address pointing at word 128,
+     * so there is no command to issue and nothing to wait for. */
+    uint8_t b[SET_BYTES];
+    for (uint32_t w = 0; w < SET_BYTES / 4u; w++) {
+        uint32_t v = dt_read(SET_DT_W + w);
+        b[w*4 + 0] = (uint8_t)(v >> 24);
+        b[w*4 + 1] = (uint8_t)(v >> 16);
+        b[w*4 + 2] = (uint8_t)(v >> 8);
+        b[w*4 + 3] = (uint8_t)v;
+    }
 
-    if (!target_read_slot(SET_SLOT_ID, 0, TAG_OFF, SET_BYTES)) return 0;
     for (uint32_t i = 0; i < 4u; i++)
         if (b[SET_B_MAGIC + i] != set_magic[i]) return 0;   /* not ours */
     if (b[SET_B_VERSION] != SET_VERSION) return 0;          /* older layout */
@@ -291,11 +283,26 @@ static int settings_load(void)
     return 1;
 }
 
-/* The write itself, split out from settings_store() so the probe can issue one
- * without SETTINGS_WRITE turning the debounced pump back on. Compiled only when
- * something actually calls it -- a released core contains no 0184 at all. */
-#if SETTINGS_WRITE || SETTINGS_PROBE
-static int settings_write_now(void)
+/* Update the record IN THE DATATABLE. That is the whole of it.
+ *
+ * No command is issued and nothing touches the SD card here. The slot is
+ * declared `nonvolatile` in data.json with its address pointing at datatable
+ * word 128, so APF reads these bytes back over the bridge and writes
+ * settings.bin ITSELF when the core is quit, the Pocket is powered off, or it
+ * is slept.
+ *
+ * This replaces the 0184 write that destroyed the user's music three times.
+ * The fault was never the timing -- it was that 0184's bridge address is
+ * treated as a parameter STRUCT whose second word APF reads as a SIZE, and our
+ * record's word 1 landed there and was applied to whatever file was in the MP3
+ * slot. There is no safe value to put in that word, so the command is simply
+ * not used. See the history above.
+ *
+ * A dt_write is two MMIO writes. There is nothing to debounce, nothing to
+ * defer, and no fragment cache to disturb -- which also removes the audible
+ * tic every settings change used to cause.
+ */
+static int settings_store(void)
 {
     uint8_t rec[SET_BYTES];
     for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
@@ -310,117 +317,15 @@ static int settings_write_now(void)
     rec[SET_B_VIZ]     = viz_mode;
     rec[SET_B_EQ]      = eq_idx;
 
+    /* Big-endian into the words, the convention the bridge's byte swap imposes
+     * and the one settings_load() unpacks with. */
     for (uint32_t w = 0; w < SET_BYTES / 4u; w++)
         dt_write(SET_DT_W + w, ((uint32_t)rec[w*4+0] << 24) |
                                ((uint32_t)rec[w*4+1] << 16) |
                                ((uint32_t)rec[w*4+2] << 8)  |
                                 (uint32_t)rec[w*4+3]);
-
-    refill_drain();                     /* one command in flight, ever */
-    uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
-    REG(R_TGT_ID)  = SET_SLOT_ID;
-    REG(R_TGT_OFF) = 0;
-    REG(R_TGT_ADR) = SET_DT_ADDR;       /* the datatable, not RAM */
-    REG(R_TGT_LEN) = SET_BYTES;
-    REG(R_TGT_GO)  = TGT_WRITE;
-
-    /* Returns the 0184 RESULT CODE, or -1 if it never answered. The probe wants
-     * to tell "APF refused" from "APF said it worked" apart -- if files grow
-     * after a write APF reported as successful, the fault is squarely inside
-     * APF and no parameter we pass can fix it. */
-    uint32_t deadline = cycles() + CLK_HZ * 2u;
-    for (;;) {
-        uint32_t st = REG(R_TGT_GO);
-        if (((st >> 8) & 0xFFu) != seq0) return (int)((st >> 2) & 7u);
-        if ((int32_t)(cycles() - deadline) >= 0) return -1;
-    }
+    return 1;
 }
-#endif
-
-/* Writes the whole record every time. It is 32 bytes -- one command -- so
- * tracking which field changed would cost more than it saves. */
-static int settings_store(void)
-{
-#if SETTINGS_WRITE
-    return settings_write_now() == 0;
-#else
-    return 1;                       /* report success; simply never write */
-#endif
-}
-
-#if !SETTINGS_PROBE
-static void settings_probe_pump(void) { set_probe_req = 0; }
-#else
-/* ONE write per boot, on an explicit press, and then never again.
- *
- * The point is that the session contains exactly one 0184, so a before/after
- * comparison of the card is unambiguous. Normal operation cannot give that:
- * settings_pump() fires on any change, and after the fact there is no way to
- * know how many writes a session made -- which is why three events produced
- * three sizes and no mechanism.
- *
- * Latched rather than debounced. A second press must NOT write again, however
- * hard the button is leaned on, or the measurement is spoiled with nothing on
- * screen to say it happened -- so the screen reports the attempt NUMBER too,
- * and any number above 1 invalidates the run.
- *
- * The result is painted STATICALLY, not toasted. The probe is meant to be run
- * on an idle core with nothing loaded, and the main loop does
- * `if (idle) continue;` before it reaches ui_draw_dynamic(), so a toast would
- * never appear -- the same trap that made a failed playlist look like a hang. */
-static uint8_t  set_probe_done;
-static uint16_t set_probe_presses;
-static int      set_probe_result = -2;  /* -2 not run, -1 no answer, else code */
-
-static void settings_probe_pump(void)
-{
-    if (!set_probe_req) return;
-    set_probe_req = 0;
-    set_probe_presses++;
-
-    if (!set_probe_done) {
-        set_probe_done = 1;
-        /* Nothing else may touch the card around it: drain any refill in
-         * flight, and do not let the debounced pump slip a second write in
-         * behind this one. */
-        refill_drain();
-        set_dirty_at = 0;
-        set_flush_now = 0;
-        set_probe_result = settings_write_now();
-    }
-
-    fb_rect(0, 0, FB_W, FB_H, UI_BG);
-    fb_set_color(ui_accent, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "0184 PROBE", TS_2X, TS_2X, UI_INNER_W);
-
-    uint32_t y = UI_TITLE_Y + FB_CELL(TS_2X) + 14u;
-    fb_set_color(UI_WHITE, UI_BG);
-    fb_text_clipped(UI_MARGIN, y,
-                    set_probe_result == -1 ? "no answer from APF"
-                  : set_probe_result ==  0 ? "APF reported SUCCESS"
-                                           : "APF reported an ERROR",
-                    TS_1X, TS_1X, UI_INNER_W);
-    y += FB_CELL(TS_1X) + 6u;
-
-    char b[24], *p = b;
-    const char *t = "code ";
-    while (*t) *p++ = *t++;
-    p = ui_dec(p, (uint32_t)(set_probe_result < 0 ? 99 : set_probe_result));
-    t = "   writes ";
-    while (*t) *p++ = *t++;
-    p = ui_dec(p, set_probe_presses);
-    *p = 0;
-    fb_set_color(UI_DIM, UI_BG);
-    fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
-    y += FB_CELL(TS_1X) + 6u;
-
-    fb_set_color(set_probe_presses > 1u ? UI_RED : UI_DIM, UI_BG);
-    fb_text_clipped(UI_MARGIN, y,
-                    set_probe_presses > 1u ? "PRESSED TWICE - RUN VOID"
-                                           : "now re-read the card",
-                    TS_1X, TS_1X, UI_INNER_W);
-}
-#endif
 
 /* Called from the main loop. Does nothing until the settings have been stable
  * for SET_QUIET, so a held volume button costs one write rather than a dozen.
@@ -442,23 +347,12 @@ static void settings_probe_pump(void)
 static void settings_pump(void)
 {
     if (!set_dirty_at) return;
-    if (!set_flush_now &&
-        (int32_t)(cycles() - (set_dirty_at + SET_QUIET)) < 0) return;
-
-    /* Nothing to disturb only when nothing is playing. Staying dirty is safe:
-     * the flag persists until it is written, so the change is not lost -- it
-     * just lands at the next pause, stop, or trip to the menu. */
-    if (!set_flush_now && !paused) return;
-
     set_flush_now = 0;
-    set_dirty_at = 0;
+    set_dirty_at  = 0;
 
-    /* A failure is reported ONCE. APF refusing to write is a real possibility
-     * (the slot has to exist and be writable), and silently dropping settings
-     * every couple of seconds would be worse than saying so. */
-    static uint8_t complained;
-    if (!settings_store() && !complained) {
-        complained = 1;
-        ui_toast_msg("SETTINGS NOT SAVED");
-    }
+    /* Immediate. The quiet window and the wait-for-paused both existed to keep
+     * an SD round trip away from the decoder; there is no SD round trip any
+     * more, just two MMIO writes into the datatable. APF does the actual save
+     * at shutdown. */
+    settings_store();
 }

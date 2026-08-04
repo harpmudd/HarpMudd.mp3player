@@ -3,11 +3,6 @@
 #
 #   ./build.sh            # Stage 3 player (Helix decode + playback)  [default]
 #   ./build.sh bringup    # Stage 1/2 bring-up (tone + 0180 test, no decoder)
-#   ./build.sh probe      # player + the 0184 settings-write probe (DESTRUCTIVE)
-#
-# `probe` writes mp3player.probe.rom, NOT mp3player.rom, so a diagnostic build
-# can never be mistaken for a shippable one -- it has to be renamed by hand to
-# be installed. See tools/settings_probe.md before running it.
 #
 # The .rom is loaded from SD into BRAM by data_loader at boot, exactly like an
 # arcade core's ROM -- which is the point: firmware changes cost seconds here
@@ -37,11 +32,7 @@ bringup)
     SRCS="$FW/start.S $FW/main.c"
     INC=""
     ;;
-probe|player)
-    if [ "$TARGET" = probe ]; then
-        CFLAGS="$CFLAGS -DSETTINGS_PROBE=1"
-        ROM="mp3player.probe.rom"
-    fi
+player)
     SRCS="$HELIX/mp3dec.c $HELIX/mp3tabs.c \
       $HELIX/real/bitstream.c $HELIX/real/buffers.c $HELIX/real/dct32.c \
       $HELIX/real/dequant.c $HELIX/real/dqchan.c $HELIX/real/huffman.c \
@@ -52,7 +43,7 @@ probe|player)
     INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
     ;;
 *)
-    echo "usage: $0 {player|probe|bringup}"; exit 1 ;;
+    echo "usage: $0 {player|bringup}"; exit 1 ;;
 esac
 
 # Compile status is checked EXPLICITLY. This used to be

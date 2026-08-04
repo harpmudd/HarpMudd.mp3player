@@ -35,9 +35,10 @@
                 "name": "Settings",
                 "id": 4,
                 "required": false,
-                "deferload": true,
                 "parameters": "0x1",
-                "filename": "settings/settings.bin"
+                "filename": "settings/settings.bin",
+                "nonvolatile": true,
+                "address": "0xF8002200"
             }
         ]
     }

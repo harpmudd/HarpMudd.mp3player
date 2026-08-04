@@ -1,3 +1,13 @@
+> **RETIRED 2026-08-04.** This procedure tested the `0184` write, which no
+> longer exists in the core. The fault it was built to find was confirmed —
+> `0184`'s bridge address is treated as a parameter struct whose second word APF
+> reads as a SIZE, and our record's word 1 landed there and was applied to
+> whatever file sat in the MP3 slot. Settings now use a `nonvolatile` data slot
+> and APF performs the save itself, so there is no write command to probe.
+>
+> Kept for the reasoning and for `tools/card_snapshot.py`, which is still the
+> right way to check a card either side of a risky change.
+
 # The 0184 settings-write measurement
 
 The one test standing between this core and a release. Everything else is
