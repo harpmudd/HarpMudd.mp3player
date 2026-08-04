@@ -7,50 +7,15 @@ re-deriving why it's on the list.
 it is empty, however much more interesting the enhancement is. Within each
 section, ordered by value per effort rather than by ambition.
 
+A closed defect moves to **Fixed** at the bottom rather than staying put with a
+note — leaving it in place makes the rule above unreadable, since "the list above
+is empty" stops meaning anything. The write-ups go with them; they are kept for
+the reasoning, not the status.
+
 # Defects
 
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
-
-## Playlist stops dead at the first bad filename — FIXED, awaiting hardware
-
-Fixed in `5986761`. Builds clean; the walk is verified numerically. **Not yet
-confirmed on hardware**, so it stays under Defects until it is.
-
-**Symptom.** A single misspelled or missing entry in the `.m3u` failed the whole
-load. If it was the first entry, the core never reached the player at all.
-
-**What it was.** `pl_play_at()` made exactly one attempt and no caller retried,
-so the failure propagated out to the boot path.
-
-**What replaced it.** `pl_play_span(pos, dir, span)` in
-[fw/playlist.inc](fw/playlist.inc) walks past entries that will not open, bounded
-by the number of positions it may visit. Failures are classified rather than
-lumped together: a `0192` errcode 4 or an over-long name is permanent and the
-entry is marked dead for the session (indexed by *file* index, so it survives a
-reshuffle); a missing 0190 template or a 0192 that never answers is not about the
-entry at all and stops the walk — each timeout is a full 3 s, so walking 128 of
-them would freeze the core for six minutes; anything else is transient and is
-stepped over without being condemned. One toast per walk, not one per bad entry.
-
-Repeat OFF passes a shorter span so a missing *last* entry ends the playlist
-instead of wrapping round to track 1. Skipping a bad file may cost a track; it
-must not silently change what the repeat mode does. The first version had this
-wrong and the exhaustive check caught it.
-
-**The boot symptom was half a UI bug, and that part is worth remembering.**
-`ui_idle_screen()` is `ui_splash()` plus three lines of instructions — the same
-gradient and title as the boot screen — and the main loop does
-`if (idle) continue;` *before* it reaches `ui_draw_dynamic()`, so **no toast is
-ever painted in idle mode**. The core had left the boot screen; the replacement
-was indistinguishable from it and the explanation was raised into a void. It now
-takes a reason line and paints it statically.
-
-**To confirm on hardware:** an `.m3u` with a mistyped first entry (plays from
-track 2, one "SKIPPED 1 MISSING" toast), a mistyped middle entry (auto-advance
-steps over it), a mistyped last entry with repeat OFF (playlist ends, does not
-restart), and an `.m3u` where every entry is wrong (idle screen reading "No
-playable tracks in playlist", not the splash).
 
 ## Settings write damages the user's files — RELEASE BLOCKER
 
@@ -355,3 +320,75 @@ finishes through the reposition body. Others are load-bearing: the FIFO
 glide/fade pair, the cut-at-press transition, and the confirmed-EOF guard all
 fix real faults. Worth a pass, one at a time, each verified on hardware —
 not a bulk tidy.
+
+# Fixed
+
+Kept for the reasoning, not the status. Nothing here is outstanding.
+
+## Playlist stops dead at the first bad filename — FIXED, HW-confirmed
+
+Fixed in `5986761`, confirmed on hardware 2026-08-04: the core boots and plays
+past a bad entry. A follow-up (`95e9eda`) stops a bad entry counting toward the
+track total — see the note at the end of this section.
+
+**Symptom.** A single misspelled or missing entry in the `.m3u` failed the whole
+load. If it was the first entry, the core never reached the player at all.
+
+**What it was.** `pl_play_at()` made exactly one attempt and no caller retried,
+so the failure propagated out to the boot path.
+
+**What replaced it.** `pl_play_span(pos, dir, span)` in
+[fw/playlist.inc](fw/playlist.inc) walks past entries that will not open, bounded
+by the number of positions it may visit. Failures are classified rather than
+lumped together: a `0192` errcode 4 or an over-long name is permanent and the
+entry is marked dead for the session (indexed by *file* index, so it survives a
+reshuffle); a missing 0190 template or a 0192 that never answers is not about the
+entry at all and stops the walk — each timeout is a full 3 s, so walking 128 of
+them would freeze the core for six minutes; anything else is transient and is
+stepped over without being condemned. One toast per walk, not one per bad entry.
+
+Repeat OFF passes a shorter span so a missing *last* entry ends the playlist
+instead of wrapping round to track 1. Skipping a bad file may cost a track; it
+must not silently change what the repeat mode does. The first version had this
+wrong and the exhaustive check caught it.
+
+**The boot symptom was half a UI bug, and that part is worth remembering.**
+`ui_idle_screen()` is `ui_splash()` plus three lines of instructions — the same
+gradient and title as the boot screen — and the main loop does
+`if (idle) continue;` *before* it reaches `ui_draw_dynamic()`, so **no toast is
+ever painted in idle mode**. The core had left the boot screen; the replacement
+was indistinguishable from it and the explanation was raised into a void. It now
+takes a reason line and paints it statically.
+
+**Still worth exercising on hardware:** a mistyped *middle* entry (auto-advance
+steps over it), a mistyped *last* entry with repeat OFF (playlist ends rather
+than restarting at track 1), and an `.m3u` where every entry is wrong (idle
+screen reading "No playable tracks in playlist", not the splash).
+
+### The track count, and the limit that is deliberate
+
+A bad entry used to count toward the total: five lines with one typo displayed
+as five tracks. `95e9eda` derives both the total and the position from the
+**live** entries — `pl_count` minus the dead set, and the position's rank among
+live entries. Both halves must count the same way or the position can exceed the
+total; that is checked exhaustively over every list length, dead-set and shuffle.
+
+**The count is exact for entries something has tried, and optimistic beyond
+them.** This is a property of the platform, not a shortcut: nothing in APF
+answers "does this file exist". The only test is `0192`, which *opens* the file,
+costs a directory walk and switches the MP3 slot as a side effect. So a typo at
+or before the first playable track is found during the boot walk and the total is
+right from the first frame; a typo further down reads high until the walk reaches
+it, then corrects.
+
+**Decided 2026-08-04: leave it self-correcting.** The alternative — probing every
+entry at load — buys an exact count from the first frame at the cost of one file
+open per entry on every playlist load (~1 s behind the splash for a 30-track
+list, worse for longer). Not worth a boot delay on every launch for a number that
+converges on its own. A third option, probing into a spare scratch slot so it
+could run during playback, was set aside because it depends on unverified APF
+behaviour (whether `0192` can open into an empty `deferload` slot) and this
+project has been bitten before by building on unconfirmed APF assumptions.
+
+If it ever becomes worth revisiting, the scratch-slot route is the one to prove
+first — it is the only one with no boot cost.
