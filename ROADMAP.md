@@ -66,7 +66,33 @@ exactly the guessing this project keeps being punished for.
 
 Writing stays off. `tools/settings_edit.py` is the persistence mechanism today.
 
-### TRIED AND FAILED: the `nonvolatile` slot HUNG THE POCKET ON QUIT
+### Attempt 2 — `nonvolatile` at an ORDINARY address (built, untested)
+
+The first `nonvolatile` attempt hung the Pocket on Quit. The address was the
+mistake: `0xF8002200` is inside APF's own command region. Checking what real
+cores do settles it — agg23's Camera puts its SRAM backup slot at
+**`0x20000000`** and its ROM at `0x10000000`, and Analogue's own basicassets
+example uses `0x00000000`/`0x00400000`. **None uses `0xF8xxxxxx`.**
+
+So the slot now sits at `0x20000000`, and `core_top.v` serves bridge reads
+there. That is a **frozen-shell edit** and worth naming: the shell's read mux
+had `0xF8xxxxxx` as its only case, which means *no* core built on it could ever
+back a nonvolatile slot — APF has nowhere to read from at shutdown. Two lines,
+and nothing existing depends on the default case.
+
+Eight words live in `core_game.vh` as two arrays, split by direction so each has
+exactly one writer rather than the bridge (`clk_74a`) and CPU (`clk_sys`)
+sharing one: `set_load[]` bridge-written at boot and CPU-read, `set_save[]`
+CPU-written and bridge-read at exit. Firmware seeds the second from the first at
+startup, so an untouched session writes back what it read.
+
+`ramstyle = "logic"` on both is load-bearing — without it Quartus put them in
+an M10K and the count went 300 → 301 of 308.
+
+Compiled clean at rev 19: M10K back to 300/308, ALMs 30%, clk_sys slack
++1.470 ns. **Not yet tested on hardware.**
+
+### TRIED AND FAILED: the first `nonvolatile` attempt hung the Pocket on Quit
 
 Built and tested 2026-08-04. The core ran normally, then **hung on Quit and
 needed a hard reboot**, and `settings.bin` was never written. Reverted.

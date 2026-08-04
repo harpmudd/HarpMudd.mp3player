@@ -101,6 +101,10 @@ wire [7:0]  soc_con_char;
 
 wire        soc_tgt_go;
 wire [1:0]  soc_tgt_cmd_sel;
+wire [2:0]  soc_set_idx;
+wire        soc_set_wr;
+wire [31:0] soc_set_wdata;
+wire [31:0] soc_set_rdata;
 wire [9:0]  soc_dt_addr;
 wire        soc_dt_wren;
 wire [31:0] soc_dt_wdata;
@@ -184,7 +188,11 @@ mp3_soc u_soc (
     .dt_addr  (soc_dt_addr),
     .dt_wren  (soc_dt_wren),
     .dt_wdata (soc_dt_wdata),
-    .dt_q     (datatable_q)
+    .dt_q     (datatable_q),
+    .set_idx  (soc_set_idx),
+    .set_wr   (soc_set_wr),
+    .set_wdata(soc_set_wdata),
+    .set_rdata(soc_set_rdata)
 );
 
 // core_bridge_cmd's datatable, user-side port. core_top declares these wires
@@ -330,3 +338,44 @@ sound_i2s #(.CHANNEL_WIDTH(16), .SIGNED_INPUT(1)) u_sound_i2s (
     .audio_l (soc_audio_l), .audio_r (soc_audio_r),
     .audio_mclk (audio_mclk), .audio_dac (audio_dac), .audio_lrck (audio_lrck)
 );
+
+// -- 8. Nonvolatile settings ---------------------------------------------------
+// Eight words (32 bytes) that APF loads from settings.bin at boot and writes
+// back to it when the core is quit, the Pocket is powered off, or it sleeps.
+// data.json declares slot 4 `nonvolatile` at 0x20000000; APF does the file I/O
+// itself, so the core issues NO write command. That matters: the 0184 target
+// write this replaces destroyed the user's music three times, because its
+// bridge address is parsed as a struct whose second word APF takes as a SIZE.
+//
+// TWO ARRAYS, NOT ONE, and deliberately so. A single array would have the
+// bridge (clk_74a) and the CPU (clk_sys) both writing it -- a genuine
+// cross-domain dual-writer. Split by direction, each array has exactly one
+// writer:
+//
+//   set_load[]  written by the bridge at boot,     read by the CPU
+//   set_save[]  written by the CPU on any change,  read by the bridge at exit
+//
+// Firmware seeds set_save from set_load at startup so an untouched session
+// writes back what it loaded. Both crossings are quasi-static -- boot load and
+// shutdown read-back are seconds apart from any CPU write -- which is the same
+// argument tgt_cmd.v already makes for the target command parameters.
+// ramstyle "logic" is not decoration: M10K is at 300/308 because the
+// framebuffer owns it, and 16 words of 32 bits inferred into a block RAM costs
+// one of the seven that are left. In LUTs it costs nothing that matters.
+(* ramstyle = "logic" *) reg [31:0] set_load [0:7];
+(* ramstyle = "logic" *) reg [31:0] set_save [0:7];
+
+wire [2:0] set_widx = bridge_addr[4:2];        // 8 words = 32 bytes
+
+always @(posedge clk_74a) begin
+    if (bridge_wr && bridge_addr[31:28] == 4'h2)
+        set_load[set_widx] <= bridge_wr_data;
+end
+
+assign save_bridge_rd_data = set_save[set_widx];
+
+// CPU side: mp3_soc drives an index and a write strobe.
+always @(posedge clk_sys) begin
+    if (soc_set_wr) set_save[soc_set_idx] <= soc_set_wdata;
+end
+assign soc_set_rdata = set_load[soc_set_idx];
