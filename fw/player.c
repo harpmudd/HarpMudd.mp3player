@@ -459,6 +459,13 @@ static void pl_resync(uint16_t file_idx);
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
 
+/* Select+Start, for the SETTINGS_PROBE diagnostic build. Declared here rather
+ * than in settings.inc because the input handler sits above that include and so
+ * cannot see SETTINGS_PROBE. In a release build settings_probe_pump() just
+ * clears it, so the combo does nothing and the core still contains no 0184. */
+static uint8_t set_probe_req;
+static void settings_probe_pump(void);
+
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
 static uint32_t soft_restart_req;  /* probe: reposition only, keeps the known-good tag */
 static uint32_t reload_pending;
@@ -2268,6 +2275,11 @@ static void poll_input(void)
         settings_mark_dirty();
     }
     if (edge & KEY_START) {
+        /* Select+Start is the settings-write probe. It also STOPS, deliberately:
+         * the measurement wants nothing streaming when the write goes out, and
+         * the same press that asks for it should be the press that quiets the
+         * card. In a release build this only stops -- see set_probe_req. */
+        if (keys & KEY_SELECT) { sel_used = 1; set_probe_req = 1u; }
         if (!stopped) { stopped = 1u; paused |= 1u; stop_req = 1u; }
     }
     if (edge & KEY_B) {
@@ -3311,6 +3323,12 @@ int main(void)
 
     for (;;) {
         poll_input();
+
+        /* Before anything else in the loop, and above the `if (idle) continue`
+         * below: the probe is meant to be run on an idle core, and it paints
+         * its own result because nothing draws toasts in idle mode. Compiles
+         * to a single store in a release build. */
+        settings_probe_pump();
 
         /* A reload is NOT acted on the instant it is announced: 008A fires
          * when the user PICKS a file, not when the slot is readable. The old

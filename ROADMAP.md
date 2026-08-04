@@ -12,45 +12,45 @@ section, ordered by value per effort rather than by ambition.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Playlist stops dead at the first bad filename
+## Playlist stops dead at the first bad filename — FIXED, awaiting hardware
 
-**Symptom.** A single misspelled or missing entry in the `.m3u` fails the whole
-load. If it is the first entry, the core never reaches the player at all — the
-boot screen stays up. The other tracks in the list are all perfectly good and
-none of them plays.
+Fixed in `5986761`. Builds clean; the walk is verified numerically. **Not yet
+confirmed on hardware**, so it stays under Defects until it is.
 
-**Expected.** Skip the entry that cannot be opened and carry on with the rest.
-One bad line should cost one track, not the playlist.
+**Symptom.** A single misspelled or missing entry in the `.m3u` failed the whole
+load. If it was the first entry, the core never reached the player at all.
 
-**Where it is.** [`fw/playlist.inc:404-414`](fw/playlist.inc#L404-L414). On a
-failed open, `pl_play_at()` restores `pl_pos`, raises a toast and returns 0. It
-makes exactly one attempt and no caller retries with the next entry, so the
-failure propagates all the way out. At boot,
-[`fw/player.c:3279`](fw/player.c#L3279) tests `pl_count && pl_play_at(0)` — one
-bad first entry and that is the end of it.
+**What it was.** `pl_play_at()` made exactly one attempt and no caller retried,
+so the failure propagated out to the boot path.
 
-**Shape of the fix.** Advance past entries that fail to open, bounded by
-`pl_count` attempts so a list where nothing opens terminates instead of spinning.
-The bound matters more than it looks: `pl_skip()` and the end-of-track
-auto-advance both route through `pl_play_at()`, so an unbounded retry becomes an
-infinite loop on a list of missing files rather than a hang on one.
+**What replaced it.** `pl_play_span(pos, dir, span)` in
+[fw/playlist.inc](fw/playlist.inc) walks past entries that will not open, bounded
+by the number of positions it may visit. Failures are classified rather than
+lumped together: a `0192` errcode 4 or an over-long name is permanent and the
+entry is marked dead for the session (indexed by *file* index, so it survives a
+reshuffle); a missing 0190 template or a 0192 that never answers is not about the
+entry at all and stops the walk — each timeout is a full 3 s, so walking 128 of
+them would freeze the core for six minutes; anything else is transient and is
+stepped over without being condemned. One toast per walk, not one per bad entry.
 
-Details worth getting right rather than discovering later:
+Repeat OFF passes a shorter span so a missing *last* entry ends the playlist
+instead of wrapping round to track 1. Skipping a bad file may cost a track; it
+must not silently change what the repeat mode does. The first version had this
+wrong and the exhaustive check caught it.
 
-- **Distinguish "not there" from "not now".** A `0192` error 4 is a genuinely
-  absent file and should be skipped permanently for this session. A transient
-  failure should not condemn a track that would work on the next attempt.
-  Skipping the wrong category quietly loses music.
-- **Say what happened, once.** Skipping silently means a user whose list is half
-  mistyped hears a shorter playlist and never learns why. A single summary after
-  the load — "2 of 14 tracks missing" — beats a toast per failure, which would
-  otherwise queue up faster than they can be read.
-- **The boot path needs its own answer.** If *every* entry fails there is nothing
-  to play, and the core must land on the idle screen with a clear message rather
-  than the splash. Worth checking while fixing this whether `ui_idle_screen()` at
-  [`fw/player.c:3281`](fw/player.c#L3281) actually paints over the boot splash —
-  the reported symptom is the *boot screen* persisting, and that call is supposed
-  to replace it.
+**The boot symptom was half a UI bug, and that part is worth remembering.**
+`ui_idle_screen()` is `ui_splash()` plus three lines of instructions — the same
+gradient and title as the boot screen — and the main loop does
+`if (idle) continue;` *before* it reaches `ui_draw_dynamic()`, so **no toast is
+ever painted in idle mode**. The core had left the boot screen; the replacement
+was indistinguishable from it and the explanation was raised into a void. It now
+takes a reason line and paints it statically.
+
+**To confirm on hardware:** an `.m3u` with a mistyped first entry (plays from
+track 2, one "SKIPPED 1 MISSING" toast), a mistyped middle entry (auto-advance
+steps over it), a mistyped last entry with repeat OFF (playlist ends, does not
+restart), and an `.m3u` where every entry is wrong (idle screen reading "No
+playable tracks in playlist", not the splash).
 
 ## Settings write damages the user's files — RELEASE BLOCKER
 
@@ -86,11 +86,51 @@ and a write at offset 0 cannot extend a file to 20 MB. The fault lies either in
 what the target registers carry by the time APF reads them, or in APF's own
 handling — not in the offset we pass.
 
-**Next step, cheap and decisive, not yet run:** record every `.mp3` size, perform
-ONE write with nothing else running, re-record. If any `.mp3` grows, `0184` is
-unusable by this core and settings need an approach that never writes the card —
-which likely means giving up on saving them from the UI and treating
-`settings.bin` as a hand-edited preferences file, which already works.
+### The sizes, in hex
+
+Read as decimal for three events, and that is what hid this. They are
+
+```text
+21,037,825 = 0x01410301
+21,365,505 = 0x01460301
+20,382,465 = 0x01370301
+```
+
+**The low 16 bits are identical all three times**; only the high half moves. A
+length ending in a constant `0x0301` is not anything computed from a 32-byte
+record — it is a 32-bit word assembled from two 16-bit halves, one fixed and one
+varying. That is a far narrower thing to look for than "the offset is wrong", and
+it is the strongest lead available. Record the sizes in hex from now on.
+
+### Ruled out by inspection, so the measurement need not re-check it
+
+- **Slot ID.** `data.json` declares Settings as id 4; `SET_SLOT_ID` is 4.
+- **Slot writeability.** Analogue's `parameters` bitmap is bit 0 user-reloadable,
+  1 core-specific, 2 nonvolatile filename, **3 read-only**, 4 instance json,
+  5 init nonvolatile, 6 reset-on-load, 7 restart, 8 full reload, 9 persist
+  filename. Ours is `0x1` — bit 3 clear, and "must not be read-only" is the only
+  slot requirement 0184 documents.
+- **The parameters.** 0184 takes slot id `[15:0]`, slot offset, bridge *source*
+  address and length: the same four words as 0180, which works. The 48-bit offset
+  added in openFPGA 2.1 belongs to `0185`, a different command we never issue, so
+  there are no spare bits carrying a stray high half.
+- **The RTL.** `core_bridge_cmd`'s 0184 arm is structurally identical to its 0180
+  arm and latches `target_20/24/28/2C` at dequeue; `target_dataslot_id` is 16 bits
+  zero-extended.
+
+So the configuration is right and the command is issued correctly. It needs the
+measurement.
+
+### The test — built, not yet run
+
+`bash fw/build.sh probe` produces `mp3player.probe.rom`, in which **Select+Start
+performs exactly one 0184 and then latches**, painting the result code on screen.
+`tools/card_snapshot.py before | after | diff` records every file on the card —
+whole-file hashes, sizes in hex — and names the verdict.
+
+Full procedure, including why it must be run on an idle core with nothing loaded:
+**[tools/settings_probe.md](tools/settings_probe.md)**. It is destructive by
+design; expendable copies only.
 
 Details and the full reasoning live at the `SETTINGS_WRITE` definition in
 [fw/settings.inc](fw/settings.inc).

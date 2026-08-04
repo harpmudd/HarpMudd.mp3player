@@ -3,6 +3,11 @@
 #
 #   ./build.sh            # Stage 3 player (Helix decode + playback)  [default]
 #   ./build.sh bringup    # Stage 1/2 bring-up (tone + 0180 test, no decoder)
+#   ./build.sh probe      # player + the 0184 settings-write probe (DESTRUCTIVE)
+#
+# `probe` writes mp3player.probe.rom, NOT mp3player.rom, so a diagnostic build
+# can never be mistaken for a shippable one -- it has to be renamed by hand to
+# be installed. See tools/settings_probe.md before running it.
 #
 # The .rom is loaded from SD into BRAM by data_loader at boot, exactly like an
 # arcade core's ROM -- which is the point: firmware changes cost seconds here
@@ -25,13 +30,18 @@ mkdir -p "$OUT"
 # -mno-relax: no real __global_pointer$ in this bare-metal build, so gp-relative
 # relaxation would emit stores through an uninitialised gp.
 CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles"
+ROM="mp3player.rom"
 
 case "$TARGET" in
 bringup)
     SRCS="$FW/start.S $FW/main.c"
     INC=""
     ;;
-player)
+probe|player)
+    if [ "$TARGET" = probe ]; then
+        CFLAGS="$CFLAGS -DSETTINGS_PROBE=1"
+        ROM="mp3player.probe.rom"
+    fi
     SRCS="$HELIX/mp3dec.c $HELIX/mp3tabs.c \
       $HELIX/real/bitstream.c $HELIX/real/buffers.c $HELIX/real/dct32.c \
       $HELIX/real/dequant.c $HELIX/real/dqchan.c $HELIX/real/huffman.c \
@@ -42,7 +52,7 @@ player)
     INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
     ;;
 *)
-    echo "usage: $0 {player|bringup}"; exit 1 ;;
+    echo "usage: $0 {player|probe|bringup}"; exit 1 ;;
 esac
 
 # Compile status is checked EXPLICITLY. This used to be
@@ -63,13 +73,13 @@ fi
 grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
 
 "$SIZE" "$FW/fw.elf"
-"$OBJCOPY" -O binary "$FW/fw.elf" "$OUT/mp3player.rom"
+"$OBJCOPY" -O binary "$FW/fw.elf" "$OUT/$ROM"
 
 python -c "
 import os
-n = os.path.getsize(r'$OUT/mp3player.rom')
+n = os.path.getsize(r'$OUT/$ROM')
 lim = 192*1024 - 16*1024        # RAM minus stack reserve
-print('mp3player.rom: %d bytes (%.1f%% of usable RAM)' % (n, 100.0*n/lim))
+print('$ROM: %d bytes (%.1f%% of usable RAM)' % (n, 100.0*n/lim))
 assert n < lim, 'firmware image exceeds usable RAM'
 "
-echo "built [$TARGET] -> $OUT/mp3player.rom"
+echo "built [$TARGET] -> $OUT/$ROM"

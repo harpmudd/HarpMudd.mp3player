@@ -66,3 +66,7 @@ third_party/pythondata-cpu-vexriscv/
 # The playlist is the USER'S file, not a build output. Shipping one meant a
 # full sync to the card overwrote whatever they had written in it.
 dist/Assets/mp3player/common/playlist.m3u
+
+# Card snapshots from tools/card_snapshot.py -- measurement scratch, and they
+# name the user's own files.
+tools/_snapshots/

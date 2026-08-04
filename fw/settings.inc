@@ -63,6 +63,59 @@
  * test has been run and passed, this stays 0. */
 #define SETTINGS_WRITE 0
 
+/* That test, built. SETTINGS_PROBE=1 makes Select+Start perform exactly ONE
+ * 0184 and then latch, so a whole session contains a single write with a known
+ * before and after -- which normal operation cannot give you, because the
+ * debounced pump fires on any settings change and there is no way to know
+ * afterwards how many writes a session actually made.
+ *
+ * READ tools/settings_probe.md BEFORE RUNNING IT. The test is destructive by
+ * design: if 0184 is what damages files, this damages them again. Put ONLY
+ * expendable copies on the card.
+ *
+ * Set by `bash fw/build.sh probe`, never edited here: the checked-in source
+ * must always build a core with no 0184 in it, and a diagnostic that is enabled
+ * by editing a header is one that eventually ships enabled. */
+#ifndef SETTINGS_PROBE
+#define SETTINGS_PROBE 0
+#endif
+
+/* What has been RULED OUT by inspection, so the measurement does not get spent
+ * re-checking it (2026-08-04):
+ *
+ *   - The slot ID is right. data.json declares Settings as id 4 and
+ *     SET_SLOT_ID is 4, so the write is not aimed at another slot by a
+ *     numbering mistake.
+ *   - The slot is writeable. Analogue's data.json reference gives the
+ *     `parameters` bitmap as bit 0 user-reloadable, 1 core-specific,
+ *     2 nonvolatile filename, 3 READ-ONLY, 4 instance json, 5 init
+ *     nonvolatile, 6 reset-on-load, 7 restart, 8 full reload, 9 persist
+ *     filename. Ours is 0x1: bit 3 clear, and "must not be read-only" is the
+ *     only slot requirement 0184 documents.
+ *   - The parameters are the documented ones. 0184 takes slot id [15:0],
+ *     slot offset, BRIDGE source address and length -- the same four words as
+ *     0180, which works. There is no 48-bit offset packed into spare bits
+ *     here; that is 0185, a separate command we do not issue.
+ *   - The RTL is stock. core_bridge_cmd's 0184 arm is byte-identical in
+ *     structure to its 0180 arm, latching target_20/24/28/2C at dequeue, and
+ *     target_dataslot_id is 16 bits zero-extended into target_20.
+ *
+ * And one NEW measurement off the recorded sizes, which the earlier reasoning
+ * missed by reading them as decimal:
+ *
+ *     21,037,825 = 0x01410301
+ *     21,365,505 = 0x01460301
+ *     20,382,465 = 0x01370301
+ *
+ * The LOW 16 BITS ARE IDENTICAL across three separate events, months of use
+ * apart, and only the high half moves. A file length that ends in a constant
+ * 0x0301 is not a length anything computed from our 32-byte record -- it is a
+ * 32-bit word assembled from two 16-bit halves, one fixed and one varying.
+ * Whatever is being written into the size field, it is a PACKED PAIR, and that
+ * is a much narrower thing to look for than "the offset is wrong". Worth
+ * recording the exact new sizes in hex when the probe runs: if the low half is
+ * 0x0301 a fourth time, that constant is the thread to pull. */
+
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
 #define SET_BYTES    32u                /* fixed: the file must not change size */
@@ -131,13 +184,12 @@ static int settings_load(void)
     return 1;
 }
 
-/* Writes the whole record every time. It is 32 bytes -- one command -- so
- * tracking which field changed would cost more than it saves. */
-static int settings_store(void)
+/* The write itself, split out from settings_store() so the probe can issue one
+ * without SETTINGS_WRITE turning the debounced pump back on. Compiled only when
+ * something actually calls it -- a released core contains no 0184 at all. */
+#if SETTINGS_WRITE || SETTINGS_PROBE
+static int settings_write_now(void)
 {
-#if !SETTINGS_WRITE
-    return 1;                       /* report success; simply never write */
-#else
     uint8_t rec[SET_BYTES];
     for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
 
@@ -164,14 +216,103 @@ static int settings_store(void)
     REG(R_TGT_LEN) = SET_BYTES;
     REG(R_TGT_GO)  = TGT_WRITE;
 
+    /* Returns the 0184 RESULT CODE, or -1 if it never answered. The probe wants
+     * to tell "APF refused" from "APF said it worked" apart -- if files grow
+     * after a write APF reported as successful, the fault is squarely inside
+     * APF and no parameter we pass can fix it. */
     uint32_t deadline = cycles() + CLK_HZ * 2u;
     for (;;) {
         uint32_t st = REG(R_TGT_GO);
-        if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
-        if ((int32_t)(cycles() - deadline) >= 0) return 0;
+        if (((st >> 8) & 0xFFu) != seq0) return (int)((st >> 2) & 7u);
+        if ((int32_t)(cycles() - deadline) >= 0) return -1;
     }
+}
+#endif
+
+/* Writes the whole record every time. It is 32 bytes -- one command -- so
+ * tracking which field changed would cost more than it saves. */
+static int settings_store(void)
+{
+#if SETTINGS_WRITE
+    return settings_write_now() == 0;
+#else
+    return 1;                       /* report success; simply never write */
 #endif
 }
+
+#if !SETTINGS_PROBE
+static void settings_probe_pump(void) { set_probe_req = 0; }
+#else
+/* ONE write per boot, on an explicit press, and then never again.
+ *
+ * The point is that the session contains exactly one 0184, so a before/after
+ * comparison of the card is unambiguous. Normal operation cannot give that:
+ * settings_pump() fires on any change, and after the fact there is no way to
+ * know how many writes a session made -- which is why three events produced
+ * three sizes and no mechanism.
+ *
+ * Latched rather than debounced. A second press must NOT write again, however
+ * hard the button is leaned on, or the measurement is spoiled with nothing on
+ * screen to say it happened -- so the screen reports the attempt NUMBER too,
+ * and any number above 1 invalidates the run.
+ *
+ * The result is painted STATICALLY, not toasted. The probe is meant to be run
+ * on an idle core with nothing loaded, and the main loop does
+ * `if (idle) continue;` before it reaches ui_draw_dynamic(), so a toast would
+ * never appear -- the same trap that made a failed playlist look like a hang. */
+static uint8_t  set_probe_done;
+static uint16_t set_probe_presses;
+static int      set_probe_result = -2;  /* -2 not run, -1 no answer, else code */
+
+static void settings_probe_pump(void)
+{
+    if (!set_probe_req) return;
+    set_probe_req = 0;
+    set_probe_presses++;
+
+    if (!set_probe_done) {
+        set_probe_done = 1;
+        /* Nothing else may touch the card around it: drain any refill in
+         * flight, and do not let the debounced pump slip a second write in
+         * behind this one. */
+        refill_drain();
+        set_dirty_at = 0;
+        set_flush_now = 0;
+        set_probe_result = settings_write_now();
+    }
+
+    fb_rect(0, 0, FB_W, FB_H, UI_BG);
+    fb_set_color(ui_accent, UI_BG);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "0184 PROBE", TS_2X, TS_2X, UI_INNER_W);
+
+    uint32_t y = UI_TITLE_Y + FB_CELL(TS_2X) + 14u;
+    fb_set_color(UI_WHITE, UI_BG);
+    fb_text_clipped(UI_MARGIN, y,
+                    set_probe_result == -1 ? "no answer from APF"
+                  : set_probe_result ==  0 ? "APF reported SUCCESS"
+                                           : "APF reported an ERROR",
+                    TS_1X, TS_1X, UI_INNER_W);
+    y += FB_CELL(TS_1X) + 6u;
+
+    char b[24], *p = b;
+    const char *t = "code ";
+    while (*t) *p++ = *t++;
+    p = ui_dec(p, (uint32_t)(set_probe_result < 0 ? 99 : set_probe_result));
+    t = "   writes ";
+    while (*t) *p++ = *t++;
+    p = ui_dec(p, set_probe_presses);
+    *p = 0;
+    fb_set_color(UI_DIM, UI_BG);
+    fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
+    y += FB_CELL(TS_1X) + 6u;
+
+    fb_set_color(set_probe_presses > 1u ? UI_RED : UI_DIM, UI_BG);
+    fb_text_clipped(UI_MARGIN, y,
+                    set_probe_presses > 1u ? "PRESSED TWICE - RUN VOID"
+                                           : "now re-read the card",
+                    TS_1X, TS_1X, UI_INNER_W);
+}
+#endif
 
 /* Called from the main loop. Does nothing until the settings have been stable
  * for SET_QUIET, so a held volume button costs one write rather than a dozen.
