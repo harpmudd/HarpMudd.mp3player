@@ -70,3 +70,7 @@ dist/Assets/mp3player/common/playlist.m3u
 # Card snapshots from tools/card_snapshot.py -- measurement scratch, and they
 # name the user's own files.
 tools/_snapshots/
+
+# EQ test vectors -- regenerate with tools/gen_eq_vectors.py
+sim/eq_*.hex
+sim/*.vvp
