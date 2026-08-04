@@ -242,18 +242,13 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
 
 static int settings_load(void)
 {
-    /* Straight out of the datatable. APF loaded settings.bin there at boot
-     * because the slot is `nonvolatile` with its address pointing at word 128,
-     * so there is no command to issue and nothing to wait for. */
-    uint8_t b[SET_BYTES];
-    for (uint32_t w = 0; w < SET_BYTES / 4u; w++) {
-        uint32_t v = dt_read(SET_DT_W + w);
-        b[w*4 + 0] = (uint8_t)(v >> 24);
-        b[w*4 + 1] = (uint8_t)(v >> 16);
-        b[w*4 + 2] = (uint8_t)(v >> 8);
-        b[w*4 + 3] = (uint8_t)v;
-    }
+    /* Read with 0180, the way it worked for months. The nonvolatile-slot
+     * experiment that replaced this HUNG THE POCKET ON QUIT -- see the note at
+     * settings_store(). */
+    volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+    for (uint32_t i = 0; i < SET_BYTES; i++) b[i] = 0u;
 
+    if (!target_read_slot(SET_SLOT_ID, 0, TAG_OFF, SET_BYTES)) return 0;
     for (uint32_t i = 0; i < 4u; i++)
         if (b[SET_B_MAGIC + i] != set_magic[i]) return 0;   /* not ours */
     if (b[SET_B_VERSION] != SET_VERSION) return 0;          /* older layout */
@@ -283,48 +278,33 @@ static int settings_load(void)
     return 1;
 }
 
-/* Update the record IN THE DATATABLE. That is the whole of it.
+/* DOES NOTHING, deliberately. There is no safe way for this core to write the
+ * card, and two separate mechanisms have now been tried and rejected:
  *
- * No command is issued and nothing touches the SD card here. The slot is
- * declared `nonvolatile` in data.json with its address pointing at datatable
- * word 128, so APF reads these bytes back over the bridge and writes
- * settings.bin ITSELF when the core is quit, the Pocket is powered off, or it
- * is slept.
+ *   0184 target write   -- DESTROYS FILES. Its bridge address is treated as a
+ *       parameter struct whose second word APF reads as a SIZE, applied to
+ *       whatever file occupies the MP3 slot. Confirmed by prediction; it took
+ *       out the user's whole library three times. No safe value exists for
+ *       that word, so the command is not used at all.
  *
- * This replaces the 0184 write that destroyed the user's music three times.
- * The fault was never the timing -- it was that 0184's bridge address is
- * treated as a parameter STRUCT whose second word APF reads as a SIZE, and our
- * record's word 1 landed there and was applied to whatever file was in the MP3
- * slot. There is no safe value to put in that word, so the command is simply
- * not used. See the history above.
+ *   nonvolatile slot    -- HANGS THE POCKET ON QUIT. data.json declared the
+ *       slot nonvolatile with its address at 0xF8002200 so APF would read the
+ *       record back and save it itself. The core ran fine, then hung on Quit
+ *       and needed a hard reboot; settings.bin was never written.
  *
- * A dt_write is two MMIO writes. There is nothing to debounce, nothing to
- * defer, and no fragment cache to disturb -- which also removes the audible
- * tic every settings change used to cause.
+ *       Best guess, untested: 0xF8xxxxxx is APF's own COMMAND region, owned by
+ *       core_bridge_cmd. Pointing a data slot's address into it likely makes
+ *       APF's shutdown read-back collide with its own command interface. The
+ *       datatable was chosen because the frozen shell serves bridge reads
+ *       NOWHERE ELSE -- so doing this properly needs a small bridge-readable
+ *       RAM outside F8, which means editing core_top.v. Not attempted.
+ *
+ * Settings therefore load from the card and are session-only. Use
+ * tools/settings_edit.py to change what persists.
  */
 static int settings_store(void)
 {
-    uint8_t rec[SET_BYTES];
-    for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
-
-    for (uint32_t i = 0; i < 4u; i++) rec[SET_B_MAGIC + i] = set_magic[i];
-    rec[SET_B_VERSION] = SET_VERSION;
-    rec[SET_B_VOLUME]  = (uint8_t)volume;
-    rec[SET_B_PALETTE] = (uint8_t)ui_pal_idx;
-    rec[SET_B_REPEAT]  = rep_mode;
-    rec[SET_B_SHUFFLE] = shuffle_on;
-    rec[SET_B_ART]     = art_pref ? 1u : 0u;
-    rec[SET_B_VIZ]     = viz_mode;
-    rec[SET_B_EQ]      = eq_idx;
-
-    /* Big-endian into the words, the convention the bridge's byte swap imposes
-     * and the one settings_load() unpacks with. */
-    for (uint32_t w = 0; w < SET_BYTES / 4u; w++)
-        dt_write(SET_DT_W + w, ((uint32_t)rec[w*4+0] << 24) |
-                               ((uint32_t)rec[w*4+1] << 16) |
-                               ((uint32_t)rec[w*4+2] << 8)  |
-                                (uint32_t)rec[w*4+3]);
-    return 1;
+    return 1;                       /* report success; simply never write */
 }
 
 /* Called from the main loop. Does nothing until the settings have been stable

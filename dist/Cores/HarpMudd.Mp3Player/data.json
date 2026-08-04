@@ -37,8 +37,7 @@
                 "required": false,
                 "parameters": "0x1",
                 "filename": "settings/settings.bin",
-                "nonvolatile": true,
-                "address": "0xF8002200"
+                "deferload": true
             }
         ]
     }

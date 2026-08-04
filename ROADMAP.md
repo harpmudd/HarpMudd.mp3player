@@ -66,7 +66,30 @@ exactly the guessing this project keeps being punished for.
 
 Writing stays off. `tools/settings_edit.py` is the persistence mechanism today.
 
-### THE WAY FORWARD: a `nonvolatile` slot, not `0184` at all
+### TRIED AND FAILED: the `nonvolatile` slot HUNG THE POCKET ON QUIT
+
+Built and tested 2026-08-04. The core ran normally, then **hung on Quit and
+needed a hard reboot**, and `settings.bin` was never written. Reverted.
+
+That is worse than not saving, and it went out on the strength of a
+documentation quote rather than a test — the same documentation that already
+misdescribed `0184` once. Reverted to: settings load from the card via `0180`,
+nothing writes, session-only.
+
+**Best guess at why, untested and not to be built on.** `0xF8xxxxxx` is APF's
+own *command* region, owned by `core_bridge_cmd`. Pointing a data slot's
+`address` into it likely makes APF's shutdown read-back collide with its own
+command interface. The datatable was chosen precisely because the frozen shell
+serves bridge reads **nowhere else** — so doing this properly needs a small
+bridge-readable RAM at an ordinary address, which means editing `core_top.v`.
+That is a real option and the only one left standing, but it is a frozen-shell
+change plus a Quartus round, and it must be proven on a card whose contents are
+expendable.
+
+No music was harmed by the attempt: all six `.mp3` files came back
+byte-for-byte identical.
+
+### The original reasoning for it (kept — the mechanism is still right)
 
 `0184` was never how cores are supposed to save. Analogue's `data.json`
 reference documents a top-level `nonvolatile` boolean — a sibling of
