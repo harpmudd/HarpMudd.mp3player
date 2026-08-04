@@ -12,6 +12,14 @@
 #define EQ_CURVE_N 36
 #define EQ_COUNT   8
 
+/* The response curves are kept but NOT compiled: showing them over
+ * the meter was tried and the user did not want the meter taken
+ * over. The mode row names the preset instead. Set EQ_SHOW_CURVE to
+ * 1 to bring the table back rather than re-deriving it. */
+#ifndef EQ_SHOW_CURVE
+#define EQ_SHOW_CURVE 0
+#endif
+#if EQ_SHOW_CURVE
 static const signed char eq_curve[EQ_COUNT][EQ_CURVE_N] = {
     {   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0 },   /* FLAT */
     {  20, 20, 20, 20, 19, 18, 17, 15, 13, 12, 11, 12, 15, 15, 12,  8,  5,  3,  2,  1,  1,  0,  0, -1, -2, -3, -4, -4, -3, -2, -1, -1,  0,  0,  0,  0 },   /* BASS */
@@ -22,6 +30,7 @@ static const signed char eq_curve[EQ_COUNT][EQ_CURVE_N] = {
     {  -9, -9, -9, -9, -9, -9, -8, -7, -6, -4, -4, -4, -4, -4, -3, -1,  2,  4,  8, 12, 13, 11,  9,  7,  6,  7,  9,  9,  8,  5,  3,  2,  1,  0,  0,  0 },   /* VOCAL */
     {   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  2,  2,  4,  6,  8, 10,  9,  7,  7,  8, 12, 17, 22, 25 },   /* TREBLE */
 };
+#endif
 
 static const char *const eq_name[EQ_COUNT] = {
     "FLAT", "BASS", "ROCK", "POP", "JAZZ", "CLASSICAL", "VOCAL", "TREBLE"

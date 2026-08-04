@@ -385,10 +385,6 @@ static uint32_t ui_arr_t, ui_wave_force, ui_accent_changed;
  * the shape on screen cannot drift from the shape being applied. */
 #include "eq_curve.h"
 static uint8_t  eq_idx;              /* 0 = FLAT = RTL bypass          */
-static uint32_t eq_show_until;       /* curve is up until this cycle   */
-static uint32_t eq_morph;            /* frames left melting back       */
-#define EQ_HOLD_MS   1100u
-#define EQ_MORPH_N   10u
 static uint32_t ui_sec, ui_sec_acc, ui_last_frames, ui_prog_sec;
 static int      ui_was_paused;
 static uint32_t peak_amp;         /* max |sample| in the most recently decoded frame, 0..32767 */
@@ -985,56 +981,6 @@ static void ui_art_placeholder(void)
     art_ready = 1;
 }
 
-/* The selected preset's response, drawn across the meter band.
- *
- * `blend` runs EQ_MORPH_N (pure curve) down to 0 (pure live meter), so the same
- * routine does both the hold and the melt back. Bars are drawn from the CENTRE
- * line -- boost above, cut below -- because filled-from-the-bottom bars bury
- * the shape under a solid mass. That was established by rendering both as ASCII
- * before any of this was written.
- *
- * Two rects per bar rather than one: the lit part, and the background above or
- * below it. Painting the background explicitly is what lets this run without an
- * erase pass, which on a single-buffered framebuffer is what stops it flickering
- * when scanout catches the gap. */
-static void ui_eq_curve_draw(uint32_t blend)
-{
-    const uint32_t ww  = ui_wave_w();
-    const uint32_t mid = UI_WAVE_Y + UI_WAVE_H / 2u;
-
-    for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-        uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
-        uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
-        uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
-
-        /* Curve height, then pulled toward whatever the live meter is showing
-         * so the two shapes cross-fade rather than swap. */
-        int32_t cv = eq_curve[eq_idx][i];
-        int32_t lv = (int32_t)wave[i] - (int32_t)(UI_WAVE_H / 2u);
-        int32_t v  = (cv * (int32_t)blend + lv * (int32_t)(EQ_MORPH_N - blend))
-                   / (int32_t)EQ_MORPH_N;
-
-        uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              mid * UI_BANDS / FB_H, UI_BANDS);
-        uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-
-        if (v >= 0) {
-            uint32_t h = (uint32_t)v;
-            if (h > UI_WAVE_H / 2u - 1u) h = UI_WAVE_H / 2u - 1u;
-            fb_rect(x, mid - h, lit, h + 1u, c);
-            fb_rect(x, UI_WAVE_Y, lit, (mid - h) - UI_WAVE_Y, bed);
-            fb_rect(x, mid + 1u, lit, UI_WAVE_Y + UI_WAVE_H - mid - 1u, bed);
-        } else {
-            uint32_t h = (uint32_t)(-v);
-            if (h > UI_WAVE_H / 2u - 1u) h = UI_WAVE_H / 2u - 1u;
-            fb_rect(x, mid, lit, h + 1u, c);
-            fb_rect(x, UI_WAVE_Y, lit, mid - UI_WAVE_Y, bed);
-            fb_rect(x, mid + h + 1u, lit,
-                    UI_WAVE_Y + UI_WAVE_H - (mid + h + 1u), bed);
-        }
-    }
-}
-
 /* Clear the waveform band across the FULL inner width and force every bar to
  * redraw. Used on a panel toggle: the bars change width, so leftovers from the
  * previous width would otherwise stay on screen. */
@@ -1610,27 +1556,6 @@ static void ui_draw_dynamic(void)
      * meter that freezes mid-deflection looks broken, and the fall to zero is
      * the most characterful thing an analogue movement does. Every other mode
      * is genuinely static when paused and stays frozen. */
-    /* ---- EQ curve takes the meter band over on a preset change ----
-     * A name says WHICH preset; the curve says what it does. It reuses the same
-     * bars the meter already draws, at heights from a generated table instead
-     * of from pcm[], so it costs one meter frame and no new primitive.
-     *
-     * The return is a MORPH, not a cut: each bar walks from the curve to the
-     * live meter over EQ_MORPH_N frames, so the shape melts into the music. */
-    if (eq_show_until) {
-        if ((int32_t)(cycles() - eq_show_until) < 0) {
-            ui_eq_curve_draw(EQ_MORPH_N);       /* full curve, no blend yet */
-            return;
-        }
-        if (eq_morph) {
-            ui_eq_curve_draw(--eq_morph);
-            return;
-        }
-        eq_show_until = 0;
-        ui_wave_clear();                        /* hand the band back cleanly */
-        ui_wave_force = 1u;
-    }
-
     uint32_t vu_settling = (viz_mode == VIZ_VU) && (vu_l || vu_r);
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
@@ -2283,7 +2208,10 @@ static void ui_draw_dynamic(void)
             const uint32_t my = iy + (UI_ICONBOX_H > UI_MODE_H
                                     ? (UI_ICONBOX_H - UI_MODE_H) / 2u : 0u);
 
-            fb_rect(mx, iy, (UI_MODE_W + 10u) * 3u + 12u, UI_ICONBOX_H, tbg);
+            /* Cleared to the WIDEST name, not the current one: CLASSICAL is
+             * 101 px and POP is 35, so a narrower clear would leave the tail of
+             * the previous preset on screen. */
+            fb_rect(mx, iy, (UI_MODE_W + 10u) * 2u + 106u, UI_ICONBOX_H, tbg);
             /* Inactive modes stay visible but recede, so the controls advertise
              * themselves instead of only appearing once found. */
             ui_icon_repeat(mx, my,
@@ -2292,14 +2220,15 @@ static void ui_draw_dynamic(void)
             ui_icon_shuffle(mx + UI_MODE_W + 10u, my,
                             shuffle_on ? ui_accent : UI_FAINT);
 
-            /* EQ state, persistent. The curve on the meter is transient by
-             * design, so a user who walks away and comes back needs something
-             * that is still there. Dimmed rather than hidden when FLAT, the
-             * same treatment the repeat and shuffle icons already use: an icon
-             * that vanishes gives no hint the control exists. */
+            /* The preset NAME, not the word "EQ" -- it is the same amount of
+             * screen and says which one is on rather than merely that the
+             * feature exists. Persistent, so a user who walks away and comes
+             * back can see the state without pressing anything. Dimmed on FLAT,
+             * the same "off but still visible" treatment the repeat and shuffle
+             * icons use. */
             fb_set_color(eq_idx ? ui_accent : UI_FAINT, tbg);
-            fb_text_clipped(mx + (UI_MODE_W + 10u) * 2u, my - 2u, "EQ",
-                            TS_1X, TS_1X, 30u);
+            fb_text_clipped(mx + (UI_MODE_W + 10u) * 2u, my - 2u,
+                            eq_name[eq_idx], TS_1X, TS_1X, 110u);
 
             /* "4 / 12", right-aligned so the numbers do not shuffle sideways as
              * the track index gains a digit.
@@ -3681,10 +3610,7 @@ int main(void)
         if (eq_apply) {
             eq_apply = 0;
             REG(R_EQ) = eq_idx;
-            ui_toast_set("EQ: ", 0xFFFFFFFFu, eq_name[eq_idx]);
-            eq_show_until = cycles() + CLK_HZ / 1000u * EQ_HOLD_MS;
-            eq_morph      = EQ_MORPH_N;
-            ui_mode_dirty = 1u;
+            ui_mode_dirty = 1u;          /* the mode row NAMES the preset */
             settings_mark_dirty();
         }
 
