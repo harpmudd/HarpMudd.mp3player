@@ -24,6 +24,12 @@ what hid it for three events. Never look at a size on this card in decimal.
 
 The drive letter moves between D: and E: depending on what else is mounted, so
 the card is found by looking for the core rather than by assuming a letter.
+
+By default it scans ONLY Assets/mp3player -- where every recorded damage event
+has landed, and where all the .mp3 files live. Hashing the whole card means
+hashing ~16 GB over USB, which took long enough that the first attempt had to be
+abandoned; a measurement nobody can afford to run is not a measurement. Pass
+--all to sweep the entire card when that is genuinely wanted.
 """
 
 import argparse
@@ -35,6 +41,7 @@ import sys
 import time
 
 MARKERS = ("Assets/mp3player", "Cores/HarpMudd.Mp3Player")
+SUBTREE = "Assets/mp3player"     # default scan scope; --all overrides
 HASH_EDGE = 1 << 20          # bytes hashed at each end unless --full
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_snapshots")
 
@@ -74,9 +81,12 @@ def digest(path, size, quick):
     return h.hexdigest(), "edges"
 
 
-def scan(root, quick):
+def scan(root, quick, subtree):
     out = {}
-    for dirpath, _dirnames, filenames in os.walk(root):
+    base = os.path.join(root, subtree.replace("/", os.sep)) if subtree else root
+    if not os.path.isdir(base):
+        sys.exit("scan path does not exist: %s" % base)
+    for dirpath, _dirnames, filenames in os.walk(base):
         if os.path.basename(dirpath).lower() == "system volume information":
             continue
         for name in sorted(filenames):
@@ -104,13 +114,15 @@ def cmd_snap(args, label):
     root = args.root or find_card(args.wait)
     if not root:
         sys.exit("no card found: no drive holds both %s" % " and ".join(MARKERS))
-    print("card: %s" % root)
-    files = scan(root, args.quick)
+    subtree = "" if args.all else SUBTREE
+    print("card: %s   scanning: %s" % (root, subtree or "(everything)"))
+    files = scan(root, args.quick, subtree)
     os.makedirs(STATE, exist_ok=True)
     path = os.path.join(STATE, label + ".json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"root": root, "when": time.strftime("%Y-%m-%d %H:%M:%S"),
-                   "quick": args.quick, "files": files}, f, indent=1, sort_keys=True)
+                   "quick": args.quick, "subtree": subtree,
+                   "files": files}, f, indent=1, sort_keys=True)
     mp3s = [k for k in files if k.lower().endswith(".mp3")]
     print("%s: %d files (%d mp3) -> %s" % (label, len(files), len(mp3s), path))
     for k in sorted(mp3s):
@@ -126,6 +138,11 @@ def cmd_diff(args):
         b = json.load(open(os.path.join(STATE, "after.json"), encoding="utf-8"))
     except OSError as e:
         sys.exit("need both snapshots first (%s)" % e)
+
+    if a.get("subtree") != b.get("subtree"):
+        sys.exit("before/after were taken at different scopes (%r vs %r) -- "
+                 "retake them the same way or the diff invents changes"
+                 % (a.get("subtree"), b.get("subtree")))
 
     fa, fb = a["files"], b["files"]
     changed = grown = 0
@@ -180,6 +197,9 @@ def main():
                          "looking for -- not for use here")
     ap.add_argument("--wait", type=float, default=60.0,
                     help="seconds to wait for the card to mount (default 60)")
+    ap.add_argument("--all", action="store_true",
+                    help="scan the whole card, not just " + SUBTREE +
+                         " (slow: hashes every file on the volume)")
     ap.add_argument("--root", default=None,
                     help="scan this folder instead of auto-detecting the card")
     args = ap.parse_args()

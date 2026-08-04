@@ -58,12 +58,24 @@
  * file with named fields -- until the blocker is answered, that script IS the
  * persistence mechanism, and the buttons are a session-only control.
  *
- * TO RE-ENABLE: record every .mp3's size, perform ONE write with nothing else
- * running, and re-record. If any .mp3 grows, 0184 cannot be used by this core at
- * all and settings need an approach that never writes the card. Only if the
- * sizes hold is it worth asking which offset we are actually passing. Until that
- * test has been run and passed, this stays 0. */
-#define SETTINGS_WRITE 0
+ * RE-ENABLED 2026-08-04 on the user's explicit instruction, with the measurement
+ * below NOT yet run. Recorded plainly so nobody later reads this as an oversight:
+ *
+ *   - The mechanism section further down predicts this write extends an .mp3 to
+ *     the value of word 1 of the record. It is a prediction, not a certainty.
+ *   - The user's originals are intact at C:\Users\mikek\Desktop\songs, so the
+ *     card is restorable.
+ *   - Because the prediction is exact, ordinary use is now itself the
+ *     experiment: if a file lands on word 1's value the mechanism is confirmed
+ *     and the fix follows from it; if nothing grows, the mechanism is refuted
+ *     and 0184 was never the fault.
+ *
+ * Take a card snapshot before and after (tools/card_snapshot.py) or the run
+ * proves nothing and only costs files.
+ *
+ * TO TURN IT BACK OFF: set this to 0. Nothing else has to change -- the write
+ * body is compiled out and the release core then contains no 0184 at all. */
+#define SETTINGS_WRITE 1
 
 /* That test, built. SETTINGS_PROBE=1 makes Select+Start perform exactly ONE
  * 0184 and then latch, so a whole session contains a single write with a known
