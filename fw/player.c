@@ -1371,6 +1371,97 @@ static void ui_splash_anim(void)
  * does `if (idle) continue;` before it reaches ui_draw_dynamic(), so in idle
  * mode nothing draws toasts at all. A static line is the only thing that
  * survives here. */
+/* ---- boot progress ---------------------------------------------------------
+ * Reading the .m3u is ~19 APF commands and the CPU spends nearly all of that
+ * spinning in target_read_slot()'s completion poll. Dead time, with a static
+ * splash on screen and no way to tell a slow card from a hung one.
+ *
+ * So the wait gets a voice: a label plus three dots whose brightness sweeps
+ * across them. The falloff is deliberately the SAME arithmetic the transport
+ * arrows use -- rotating peak, trailing glow, 30 Hz tick -- so it reads as this
+ * UI's existing language rather than a second idiom bolted on.
+ *
+ * Driven from inside the read poll, not from a timer. That matters: the dots
+ * animate against the REAL load, so a slow card keeps them moving and they stop
+ * because the work they were reporting actually finished. A fixed-duration
+ * animation would be a lie that happens to look similar.
+ *
+ * Costs nothing. There is no audio at boot, which is the same reason
+ * ui_splash_anim() can redraw a whole meter every frame here and nowhere else.
+ */
+#define UI_BOOT_Y     255u     /* just under the meter, grouped with it */
+#define UI_DOT_N      3u
+#define UI_DOT_W      7u
+#define UI_DOT_GAP    6u
+#define UI_DOT_STEPS  10u
+#define UI_DOT_TICKS  (UI_DOT_N * UI_DOT_STEPS)
+#define UI_DOT_TAIL   (UI_DOT_STEPS * 2u)   /* how far the glow trails behind */
+#define UI_DOT_FLOOR  7u       /* out of 31: unlit dots dim, never vanish */
+
+static const char *ui_boot_msg;        /* NULL = nothing in progress */
+static uint32_t    ui_boot_next, ui_boot_t, ui_boot_x;
+
+static uint16_t ui_boot_bg(void)
+{
+    return ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, UI_BOOT_Y * UI_BANDS / FB_H, UI_BANDS);
+}
+
+/* A 7x7 disc, one rect per row -- the way every other icon here is built,
+ * because BRAM is at 97% and a glyph would cost a whole atlas cell. */
+static void ui_icon_dot(uint32_t x, uint32_t y, uint16_t c)
+{
+    static const unsigned char inset[7] = { 2, 1, 0, 0, 0, 1, 2 };
+    for (uint32_t i = 0; i < 7u; i++)
+        fb_rect(x + inset[i], y + i, 7u - 2u * inset[i], 1u, c);
+}
+
+static void ui_boot_note(const char *msg)
+{
+    ui_boot_msg  = msg;
+    ui_boot_t    = 0;
+    ui_boot_next = 0;                       /* first tick paints immediately */
+    fb_set_color(UI_WHITE, ui_boot_bg());
+    /* fb_text_clipped returns where it stopped, so the dots follow the label
+     * instead of sitting at a hardcoded offset that a longer word would run
+     * into. */
+    ui_boot_x = fb_text_clipped(UI_MARGIN, UI_BOOT_Y, msg,
+                                TS_1X, TS_1X, UI_INNER_W) + 8u;
+}
+
+static void ui_boot_tick(void)
+{
+    if (!ui_boot_msg) return;
+    if ((int32_t)(cycles() - ui_boot_next) < 0) return;
+    ui_boot_next = cycles() + CLK_HZ / 30u;
+
+    uint16_t bg = ui_boot_bg();
+    uint32_t dy = UI_BOOT_Y + (FB_CELL(TS_1X) - 7u) / 2u;   /* centred on the text */
+    uint32_t t  = ui_boot_t++ % UI_DOT_TICKS;
+
+    /* No erase pass: every dot is redrawn every tick at a fixed position, so
+     * each one covers its own footprint. Erase-then-draw on a single-buffered
+     * framebuffer is what makes things flicker when scanout catches the gap. */
+    for (uint32_t i = 0; i < UI_DOT_N; i++) {
+        uint32_t dist = (t + UI_DOT_TICKS - i * UI_DOT_STEPS) % UI_DOT_TICKS;
+        uint32_t l    = (dist < UI_DOT_TAIL) ? (31u - (dist * 31u) / UI_DOT_TAIL)
+                                             : 0u;
+        /* A floor rather than skipping the dim ones: three dots that are always
+         * present read as a three-dot indicator, where two-plus-a-gap reads as
+         * something missing. The arrows can afford to vanish; a 7 px disc
+         * cannot. */
+        if (l < UI_DOT_FLOOR) l = UI_DOT_FLOOR;
+        ui_icon_dot(ui_boot_x + i * (UI_DOT_W + UI_DOT_GAP), dy,
+                    ui_mix(bg, ui_accent, l, 31u));
+    }
+}
+
+static void ui_boot_clear(void)
+{
+    if (!ui_boot_msg) return;
+    ui_boot_msg = 0;
+    fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
+}
+
 static void ui_idle_screen(const char *reason)
 {
     ui_splash();
@@ -2466,7 +2557,11 @@ static int target_read_poll(void)
 static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint32_t len)
 {
     target_read_start_slot(slot, off, dst_off, len);
-    while (!target_read_poll()) { }
+    /* The boot indicator is animated from HERE -- this spin is where the time
+     * actually goes during a playlist read. ui_boot_tick() is a single compare
+     * and return unless a note is armed, which it only is around pl_load(), so
+     * every other caller of this function is unaffected. */
+    while (!target_read_poll()) { ui_boot_tick(); }
     rd_pending = 0;
     return rd_ok;
 }
@@ -3300,7 +3395,12 @@ int main(void)
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
      * while doing it mid-stream would make every refill re-walk the cluster
      * chain. No playlist on the card simply leaves pl_count at 0. */
+    /* Armed only around this call, so the indicator means "reading the .m3u"
+     * and nothing else -- the track open and artwork decode that follow are a
+     * separate wait and deliberately do not claim this label. */
+    ui_boot_note("LOADING PLAYLIST");
     pl_load();
+    ui_boot_clear();
 
     /* Try whatever is already in the slot -- a file picked from the Pocket's
      * browser, or one left there by a previous session. If that comes to
