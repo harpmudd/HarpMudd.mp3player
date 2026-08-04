@@ -1,9 +1,58 @@
 # Roadmap
 
 Things worth doing next, with enough context that picking one up doesn't mean
-re-deriving why it's on the list. Ordered by value per effort, not by ambition.
+re-deriving why it's on the list.
 
-## Settings persistence — RELEASE BLOCKER
+**Defects come first.** Everything under Enhancements waits until the list above
+it is empty, however much more interesting the enhancement is. Within each
+section, ordered by value per effort rather than by ambition.
+
+# Defects
+
+Fixed before anything in Enhancements, regardless of how interesting the
+enhancement is.
+
+## Playlist stops dead at the first bad filename
+
+**Symptom.** A single misspelled or missing entry in the `.m3u` fails the whole
+load. If it is the first entry, the core never reaches the player at all — the
+boot screen stays up. The other tracks in the list are all perfectly good and
+none of them plays.
+
+**Expected.** Skip the entry that cannot be opened and carry on with the rest.
+One bad line should cost one track, not the playlist.
+
+**Where it is.** [`fw/playlist.inc:404-414`](fw/playlist.inc#L404-L414). On a
+failed open, `pl_play_at()` restores `pl_pos`, raises a toast and returns 0. It
+makes exactly one attempt and no caller retries with the next entry, so the
+failure propagates all the way out. At boot,
+[`fw/player.c:3279`](fw/player.c#L3279) tests `pl_count && pl_play_at(0)` — one
+bad first entry and that is the end of it.
+
+**Shape of the fix.** Advance past entries that fail to open, bounded by
+`pl_count` attempts so a list where nothing opens terminates instead of spinning.
+The bound matters more than it looks: `pl_skip()` and the end-of-track
+auto-advance both route through `pl_play_at()`, so an unbounded retry becomes an
+infinite loop on a list of missing files rather than a hang on one.
+
+Details worth getting right rather than discovering later:
+
+- **Distinguish "not there" from "not now".** A `0192` error 4 is a genuinely
+  absent file and should be skipped permanently for this session. A transient
+  failure should not condemn a track that would work on the next attempt.
+  Skipping the wrong category quietly loses music.
+- **Say what happened, once.** Skipping silently means a user whose list is half
+  mistyped hears a shorter playlist and never learns why. A single summary after
+  the load — "2 of 14 tracks missing" — beats a toast per failure, which would
+  otherwise queue up faster than they can be read.
+- **The boot path needs its own answer.** If *every* entry fails there is nothing
+  to play, and the core must land on the idle screen with a clear message rather
+  than the splash. Worth checking while fixing this whether `ui_idle_screen()` at
+  [`fw/player.c:3281`](fw/player.c#L3281) actually paints over the boot splash —
+  the reported symptom is the *boot screen* persisting, and that call is supposed
+  to replace it.
+
+## Settings write damages the user's files — RELEASE BLOCKER
 
 `SETTINGS_WRITE` is **0**. The core reads `settings/settings.bin` at launch and
 writes nothing to the card. This is the one item standing between the core and a
@@ -45,6 +94,8 @@ which likely means giving up on saving them from the UI and treating
 
 Details and the full reasoning live at the `SETTINGS_WRITE` definition in
 [fw/settings.inc](fw/settings.inc).
+
+# Enhancements
 
 ## PNG album art
 
