@@ -64,8 +64,52 @@ the observed behaviour is a parsed struct, and we never had a template to copy.
 `0190`). There is no equivalent source for `0184`, so constructing one is
 exactly the guessing this project keeps being punished for.
 
-Writing stays off until someone has a `0184` parameter struct that APF produced.
-`tools/settings_edit.py` is the persistence mechanism, and it works.
+Writing stays off. `tools/settings_edit.py` is the persistence mechanism today.
+
+### THE WAY FORWARD: a `nonvolatile` slot, not `0184` at all
+
+`0184` was never how cores are supposed to save. Analogue's `data.json`
+reference documents a top-level `nonvolatile` boolean — a sibling of
+`deferload`, not a `parameters` bit:
+
+> "If `true`, slot will be both loaded and unloaded on core exit."
+> "Slots marked as nonvolatile will be read out back onto the file they were
+> loaded from on SD... The data flush happens whenever the core is shutdown —
+> when a core is stopped with the root menu 'Quit' option, Pocket is turned
+> off, or Pocket is slept."
+
+**APF performs the write itself, from the core's memory, at shutdown.** The core
+issues no write command, so there is no parameter struct to get wrong and no
+size field to land on a song. It is the same class of mistake as the
+`deferload` one: a documented flag was sitting there and we built a runtime
+workaround instead. *Check the data.json field reference before inventing a
+runtime mechanism* — that lesson is already written down in
+[[apf-target-commands]] from the reload bug, and it applies again.
+
+**Why it should fit the frozen shell with no RTL change.** APF must read the
+data back over the bridge, and `core_top.v`'s read mux serves `0xF8xxxxxx`
+only — the datatable. But the datatable is both bridge-readable and
+bridge-writable (`32'hF8xx2xxx` in `core_bridge_cmd.v`). Point the settings
+slot's `address` at datatable word 128 (`0xF8002200`, where the record is
+already staged) and firmware reads and writes it with the existing
+`dt_read`/`dt_write`. Words 0..127 are the 0190/0192 structs; 128+ is free.
+
+Shape of the change:
+
+- `data.json`: settings slot gains `"nonvolatile": true` and
+  `"address": "0xF8002200"`, and drops `deferload` so it is actually loaded.
+- Firmware: `settings_load()` reads the datatable instead of issuing `0180`;
+  saving becomes a `dt_write` with no command at all. `settings_write_now()`
+  and every trace of `0184` are deleted.
+
+**Unverified.** Nothing above has been run on hardware. Test it on a scratch
+card holding only expendable `.mp3` files, with a snapshot either side — never
+on the real library. The cost of being wrong here is measured in destroyed
+music, and this fault has now proven it three times over.
+
+Known trade: settings persist at shutdown/sleep rather than immediately, so a
+battery pull loses the last change. That is how every save-data core behaves
+and is a fair price.
 
 Three times, every `.mp3` sharing the card with it came back reporting the same
 size — 21,037,825, then 21,365,505, then 20,382,465 — while `settings.bin` itself
