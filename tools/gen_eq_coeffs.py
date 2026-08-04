@@ -16,9 +16,13 @@ What this does that a coefficient calculator does not:
   * The Q2.16 range is checked per coefficient and the script FAILS rather
     than silently wrapping. a1 legitimately approaches -2, which is exactly
     why the format has two integer bits, so the margin is worth watching.
-  * The preamp is derived from each preset's measured peak gain, so a boosted
-    preset cannot clip. EQ_DESIGN calls this not optional: a preset that
-    exceeds full scale hard-clips, which is much worse than the EQ is good.
+  * The preamp is LOUDNESS-MATCHED (pink-weighted RMS), not peak-matched.
+    Peak-matching cannot clip, but it left every preset 3-6 dB quieter than
+    FLAT, which reads as "someone turned it down" rather than "the EQ is on"
+    and loses every A/B on level alone. Loudness-matching keeps presets at the
+    same apparent volume; the cost is that a tone near full scale in a boosted
+    band can exceed full scale, so the output saturation is now load-bearing
+    and MUST clamp rather than wrap. Both numbers are reported.
 """
 
 import argparse
@@ -110,6 +114,22 @@ def response_db(qcoefs, f):
     return 20.0 * math.log10(abs(h)) if abs(h) > 0 else -999.0
 
 
+def loudness_preamp_db(qcoefs):
+    """Preamp that keeps APPARENT loudness equal to bypass.
+
+    Pink-weighted: equal energy per octave, which is roughly how music is
+    distributed and how hearing integrates it. A peak-weighted preamp is the
+    safe alternative and is reported alongside, but it makes every preset
+    audibly quieter than FLAT."""
+    num = den = 0.0
+    for i in range(1, len(FREQS)):
+        w = math.log(FREQS[i] / FREQS[i - 1])        # equal weight per octave
+        h = 10.0 ** (response_db(qcoefs, FREQS[i]) / 20.0)
+        num += h * h * w
+        den += w
+    return -10.0 * math.log10(num / den) if num > 0 else 0.0
+
+
 def stable(qcoefs):
     """Poles inside the unit circle, checked on the quantised values."""
     for (_b0, _b1, _b2, a1, a2) in qcoefs:
@@ -126,6 +146,27 @@ def stable(qcoefs):
 
 
 FREQS = [20 * (10 ** (i / 24.0)) for i in range(int(24 * math.log10(20000 / 20)) + 1)]
+
+
+# On-screen curve, at the real meter geometry from fw/player.c.
+UI_WAVE_N = 36
+UI_WAVE_H = 72
+CURVE_DB = 8.0          # full bar deflection; presets peak at +6
+
+
+def curve_bars(qcoefs):
+    """Signed pixel offset from the meter's centre line, per bar.
+
+    Deliberately the response WITHOUT the preamp: the preamp is a level
+    adjustment, and what the user wants to see when they flip a preset is its
+    tonal shape, not how it was normalised."""
+    span = UI_WAVE_H // 2 - 1
+    out = []
+    for i in range(UI_WAVE_N):
+        f = 20.0 * (20000.0 / 20.0) ** (i / (UI_WAVE_N - 1.0))
+        db = max(-CURVE_DB, min(CURVE_DB, response_db(qcoefs, f)))
+        out.append(int(round(db / CURVE_DB * span)))
+    return out
 
 
 def ascii_curve(name, qcoefs, preamp_db):
@@ -163,6 +204,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--verilog", action="store_true",
                     help="emit the coefficient table for the RTL")
+    ap.add_argument("--curves", action="store_true",
+                    help="emit the on-screen curve table for the firmware")
     args = ap.parse_args()
 
     errors, table = [], []
@@ -183,19 +226,25 @@ def main():
                     worst_margin = (m, "%s %gHz" % (name, f0))
 
         peak = max(response_db(qcoefs, f) for f in FREQS)
-        preamp_db = -peak if peak > 0 else 0.0
+        peak_pre = -peak if peak > 0 else 0.0
+        preamp_db = loudness_preamp_db(qcoefs)
         preamp_q = quantise(10 ** (preamp_db / 20.0), "%s/preamp" % name, errors)
 
         if not stable(qcoefs):
             errors.append("%s: a pole is on or outside the unit circle" % name)
 
-        after = max(response_db(qcoefs, f) + preamp_db for f in FREQS)
+        # How far a full-scale tone at the worst frequency can now exceed full
+        # scale. This is the price of loudness-matching and the saturation
+        # stage is what absorbs it -- so it is reported, not hidden.
+        over = max(response_db(qcoefs, f) + preamp_db for f in FREQS)
         table.append((name, qcoefs, preamp_q, preamp_db))
-        print("  %-10s peak %+6.2f dB -> preamp %+6.2f dB -> max %+5.2f dB  %s"
-              % (name, peak, preamp_db, after,
-                 "OK" if after <= 0.01 else "*** STILL CLIPS ***"))
-        if after > 0.01:
-            errors.append("%s exceeds full scale after preamp" % name)
+        print("  %-10s preamp %+6.2f dB (peak-match would be %+6.2f) "
+              "-> worst-case tone %+5.2f dB %s"
+              % (name, preamp_db, peak_pre, over,
+                 "" if over <= 0.01 else "-> saturates"))
+        if over > 6.0:
+            errors.append("%s can exceed full scale by %.1f dB -- too much to "
+                          "leave to saturation" % (name, over))
 
     print()
     print("Tightest Q2.16 margin: %d counts (%s) -- 0 would mean the format is "
@@ -222,6 +271,27 @@ def main():
                 print("//   %-9s %5gHz  " % (kind, f0)
                       + " ".join("%7d" % v for v in qc))
             print("//   preamp                %7d" % pq)
+
+    if args.curves:
+        print("=== paste into fw/ ===")
+        print("/* GENERATED by tools/gen_eq_coeffs.py --curves -- DO NOT EDIT.")
+        print(" *")
+        print(" * Each preset's response drawn on the meter, %d bars wide, as a"
+              % UI_WAVE_N)
+        print(" * SIGNED offset from the centre line in pixels: boost above,")
+        print(" * cut below, clamped to +/-%g dB over +/-%d px. Generated from"
+              % (CURVE_DB, UI_WAVE_H // 2 - 1))
+        print(" * the same quantised coefficients the RTL uses, so what is on")
+        print(" * screen is the filter's real response and cannot drift from")
+        print(" * it. %d bytes total. */" % (len(PRESETS) * UI_WAVE_N))
+        print("static const signed char eq_curve[%d][%d] = {"
+              % (len(PRESETS), UI_WAVE_N))
+        for name, qcoefs, _pq, _pdb in table:
+            vals = curve_bars(qcoefs)
+            print("    { " + ",".join("%3d" % v for v in vals)
+                  + " },   /* %s */" % name)
+        print("};")
+        print()
 
     print()
     if errors:

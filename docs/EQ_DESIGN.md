@@ -181,9 +181,55 @@ Eight presets, wrapping:
 
 Each press raises the same transient label the meters and colours use —
 `EQ: ROCK` in the info bar above the progress meter, ~1 s at full brightness then
-a ten-step fade. Nothing else on screen moves, and playback is not interrupted:
-the filter is in the RTL and the audio never stops flowing, so a preset change is
-seamless in a way a track change can never be.
+a ten-step fade. Playback is not interrupted: the filter is in the RTL and the
+audio never stops flowing, so a preset change is seamless in a way a track change
+can never be.
+
+### The meter shows the CURVE while you flip (user's idea, 2026-08-04)
+
+A name alone tells you which preset is selected; it does not tell you what it
+does. The meter area is 36 bars over 72 px and is the one large graphic region on
+screen — so on a preset change it becomes the preset's **actual response curve**
+for about a second, then melts back into the live meter.
+
+**Drawn from the verified coefficients, not by hand.** `gen_eq_coeffs.py
+--curves` emits `eq_curve[8][36]`: a signed pixel offset from the meter's centre
+line per bar, boost above and cut below, generated from the same quantised
+integers the RTL filters with. The picture therefore cannot drift from the
+filter, which a hand-drawn icon set inevitably would. 288 bytes.
+
+It is the response *without* the preamp: the preamp is a level adjustment, and
+what the user wants to see is the tonal shape, not how it was normalised.
+
+Rendered at the true 36x72 geometry the shapes are unmistakable at a glance:
+
+```text
+   ROCK                                 TREBLE
+   |##                                  |                                   #
+   |#####                               |                                  ##
+   |#######                           ##|                                 ###
+   |#########                        ###|                           #    ####
+   |###############          ###########|                         ###########
+   |====================================|####################================
+   |                   ###              |
+```
+
+**Reuses the bar renderer exactly as it is.** Same 36 rects the meter already
+draws every frame, at heights that happen to come from a table instead of from
+`pcm[]`. No new primitive, no new cost, and it lands in the one budget that must
+not be disturbed only for the second or so it is up — during which the decoder is
+running normally anyway.
+
+**The return is a morph, not a dissolve.** Interpolate each bar's height from the
+curve to the live meter's value over ~10 frames, so the curve visibly melts into
+the music rather than blinking out. Same cost as drawing the meter.
+
+`FLAT` is a flat line across the centre, which is exactly the right picture for
+a true bypass.
+
+This supersedes "nothing else on screen moves". The persistent `EQ` tag in the
+mode row below still earns its place: the curve is transient, and a user who
+walks away and comes back needs to see the state without pressing anything.
 
 **A persistent indicator, not just a toast.** The label fades, so a user who
 walks away and comes back needs to be able to see the EQ state without pressing
