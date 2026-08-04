@@ -54,7 +54,9 @@
  * where the target sits in the directory tree is irrelevant.
  *
  * Reading stays enabled, so a settings.bin placed on the card by hand is still
- * honoured. Only the write-back is gone.
+ * honoured. Only the write-back is gone. `tools/settings_edit.py` edits the
+ * file with named fields -- until the blocker is answered, that script IS the
+ * persistence mechanism, and the buttons are a session-only control.
  *
  * TO RE-ENABLE: record every .mp3's size, perform ONE write with nothing else
  * running, and re-record. If any .mp3 grows, 0184 cannot be used by this core at

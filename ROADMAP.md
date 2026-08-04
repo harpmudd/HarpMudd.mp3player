@@ -23,6 +23,12 @@ enhancement is.
 writes nothing to the card. This is the one item standing between the core and a
 release: everything else is HW-confirmed.
 
+**What this looks like in use, because it reads as a separate bug:** volume,
+accent, repeat, shuffle, art and meter all still *load* at launch, but nothing
+changed with the buttons survives a relaunch. That is this blocker, not a fault
+in the settings code. `tools/settings_edit.py` edits `settings.bin` with named
+fields and is the only working persistence today.
+
 Three times, every `.mp3` sharing the card with it came back reporting the same
 size — 21,037,825, then 21,365,505, then 20,382,465 — while `settings.bin` itself
 stayed 32 bytes.
