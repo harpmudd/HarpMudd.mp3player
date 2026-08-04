@@ -111,6 +111,24 @@ def report_size(n):
 
 
 def cmd_snap(args, label):
+    # The baseline is the one irreplaceable artefact here, and re-running
+    # "before" out of habit silently destroys it: the diff then compares two
+    # snapshots taken minutes apart with no core use between them and reports a
+    # confident all-clear that means nothing. That happened once and was caught
+    # only because the file mtimes did not line up. Take the baseline ONCE, then
+    # run "after" as many times as you like -- each one re-diffs against the
+    # same original.
+    if label == "before" and not args.force:
+        prev = os.path.join(STATE, "before.json")
+        if os.path.exists(prev):
+            try:
+                when = json.load(open(prev, encoding="utf-8")).get("when", "?")
+            except Exception:
+                when = "?"
+            sys.exit("a baseline already exists (taken %s).\n"
+                     "Run 'after' instead -- it re-diffs against that same "
+                     "baseline every time.\nUse --force only if you really "
+                     "mean to discard it and start a new comparison." % when)
     root = args.root or find_card(args.wait)
     if not root:
         sys.exit("no card found: no drive holds both %s" % " and ".join(MARKERS))
@@ -138,6 +156,18 @@ def cmd_diff(args):
         b = json.load(open(os.path.join(STATE, "after.json"), encoding="utf-8"))
     except OSError as e:
         sys.exit("need both snapshots first (%s)" % e)
+
+    print("baseline %s   ->   latest %s" % (a.get("when", "?"), b.get("when", "?")))
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        gap = (time.mktime(time.strptime(b["when"], fmt))
+               - time.mktime(time.strptime(a["when"], fmt)))
+        if gap < 300:
+            print("WARNING: only %d seconds separate them. If the core was not "
+                  "used in that window this diff proves nothing." % int(gap))
+    except Exception:
+        pass
+    print()
 
     if a.get("subtree") != b.get("subtree"):
         sys.exit("before/after were taken at different scopes (%r vs %r) -- "
@@ -225,6 +255,8 @@ def main():
                          "looking for -- not for use here")
     ap.add_argument("--wait", type=float, default=60.0,
                     help="seconds to wait for the card to mount (default 60)")
+    ap.add_argument("--force", action="store_true",
+                    help="allow 'before' to overwrite an existing baseline")
     ap.add_argument("--all", action="store_true",
                     help="scan the whole card, not just " + SUBTREE +
                          " (slow: hashes every file on the volume)")

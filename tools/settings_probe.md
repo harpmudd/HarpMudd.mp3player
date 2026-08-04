@@ -93,6 +93,15 @@ python tools/card_snapshot.py after
 python tools/card_snapshot.py diff
 ```
 
+**Take the baseline ONCE and never re-run `before`.** Every `after` re-diffs
+against the same baseline, so one baseline covers as many sessions as you like.
+Re-running `before` destroys the only reference you have and the next diff
+compares two snapshots minutes apart with no core use between them --
+a confident all-clear that means nothing. That happened, and was caught only
+because the file mtimes did not line up. `before` now refuses to overwrite an
+existing baseline, and `diff` prints the window it is comparing and warns when
+it is under five minutes.
+
 ## Reading the answer
 
 **A file grew to EXACTLY the predicted size.** The mechanism is proven: 0184
