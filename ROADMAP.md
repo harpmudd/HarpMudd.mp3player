@@ -17,17 +17,27 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Settings write damages the user's files — RELEASE BLOCKER
+## Settings write damaged the user's files — RELEASE BLOCKER, under observation
 
-`SETTINGS_WRITE` is **0**. The core reads `settings/settings.bin` at launch and
-writes nothing to the card. This is the one item standing between the core and a
-release: everything else is HW-confirmed.
+**`SETTINGS_WRITE` is 1 again** as of 2026-08-04, on the user's instruction and
+before the blocker is understood. Saving works: settings survive a relaunch, and
+one full session of writes left every `.mp3` on the card byte-for-byte intact.
 
-**What this looks like in use, because it reads as a separate bug:** volume,
-accent, repeat, shuffle, art and meter all still *load* at launch, but nothing
-changed with the buttons survives a relaunch. That is this blocker, not a fault
-in the settings code. `tools/settings_edit.py` edits `settings.bin` with named
-fields and is the only working persistence today.
+**This is not resolved.** Three times previously, every `.mp3` sharing the card
+came back extended and one file's audio was destroyed. Nothing found since
+explains why, the mechanism that looked certain was tested and missed (below),
+and all three events followed *extended* use rather than a single session. So
+the current state is "writing is on and being watched", not "fixed".
+
+**Until it has survived a run of real sessions, take a snapshot around each
+one** — `python tools/card_snapshot.py before | after | diff`. Roughly a minute,
+and it is the only thing that turns a recurrence into evidence instead of lost
+music. Keep the originals backed up. `tools/settings_edit.py` remains the way to
+set values without trusting the write path at all.
+
+To turn it back off: set `SETTINGS_WRITE` to `0` in
+[fw/settings.inc](fw/settings.inc) and rebuild — the write body compiles out and
+the core then contains no `0184` at all.
 
 Three times, every `.mp3` sharing the card with it came back reporting the same
 size — 21,037,825, then 21,365,505, then 20,382,465 — while `settings.bin` itself
@@ -98,8 +108,31 @@ why `settings.bin` stays exactly 32 bytes (it is not the file being sized), why
 the low half never moved, and why a mitigation about *where* `settings.bin` lives
 changed nothing.
 
-**Not yet acted on.** A mechanism derived from data still needs an experiment
-that predicts an outcome *before* seeing it — see below.
+### The prediction was made and it FAILED — 2026-08-04
+
+Writing was re-enabled and a real session run with a before/after card snapshot.
+Settings ended at volume 55, palette 9, repeat ALL, so word 1 was `0x01370901`
+and the mechanism predicted an `.mp3` extended to **20,384,001** bytes.
+
+- `settings.bin` was rewritten correctly, in place, at exactly 32 bytes.
+- **All five `.mp3` files came back byte-for-byte identical.**
+- Nothing grew, nothing was rewritten. The prediction missed completely.
+
+So the word-1 theory is **unconfirmed**, and the striking part — three damaged
+sizes that each decode to a valid, plausible settings record, plus the card's
+own `settings.bin` matching the third exactly — remains unexplained. Either it
+is a much larger coincidence than it looks, or the fault needs a condition this
+session did not reproduce. **Do not build a fix on it.**
+
+It is still worth keeping as a **detector**: if damage recurs, decode the new
+size as `{version, volume, palette, repeat}` at that moment. A second hit
+confirms it outright; a miss kills it. Falsifiable on the next event rather than
+on speculation.
+
+**The clean run does not clear `0184` either.** One session of writes leaving
+the card intact is necessary, not sufficient — all three damage events followed
+extended use, and the deferred-write and subdirectory mitigations were already
+in place for the third.
 
 ### Ruled out by inspection, so the measurement need not re-check it
 

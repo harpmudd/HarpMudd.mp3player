@@ -146,9 +146,26 @@ def cmd_diff(args):
 
     fa, fb = a["files"], b["files"]
     changed = grown = 0
+    expected = []
 
     for k in sorted(set(fa) | set(fb)):
         ea, eb = fa.get(k), fb.get(k)
+        # Two files are SUPPOSED to change and must not be read as damage.
+        # An earlier version counted them and reported "0184 is unusable" on a
+        # run where nothing was harmed -- a diagnostic that cries wolf is worse
+        # than no diagnostic, because the next real hit gets discounted.
+        base = k.rsplit("/", 1)[-1]
+        if base == "mp3player.rom":
+            expected.append("%s -- the firmware image, replaced by hand between "
+                            "snapshots" % k)
+            continue
+        if base == "settings.bin":
+            same = ea and eb and ea.get("size") == eb.get("size")
+            expected.append("%s -- the write TARGET; %s"
+                            % (k, "rewritten at the same size, which is exactly "
+                                  "right" if same else "SIZE CHANGED, which is not"))
+            if same:
+                continue
         if ea is None:
             print("ADDED    %s  %s" % (k, report_size(eb.get("size", 0))))
             changed += 1
@@ -168,13 +185,24 @@ def cmd_diff(args):
             print("REWRITTEN %s  (same size %s)" % (k, report_size(ea["size"])))
             changed += 1
 
+    mp3s = [k for k in fb if k.lower().endswith(".mp3")]
+    intact = [k for k in mp3s
+              if k in fa and fa[k].get("sha") == fb[k].get("sha")
+              and fa[k].get("size") == fb[k].get("size")]
+    print()
+    print("%d of %d .mp3 files byte-for-byte unchanged." % (len(intact), len(mp3s)))
+    if expected:
+        print("Ignored (expected to change):")
+        for e in expected:
+            print("  - %s" % e)
+
     print()
     if not changed:
-        print("VERDICT: nothing on the card changed.")
-        print("One 0184 write left every other file byte-identical. If the write")
-        print("itself reported success, the command is usable and the blocker")
-        print("was never 0184 in isolation -- look next at what ELSE ran during")
-        print("the three damage events.")
+        print("VERDICT: no unexpected change. Nothing was damaged.")
+        print("The writes in this session left every .mp3 byte-identical.")
+        print("That is NECESSARY but not SUFFICIENT: the three damage events")
+        print("came after extended use, so one clean session does not clear")
+        print("0184. Keep snapshotting across real sessions before trusting it.")
         return 0
 
     print("VERDICT: %d file(s) changed, %d grew." % (changed, grown))

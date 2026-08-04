@@ -156,15 +156,37 @@
  *   - why the low half never moved: palette and repeat never moved;
  *   - why a mitigation about WHERE settings.bin lives changed nothing.
  *
- * DO NOT re-enable writing on the strength of this. It is a mechanism derived
- * from data, which is the bar this comment sets, but it has not been confirmed
- * by an experiment that PREDICTS an outcome before seeing it. That experiment
- * is now cheap and sharp, and it replaces the old blind one-write test:
+ * ===========================================================================
+ * THE PREDICTION WAS MADE AND IT FAILED (2026-08-04). Read this before reusing
+ * the mechanism above -- it is NOT established.
+ * ===========================================================================
  *
- *   Run the probe (tools/settings_probe.md) with a known record and predict the
- *   damaged size IN ADVANCE. If a file comes back at exactly word 1's value,
- *   the mechanism is proven and the fix follows from it -- stage the payload
- *   somewhere the write path does not parse, or stop using 0184 entirely. */
+ * Writing was re-enabled and a real session run with a before/after snapshot of
+ * the card. Settings changed to volume 55, palette 9, repeat ALL, meter BARS,
+ * so word 1 was 0x01370901 and the mechanism predicted an .mp3 extended to
+ * 20,384,001 bytes.
+ *
+ *   settings.bin was rewritten correctly, in place, at exactly 32 bytes.
+ *   ALL FIVE .mp3 FILES CAME BACK BYTE-FOR-BYTE IDENTICAL.
+ *   Nothing grew. Nothing was rewritten. The prediction missed completely.
+ *
+ * So the word-1 theory is unconfirmed, and the striking part -- three damaged
+ * sizes that each decode to a valid, plausible settings record, plus a
+ * settings.bin on the card matching the third exactly -- is still unexplained.
+ * Either it is a coincidence far larger than it looks, or the fault needs some
+ * condition this session did not reproduce. Do not treat it as known either
+ * way, and do NOT build a fix on it.
+ *
+ * What the theory is still good for is DETECTION, and that is worth keeping:
+ * if the damage ever recurs, decode the new size as {version, volume, palette,
+ * repeat} at that moment. A second hit confirms it outright; a miss kills it.
+ * That makes it falsifiable on the next event instead of on speculation.
+ *
+ * And the clean run does NOT clear 0184. One session of writes leaving the card
+ * intact is necessary, not sufficient -- all three damage events followed
+ * extended use, and the deferred-write and subdirectory mitigations were
+ * already in place for the third. Keep snapshotting across real sessions
+ * (tools/card_snapshot.py before | after | diff) before trusting this. */
 
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
