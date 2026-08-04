@@ -1351,12 +1351,27 @@ static void ui_splash_anim(void)
     }
 }
 
-static void ui_idle_screen(void)
+/* `reason` explains why there is nothing playing, or is NULL when the answer is
+ * simply "you have not picked anything yet".
+ *
+ * It has to be painted HERE rather than raised as a toast. This screen is
+ * ui_splash() plus three lines of instructions -- the same gradient and the same
+ * title as the boot screen -- so a user whose playlist failed sees a screen they
+ * cannot distinguish from the one that was already up, and reads it as a hang.
+ * The toast that would have explained it never appears either: the main loop
+ * does `if (idle) continue;` before it reaches ui_draw_dynamic(), so in idle
+ * mode nothing draws toasts at all. A static line is the only thing that
+ * survives here. */
+static void ui_idle_screen(const char *reason)
 {
     ui_splash();
 
     uint16_t bg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, (FB_H / 2u) * UI_BANDS / FB_H,
                          UI_BANDS);
+    if (reason) {
+        fb_set_color(UI_RED, bg);
+        fb_text_clipped(UI_MARGIN, 150u, reason, TS_1X, TS_1X, FB_W - UI_MARGIN);
+    }
     fb_set_color(UI_WHITE, bg);
     fb_text_clipped(UI_MARGIN, 176u, "Press the Analogue button",
                     TS_1X, TS_1X, FB_W - UI_MARGIN);
@@ -3278,7 +3293,14 @@ int main(void)
          * rather than flashing instructions that are about to be replaced. */
         if (!(pl_count && pl_play_at(0))) {
             idle = 1;
-            ui_idle_screen();
+            /* Say WHICH nothing this is. A playlist whose every entry is
+             * mistyped and no playlist at all both land here, and the idle
+             * screen is otherwise indistinguishable from the splash that was
+             * already up -- which is exactly what "the core never leaves the
+             * boot screen" was. */
+            ui_idle_screen(pl_count            ? "No playable tracks in playlist"
+                         : pl_status == PL_ERR_EMPTY ? "Playlist has no tracks"
+                         : (const char *)0);
         }
     } else {
         pl_report();

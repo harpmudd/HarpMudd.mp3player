@@ -48,12 +48,23 @@ static inline void dt_write(uint32_t word, uint32_t val)
     REG(R_DT_DATA) = val;
 }
 
+/* Set when the last pl_cmd() gave up on the deadline rather than being answered.
+ *
+ * Both outcomes return 0, but they cost wildly different amounts of time and
+ * mean different things. An answered command with a nonzero result is instant
+ * and describes THIS file; a timeout burns the whole timeout and says the
+ * command path itself is not responding, which the next file will not fix. The
+ * skip loop in pl_play_dir() needs to tell them apart -- retrying 128 entries
+ * that each take 3 s to not answer is six minutes of frozen core. */
+static uint8_t pl_cmd_timedout;
+
 /* Run one target command and wait for the sequence counter to move. Same
  * discipline as target_read_poll(): never trust the `done` LEVEL, which stays
  * asserted from the previous command until the next one is picked up. */
 static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
 {
     refill_drain();                       /* one command in flight, ever */
+    pl_cmd_timedout = 0;
     uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
     REG(R_TGT_ID) = slot;
     REG(R_TGT_GO) = sel;
@@ -62,7 +73,7 @@ static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
     for (;;) {
         uint32_t st = REG(R_TGT_GO);
         if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
-        if ((int32_t)(cycles() - deadline) >= 0) return 0;
+        if ((int32_t)(cycles() - deadline) >= 0) { pl_cmd_timedout = 1; return 0; }
     }
 }
 
@@ -75,6 +86,14 @@ static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
 enum { PLO_OK = 0, PLO_GETFILE, PLO_NONAME, PLO_TOOLONG, PLO_OPEN };
 static uint8_t pl_open_err;
 static uint8_t pl_open_errcode;      /* target_dataslot_err from 0192 */
+static uint8_t pl_open_timeout;      /* 0192 never answered; errcode is stale  */
+
+/* The result code 0192 returns for a file that is not on the card. Established
+ * by observation, not from the docs: pointing the open at a bare filename that
+ * did not exist at the card root is what produced it, repeatably, during the
+ * playlist bring-up (see the path-handling note in pl_open_name). It is the one
+ * code that justifies giving up on an entry for good. */
+#define PL_ERRCODE_NOFILE 4u
 
 /* Fetch a template descriptor into `buf`. Returns the length of the printable
  * path it contains, or 0.
@@ -110,7 +129,7 @@ static uint32_t pl_template(uint32_t slot, uint8_t *buf, uint32_t *name_at)
 
 static int pl_open_name(const char *name)
 {
-    pl_open_err = PLO_OK; pl_open_errcode = 0;
+    pl_open_err = PLO_OK; pl_open_errcode = 0; pl_open_timeout = 0;
 
     /* 1. Template: a struct APF built itself, for a file it already has. */
     uint8_t buf[DT_WORDS * 4u];
@@ -180,10 +199,76 @@ static int pl_open_name(const char *name)
      * therefore has to drive the load itself; see pl_play_at(). */
     if (!pl_cmd(TGT_OPENFILE, MP3_SLOT_ID, CLK_HZ * 3u)) {
         pl_open_err     = PLO_OPEN;
+        pl_open_timeout = pl_cmd_timedout;
         pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
         return 0;
     }
     return 1;
+}
+
+/* --------------------------------------------------------------- bad entries
+ *
+ * What a failed open means for the REST of the list. Getting this wrong in
+ * either direction loses music: treat a transient failure as permanent and a
+ * track that would play is dropped for the session; treat a permanent one as
+ * transient and every pass re-attempts a file that is not there.
+ */
+enum {
+    PLF_DEAD = 0,       /* this entry is not on the card: never try it again  */
+    PLF_SKIP,           /* this entry failed, but might not next time         */
+    PLF_FATAL           /* not about this entry at all: stop trying entries   */
+};
+
+static uint8_t pl_classify_failure(void)
+{
+    switch (pl_open_err) {
+    /* No template from EITHER slot. That is the 0190 path failing, which has
+     * nothing to do with which file was asked for -- the next entry produces
+     * exactly the same result, so walking the list is pure waste. */
+    case PLO_GETFILE:
+    case PLO_NONAME:
+        return PLF_FATAL;
+
+    /* The name cannot be expressed in the parameter struct at all. Its length
+     * will not change, so this is as permanent as a missing file. */
+    case PLO_TOOLONG:
+        return PLF_DEAD;
+
+    case PLO_OPEN:
+        /* Answered, and answered "no such file". The only permanent verdict
+         * APF actually gives us. */
+        if (!pl_open_timeout && pl_open_errcode == PL_ERRCODE_NOFILE)
+            return PLF_DEAD;
+        /* Never answered. Cheap to misjudge one way, ruinous the other: each
+         * timeout costs the full 3 s, so a list of 128 would freeze the core
+         * for six minutes before reaching the idle screen. Stop. */
+        if (pl_open_timeout)
+            return PLF_FATAL;
+        /* Answered with something else -- busy, or a state we have not seen.
+         * Move past it for now, but do not condemn it. */
+        return PLF_SKIP;
+    }
+    return PLF_SKIP;
+}
+
+/* Entries known to be missing, indexed by FILE index rather than play position:
+ * shuffle permutes the order, and knowledge of what is on the card must survive
+ * that. Cleared by pl_load(), so fixing the card and re-picking the playlist
+ * gives every entry another chance. 128 bits total. */
+static uint32_t pl_dead[(PL_MAX + 31u) / 32u];
+static uint16_t pl_dead_n;
+
+static int  pl_is_dead(uint16_t f) { return (pl_dead[f >> 5] >> (f & 31u)) & 1u; }
+static void pl_mark_dead(uint16_t f)
+{
+    if (pl_is_dead(f)) return;
+    pl_dead[f >> 5] |= 1u << (f & 31u);
+    pl_dead_n++;
+}
+static void pl_dead_clear(void)
+{
+    for (uint32_t i = 0; i < sizeof(pl_dead) / sizeof(pl_dead[0]); i++) pl_dead[i] = 0;
+    pl_dead_n = 0;
 }
 
 /* ---------------------------------------------------------------- diagnostic
@@ -369,7 +454,22 @@ static void pl_resync(uint16_t file_idx)
 
 static void ui_toast_msg(const char *msg);
 
-/* Start the track at `pos`.
+/* Why the LAST attempt failed. Only reached when the walk below has given up
+ * on the whole request -- a single bad entry it steps over says nothing. */
+static void pl_toast_open_fail(void)
+{
+    switch (pl_open_err) {
+    case PLO_GETFILE: ui_toast_msg("OPEN FAIL: NO 0190");   break;
+    case PLO_NONAME:  ui_toast_msg("OPEN FAIL: NO NAME");   break;
+    case PLO_TOOLONG: ui_toast_msg("OPEN FAIL: NAME LONG"); break;
+    default:          ui_toast_set("OPEN FAIL: 0192 ERR",
+                                   pl_open_errcode, 0);     break;
+    }
+}
+
+/* Everything that has to follow a SUCCESSFUL open, and nothing that survives a
+ * failed one -- which is what lets the walk below attempt an entry without
+ * committing to it.
  *
  * A successful 0192 switches the slot but raises NO 008A -- that notification
  * is for a file the USER picked from the menu. So nothing here can wait for the
@@ -381,43 +481,8 @@ static void ui_toast_msg(const char *msg);
  * Rather than re-implement loading, arm the very same gate the menu reload
  * uses, with the OUTGOING file's identity as the reference so 0190 can confirm
  * the switch actually happened before the track is loaded. */
-static int pl_play_at(uint16_t pos)
+static void pl_arm_load(uint32_t leaving_id)
 {
-    if (!pl_count) return 0;
-    uint16_t prev_pos = pl_pos;
-    pl_pos = (uint16_t)(pos % pl_count);
-    const char *name = &pl_text[pl_off[pl_order[pl_pos]]];
-
-    /* Captured BEFORE the open: after it, 0190 answers with the new file. */
-    uint32_t leaving_id = cur_file_id;
-
-    /* Snapshot the head of the song we are LEAVING, so read_track_head can
-     * wait for the slot to return something else. Audio is already cut at this
-     * point, so a blocking 16-byte read costs nothing audible. */
-    sw_have_prev = 0;
-    if (target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) {
-        for (uint32_t i = 0; i < sizeof(sw_prev_head); i++)
-            sw_prev_head[i] = tagbuf[i];
-        sw_have_prev = 1;
-    }
-
-    if (!pl_open_name(name)) {
-        pl_pos = prev_pos;                  /* stay where we were */
-        switch (pl_open_err) {
-        case PLO_GETFILE: ui_toast_msg("OPEN FAIL: NO 0190");   break;
-        case PLO_NONAME:  ui_toast_msg("OPEN FAIL: NO NAME");   break;
-        case PLO_TOOLONG: ui_toast_msg("OPEN FAIL: NAME LONG"); break;
-        default:          ui_toast_set("OPEN FAIL: 0192 ERR",
-                                       pl_open_errcode, 0);     break;
-        }
-        return 0;
-    }
-
-    /* The slot has switched, but nothing else knows: file_pos, the decoder and
-     * the ring all still describe the previous track, which is why a skip used
-     * to start the new song at the old one's elapsed position. Arm the same
-     * gate a menu reload uses, with the OUTGOING identity as the reference so
-     * 0190 can confirm the switch before the track is loaded. */
     for (uint32_t i = 0; i < sizeof(stale_ref_title); i++)
         stale_ref_title[i] = last_title[i];
     stale_ref_size    = slot_size;
@@ -435,8 +500,104 @@ static int pl_play_at(uint16_t pos)
      * the slot is open rather than merely chosen. */
     reload_settle   = cycles() + CLK_HZ / 4u;
     reload_at       = cycles() + CLK_HZ * 3u;
-    return 1;
 }
+
+/* Play the first entry at or after `pos` that will actually open, walking in
+ * `dir` (+1 forward, -1 back) past the ones that will not.
+ *
+ * One mistyped line in an .m3u used to cost the whole playlist: a single
+ * attempt was made, and no caller retried, so the failure propagated all the
+ * way out to the boot path and the core never reached the player. One bad line
+ * should cost one track.
+ *
+ * `span` is how many positions the walk may visit, and it is what stops the
+ * skipping from changing the MEANING of a caller's request. At most pl_count --
+ * every position visited at most once -- and that bound is load-bearing rather
+ * than defensive: pl_skip() and the end-of-track auto-advance both arrive here,
+ * so an unbounded retry would turn a list of missing files from a one-track
+ * hiccup into an infinite loop. Auto-advance with repeat OFF passes a shorter
+ * span so that walking past a missing last entry ends the playlist instead of
+ * wrapping round and restarting it. */
+static int pl_play_span(uint16_t pos, int dir, uint16_t span)
+{
+    if (!pl_count || !span) return 0;
+    if (span > pl_count) span = pl_count;
+    uint16_t prev_pos = pl_pos;
+
+    /* Captured BEFORE any open: after a successful one, 0190 answers with the
+     * new file. A FAILED open changes neither, so one capture serves the whole
+     * walk -- and hoisting the blocking read out of the loop means a run of bad
+     * entries does not pay for it once each. */
+    uint32_t leaving_id = cur_file_id;
+
+    /* Snapshot the head of the song we are LEAVING, so read_track_head can
+     * wait for the slot to return something else. Audio is already cut at this
+     * point, so a blocking 16-byte read costs nothing audible. */
+    sw_have_prev = 0;
+    if (target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 16u)) {
+        for (uint32_t i = 0; i < sizeof(sw_prev_head); i++)
+            sw_prev_head[i] = tagbuf[i];
+        sw_have_prev = 1;
+    }
+
+    uint16_t at = (uint16_t)(pos % pl_count);
+    uint16_t nmiss = 0, nfail = 0;
+
+    for (uint16_t n = 0; n < span; n++) {
+        uint16_t file_idx = pl_order[at];
+
+        /* Already known absent: skip without spending a command on it. Each
+         * 0192 makes APF re-walk the cluster chain, so re-asking about a file
+         * that was missing thirty seconds ago is the expensive way to get the
+         * same answer. */
+        if (pl_is_dead(file_idx)) {
+            nmiss++;
+        } else {
+            pl_pos = at;
+            if (pl_open_name(&pl_text[pl_off[file_idx]])) {
+                pl_arm_load(leaving_id);
+                /* ONE line about the whole walk, not one per bad entry: a list
+                 * half mistyped would otherwise queue toasts faster than they
+                 * can be read. (A "2 of 14" figure would need every entry
+                 * probed at load time, and probing costs a cluster walk each --
+                 * so this counts what this attempt actually walked past.) */
+                if (nmiss)      ui_toast_set("SKIPPED", nmiss, " MISSING");
+                else if (nfail) ui_toast_set("SKIPPED", nfail, " UNREADABLE");
+                return 1;
+            }
+
+            switch (pl_classify_failure()) {
+            case PLF_FATAL:
+                /* Not about this entry -- the command path itself is not
+                 * answering, and the next 127 entries would say so too. */
+                pl_pos = prev_pos;
+                pl_toast_open_fail();
+                return 0;
+            case PLF_DEAD:
+                pl_mark_dead(file_idx);
+                nmiss++;
+                break;
+            default:
+                nfail++;
+                break;
+            }
+        }
+
+        at = (uint16_t)((at + pl_count + (dir > 0 ? 1u : (uint16_t)(pl_count - 1u)))
+                        % pl_count);
+    }
+
+    /* Nothing in the list opened. Stay where we were and say so plainly --
+     * the caller (the boot path especially) has to be able to tell this from
+     * "no playlist at all". */
+    pl_pos = prev_pos;
+    if (nmiss) ui_toast_set("NO TRACKS:", nmiss, " MISSING");
+    else       pl_toast_open_fail();
+    return 0;
+}
+
+static int pl_play_dir(uint16_t pos, int dir) { return pl_play_span(pos, dir, pl_count); }
+static int pl_play_at(uint16_t pos)           { return pl_play_dir(pos, +1); }
 
 /* delta = +1 next, -1 previous. Wraps in both directions regardless of repeat
  * mode: a MANUAL skip past the end should go to track 1, not stop dead.
@@ -446,7 +607,9 @@ static int pl_skip(int delta)
     if (pl_count < 1u) return 0;
     uint16_t next = (uint16_t)((pl_pos + pl_count + (delta > 0 ? 1u : (uint16_t)(pl_count - 1u)))
                                % pl_count);
-    return pl_play_at(next);
+    /* Skip past bad entries in the DIRECTION THE USER PRESSED. Walking forward
+     * out of a back-press would hand them the track they were already on. */
+    return pl_play_dir(next, delta);
 }
 
 /* A track finished by itself. Returns 1 if a new track was started, 0 if the
@@ -463,7 +626,14 @@ static int pl_advance_auto(void)
         if (shuffle_on) pl_reorder();
         return pl_play_at(0);
     }
-    return pl_play_at((uint16_t)(pl_pos + 1u));
+    /* Repeat ALL may skip past the end and come round; repeat OFF must NOT.
+     * Without the shorter span, a missing LAST entry would send the walk round
+     * to track 1 and silently restart a playlist the user had set to stop --
+     * skipping a bad file is allowed to cost a track, never to change the
+     * repeat mode's behaviour. */
+    if (rep_mode == REP_ALL) return pl_play_at((uint16_t)(pl_pos + 1u));
+    return pl_play_span((uint16_t)(pl_pos + 1u), +1,
+                        (uint16_t)(pl_count - (pl_pos + 1u)));
 }
 
 /* Load (or reload) the playlist slot. Safe to call when no playlist file is
@@ -471,6 +641,10 @@ static int pl_advance_auto(void)
 static void pl_load(void)
 {
     pl_count = 0; pl_pos = 0; pl_status = PL_OK;
+    /* A new list means new entries: nothing carries over. This is also the only
+     * way back for a user who fixed a filename on the card -- re-picking the
+     * playlist gives every entry another chance. */
+    pl_dead_clear();
     uint32_t len = pl_read_raw();
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
     pl_parse(len);
