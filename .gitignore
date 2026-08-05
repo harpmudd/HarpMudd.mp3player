@@ -74,3 +74,8 @@ tools/_snapshots/
 # EQ test vectors -- regenerate with tools/gen_eq_vectors.py
 sim/eq_*.hex
 sim/*.vvp
+
+# Stray bitstream copies at the repo root -- the shipped one lives in
+# dist/Cores/HarpMudd.Mp3Player/ and is written there by package.py.
+/bitstream.rbf_r
+/*.rbf
