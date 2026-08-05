@@ -656,7 +656,7 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over
  * TIME, LEVELS shows the two channels right now. */
 enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
-       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_BITRATE, VIZ_COUNT };
+       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
  * the vertical -- the standard goniometer orientation, and the reason it reads
@@ -752,10 +752,6 @@ static uint8_t  viz_mode;
 static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
 static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
 
-/* Per-frame bitrate history, same shape as the loudness history. Stored as a
- * bar height rather than kbps so the draw needs no arithmetic. */
-static unsigned char br_hist[UI_WAVE_N];
-#define BR_FULL_KBPS 320u              /* full deflection: MPEG-1 L3 maximum */
 static unsigned char wave[UI_WAVE_N], wave_drawn[UI_WAVE_N];
 static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
 
@@ -1680,10 +1676,6 @@ static void ui_draw_dynamic(void)
             wave[UI_WAVE_N - 1u]    = (unsigned char)amp;
             wave_pk[UI_WAVE_N - 1u] = (unsigned char)amp;
 
-            uint32_t bh = (track_kbps * UI_WAVE_H) / BR_FULL_KBPS;
-            if (bh > UI_WAVE_H) bh = UI_WAVE_H;
-            for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) br_hist[i] = br_hist[i + 1];
-            br_hist[UI_WAVE_N - 1u] = (unsigned char)bh;
         }
         (void)wf;
         /* Peaks sink slowly back toward the bar, so the marker trails the
@@ -1694,60 +1686,6 @@ static void ui_draw_dynamic(void)
         uint32_t ww  = ui_wave_w();
         uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
                               UI_WAVE_Y * UI_BANDS / FB_H, UI_BANDS);
-
-        /* ---- BITRATE ------------------------------------------------------
-         * The encoder's bit allocation over time. A CBR file draws a flat line;
-         * a VBR file visibly spends bits on the busy passages, which is the
-         * whole point of looking at it.
-         *
-         * Fixed 0..320 kbps scale rather than auto-ranging: the interesting
-         * thing is where this file sits against the format's ceiling, and an
-         * auto-range would make a 128 kbps CBR file look identical to a 320.
-         *
-         * Drawn with the same two-rect-per-bar pattern the other meters use --
-         * lit part, then background above it -- so it needs no erase pass and
-         * cannot flicker against scanout.
-         */
-        if (viz_mode == VIZ_BITRATE) {
-            for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-                uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
-                uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
-                uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
-                uint32_t h   = br_hist[i];
-                if (h > UI_WAVE_H) h = UI_WAVE_H;
-                /* Brighter with height, so the busy passages stand out rather
-                 * than being just taller. */
-                uint16_t c = ui_mix(UI_TRACK, ui_accent, h + 1u, UI_WAVE_H);
-                if (h) fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h, c);
-                if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
-            }
-
-            /* Who encoded it, and how. Free bytes: the LAME tag sits directly
-             * after the Xing header the duration code already parses. */
-            char b[40], *q = b;
-            if (track_encoder[0]) {
-                const char *t = track_encoder;
-                while (*t) *q++ = *t++;
-                static const char *const vm[] = {
-                    0, "CBR", "ABR", "VBR", "VBR", "VBR", "VBR", 0,
-                    "CBR", "ABR", 0, 0, 0, 0, 0, 0 };
-                const char *m = vm[track_vbr_method & 0x0Fu];
-                /* ASCII only: the font atlas is 0x20..0x7E, so a middle dot
-                 * would render as a blank. */
-                if (m) { *q++ = ' '; *q++ = '-'; *q++ = ' ';
-                         while (*m) *q++ = *m++; }
-            } else {
-                const char *t = "encoder not stated";
-                while (*t) *q++ = *t++;
-            }
-            *q++ = ' '; *q++ = '-'; *q++ = ' ';
-            q = ui_dec(q, track_kbps);
-            { const char *t = " kbps"; while (*t) *q++ = *t++; }
-            *q = 0;
-            fb_set_color(UI_DIM, bed);
-            fb_text_clipped(UI_MARGIN, UI_WAVE_Y + UI_WAVE_H - FB_CELL(TS_1X) - 2u,
-                            b, TS_1X, TS_1X, UI_INNER_W);
-        }
 
         /* ---- WATERFALL ----------------------------------------------------
          * Scroll the whole strip one pixel left with a single COPY, then draw
@@ -2216,10 +2154,11 @@ static void ui_draw_dynamic(void)
     }
 
     /* Format line, drawn once the decoder has told us what the stream is. */
-    uint32_t info = track_kbps * 1000u + track_hz / 100u;
+    uint32_t info = track_kbps * 1000u + track_hz / 100u
+                  + (track_encoder[0] ? (uint32_t)track_encoder[0] << 24 : 0u);
     if (track_kbps && info != ui_last_info && !size_suspect) {
         ui_last_info = info;
-        char b[32], *q = b;
+        char b[40], *q = b;
         q = ui_dec(q, track_kbps);
         *q++ = ' '; *q++ = 'k'; *q++ = 'b'; *q++ = 'p'; *q++ = 's';
         *q++ = ' '; *q++ = '-'; *q++ = ' ';
@@ -2227,6 +2166,14 @@ static void ui_draw_dynamic(void)
         *q++ = '.';
         q = ui_dec(q, (track_hz % 1000u) / 100u);
         *q++ = ' '; *q++ = 'k'; *q++ = 'H'; *q++ = 'z';
+        /* Who encoded it, from the LAME tag beside the duration header. This
+         * belongs here with the other format facts rather than in a screen of
+         * its own -- and putting it here is what stops the bitrate being
+         * repeated, which it was when this had its own view. */
+        if (track_encoder[0]) {
+            *q++ = ' '; *q++ = '-'; *q++ = ' ';
+            for (const char *t = track_encoder; *t && q - b < 30; ) *q++ = *t++;
+        }
         *q = 0;
         fb_set_color(UI_FAINT, UI_PANEL);
         fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X, ui_text_w);
@@ -2562,7 +2509,6 @@ static void poll_input(void)
                    : viz_mode == VIZ_SCOPE  ? "METER: PHASE SCOPE"
                    : viz_mode == VIZ_WAVE   ? "METER: OSCILLOSCOPE"
                    : viz_mode == VIZ_VU     ? "METER: VU"
-                   : viz_mode == VIZ_BITRATE? "METER: BITRATE"
                    : viz_mode == VIZ_SCROLL ? "METER: WAVEFORM"
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
                                             : "METER: PEAK DOTS");
@@ -3362,7 +3308,6 @@ static int read_track_head(void)
     audio_start  = skip;
     track_frames = 0;
     track_encoder[0] = 0; track_vbr_method = 0;
-    for (uint32_t i = 0; i < UI_WAVE_N; i++) br_hist[i] = 0;
     track_secs   = 0;
     meas_rate    = 0;
 
