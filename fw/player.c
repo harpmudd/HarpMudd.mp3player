@@ -2545,7 +2545,32 @@ static void poll_input(void)
         eq_apply = 1u;
     }
     if (edge & KEY_START) {
-        if (!stopped) { stopped = 1u; paused |= 1u; stop_req = 1u; }
+        if (keys & KEY_SELECT) {
+            /* Load-phase breakdown for the track just loaded, in ms: Head read,
+             * Size probe, Art decode, Prefill, Total. These have been measured
+             * all along but never surfaced, so every question about why a load
+             * feels slow was answered by estimating. Head/Art are the two that
+             * move; if Art dominates it is the JPEG, if Head does it is the tag
+             * walk. Costs nothing when not asked for. */
+            sel_used = 1;
+            char b[24];
+            uint32_t i = 0;
+            const char *lbl = "HSAPT";
+            const uint16_t v[5] = { ld_head, ld_size, ld_art, ld_pre, ld_total };
+            for (uint32_t k = 0; k < 5u && i + 6u < sizeof(b); k++) {
+                b[i++] = lbl[k];
+                uint16_t n = v[k];
+                if (n >= 1000u) { b[i++] = (char)('0' + n / 1000u % 10u); }
+                if (n >= 100u)  { b[i++] = (char)('0' + n / 100u  % 10u); }
+                if (n >= 10u)   { b[i++] = (char)('0' + n / 10u   % 10u); }
+                b[i++] = (char)('0' + n % 10u);
+                if (k < 4u) b[i++] = ' ';
+            }
+            b[i] = 0;
+            ui_toast_set(b, 0xFFFFFFFFu, 0);
+        } else if (!stopped) {
+            stopped = 1u; paused |= 1u; stop_req = 1u;
+        }
     }
     if (edge & KEY_B) {
         if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
@@ -3021,6 +3046,50 @@ static uint32_t id3_len(const uint8_t *b)
  * Scoped deliberately: only what the caller loaded, and only ISO-8859-1/UTF-8
  * -- UTF-16 is reported as its own case rather than silently garbled. Handles
  * v2.3 (plain big-endian size) and v2.4 (syncsafe). */
+/* Decode one text frame BODY -- the encoding byte and the bytes after it -- into
+ * out. Shared by the in-memory parser and the card walk so the two cannot drift
+ * on what a given encoding means.
+ *
+ * UTF-16 (encodings 1 and 2) used to be refused outright, surfacing as its own
+ * error text. That is honest but it is still a track with no title, and UTF-16
+ * is what several taggers emit by default -- one of the ten tracks on the test
+ * card has every text frame in it. The font atlas is ASCII 0x20..0x7E, so
+ * anything above Latin-1 could not be drawn regardless; a code unit that does
+ * not fit becomes '?', which loses an accent but keeps the title. */
+static int id3_text_body(const uint8_t *b, uint32_t fsize, char *out,
+                         uint32_t out_size)
+{
+    if (fsize < 2u) return ID3_NO_FRAME;
+    uint8_t  enc = b[0];
+    uint32_t n   = fsize - 1u;
+    uint32_t i   = 0;
+
+    if (enc == 1u || enc == 2u) {
+        uint32_t s  = 1u;
+        int      be = (enc == 2u);              /* 2 is UTF-16BE, no BOM */
+        if (enc == 1u && n >= 2u) {
+            if (b[1] == 0xFFu && b[2] == 0xFEu)      { be = 0; s = 3u; }
+            else if (b[1] == 0xFEu && b[2] == 0xFFu) { be = 1; s = 3u; }
+        }
+        while (s + 1u < fsize && i + 1u < out_size) {
+            uint32_t u = be ? (((uint32_t)b[s] << 8) | b[s + 1u])
+                            : (((uint32_t)b[s + 1u] << 8) | b[s]);
+            if (!u) break;
+            out[i++] = (u < 0x100u) ? (char)u : '?';
+            s += 2u;
+        }
+    } else {
+        if (n > out_size - 1u) n = out_size - 1u;
+        for (i = 0; i < n; i++) {
+            uint8_t c = b[1u + i];
+            if (c == 0) break;
+            out[i] = (char)c;
+        }
+    }
+    out[i] = 0;
+    return i ? ID3_OK : ID3_NO_FRAME;
+}
+
 static int id3_find_text(const uint8_t *ring, uint32_t avail,
                           uint32_t tag_total_len, const char *frame_id,
                           char *out, uint32_t out_size)
@@ -3043,23 +3112,97 @@ static int id3_find_text(const uint8_t *ring, uint32_t avail,
 
         if (ring[p] == (uint8_t)frame_id[0] && ring[p+1] == (uint8_t)frame_id[1] &&
             ring[p+2] == (uint8_t)frame_id[2] && ring[p+3] == (uint8_t)frame_id[3] &&
-            fsize > 1) {
-            uint8_t enc = ring[p + 10];
-            if (enc == 1u || enc == 2u) return ID3_UNSUPPORTED_ENCODING;
-            uint32_t n = fsize - 1u;
-            if (n > out_size - 1u) n = out_size - 1u;
-            uint32_t i;
-            for (i = 0; i < n; i++) {
-                uint8_t c = ring[p + 11 + i];
-                if (c == 0) break;
-                out[i] = (char)c;
-            }
-            out[i] = 0;
-            return (i > 0) ? ID3_OK : ID3_NO_FRAME;
-        }
+            fsize > 1)
+            return id3_text_body(&ring[p + 10], fsize, out, out_size);
         p += 10u + fsize;
     }
     return ID3_NO_FRAME;
+}
+
+/* Walk the tag off the CARD, a frame header at a time, and fill whatever text
+ * fields are still empty.
+ *
+ * The in-memory parser above cannot reach these. It stops at the first frame
+ * whose body runs past what is loaded, and three tracks on the test card put
+ * APIC FIRST: 41 KB, 34 KB and 847 KB of picture ahead of every text frame. The
+ * ring is 32 KB, so pulling more of the tag in -- the existing fallback -- can
+ * never work for them however much it pulls. Those tracks displayed nothing at
+ * all, which reads as "this file has no tags" rather than as a limitation.
+ *
+ * Cost is proportional to the NUMBER of frames, not to the size of the tag: the
+ * body of a picture frame is skipped by arithmetic, never read. Widespread
+ * Panic's 851 KB tag is about a dozen 16-byte reads. That is what makes this
+ * affordable where an earlier frame-by-frame walk was not -- that one ran on
+ * every track; this runs only where the cheap path already failed, which is the
+ * handful of tracks that would otherwise show nothing. */
+static void id3_walk_collect(uint32_t tag_len)
+{
+    /* TPE2 (band/album artist) is preferred, but plenty of files carry only
+     * TPE1 (lead performer); TDRC is v2.4's year, TYER v2.3's. Duplicated
+     * targets are harmless because a field already filled is skipped, so the
+     * first of each pair to appear in the tag wins. */
+    static const char *const want[7] = { "TIT2", "TPE2", "TPE1", "TALB",
+                                         "TRCK", "TDRC", "TYER" };
+    char *const dst[7] = { track_title, track_artist, track_artist, track_album,
+                           track_trk, track_year, track_year };
+    const uint32_t cap[7] = { sizeof(track_title), sizeof(track_artist),
+                              sizeof(track_artist), sizeof(track_album),
+                              sizeof(track_trk), sizeof(track_year),
+                              sizeof(track_year) };
+
+    if (tag_len < 20u) return;
+
+    /* A sliding window rather than a read per frame header. Frames after a
+     * picture are packed tightly -- Sea Wolf has eight in 200 bytes -- so a
+     * header-sized read each time cost 29 round trips where four cover it. The
+     * window also usually holds the text body, saving a second read. */
+    uint32_t wo = 0, wl = 0;
+#define ID3_WIN 512u
+#define ID3_HAVE(o, n) ((o) >= wo && (o) + (n) <= wo + wl)
+
+    if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, ID3_WIN)) return;
+    wo = 0; wl = ID3_WIN;
+    if (tagbuf[0] != 'I' || tagbuf[1] != 'D' || tagbuf[2] != '3') return;
+    uint8_t major = tagbuf[3];
+
+    uint32_t p = 10;
+    while (p + 10u <= tag_len) {
+        if (!ID3_HAVE(p, 10u)) {
+            if (!target_read_slot(MP3_SLOT_ID, p, TAG_OFF, ID3_WIN)) return;
+            wo = p; wl = ID3_WIN;
+        }
+        const uint8_t *h = tagbuf + (p - wo);
+        if (h[0] == 0) return;                         /* padding reached */
+
+        uint32_t fsize = (major >= 4)
+            ? (((uint32_t)(h[4] & 0x7Fu) << 21) | ((uint32_t)(h[5] & 0x7Fu) << 14) |
+               ((uint32_t)(h[6] & 0x7Fu) << 7)  |  (uint32_t)(h[7] & 0x7Fu))
+            : (((uint32_t)h[4] << 24) | ((uint32_t)h[5] << 16) |
+               ((uint32_t)h[6] << 8)  |  (uint32_t)h[7]);
+        if (!fsize || p + 10u + fsize > tag_len) return;
+
+        for (uint32_t k = 0; k < 7u; k++) {
+            if (dst[k][0]) continue;                   /* already have it */
+            if (h[0] != (uint8_t)want[k][0] || h[1] != (uint8_t)want[k][1] ||
+                h[2] != (uint8_t)want[k][2] || h[3] != (uint8_t)want[k][3])
+                continue;
+            /* n is the whole frame body: the encoding byte plus its text. Pass
+             * exactly what was READ -- passing one more made the decoder take a
+             * byte beyond the buffer, which showed up as the next frame's first
+             * letter stuck on the end of every walked title. */
+            uint32_t n = fsize < 160u ? fsize : 160u;
+            if (ID3_HAVE(p + 10u, n)) {
+                id3_text_body(tagbuf + (p + 10u - wo), n, dst[k], cap[k]);
+            } else if (target_read_slot(MP3_SLOT_ID, p + 10u, TAG_OFF, n)) {
+                id3_text_body(tagbuf, n, dst[k], cap[k]);
+                wl = 0;                    /* the read replaced the window */
+            }
+            break;
+        }
+        p += 10u + fsize;
+    }
+#undef ID3_HAVE
+#undef ID3_WIN
 }
 
 static int title_is_stale(const char *title)
@@ -3294,6 +3437,18 @@ static int read_track_head(void)
                                                 track_year, sizeof(track_year)) != ID3_OK)
                 id3_find_text(ring, ring_fill, skip, "TYER",
                               track_year, sizeof(track_year));
+        }
+
+        /* Still nothing found: the text frames sit behind a picture too large
+         * for the ring to reach, however much of the tag was pulled in. Walk
+         * the tag off the card, which skips a picture by arithmetic instead of
+         * having to load it. Measured on the test card, this is the difference
+         * between three tracks showing no metadata at all and showing all of
+         * it. Runs only on those tracks -- anything the cheap path resolved
+         * never gets here. */
+        if (title_status != ID3_OK) {
+            id3_walk_collect(skip);
+            if (track_title[0]) title_status = ID3_OK;
         }
         for (uint32_t i = 0; i < sizeof(track_trk); i++)
             if (track_trk[i] == '/') { track_trk[i] = 0; break; }  /* "5/12" -> "5" */
