@@ -140,6 +140,11 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
 #define EXPECT_VERSION 0x4D503314u   /* rev 20: interact settings         */
 
+/* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
+ * contract above -- they answer different questions and must not be conflated.
+ * Keep it in step with the status line in README.md; nothing enforces that. */
+#define APP_VER "0.1.0"
+
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */
 #define FB_W       400u
@@ -1345,13 +1350,55 @@ static void poll_input(void);
 /* Gradient and title only. Shown while the first track loads, so the wait is a
  * deliberate-looking screen rather than a flash of instructions that is then
  * replaced -- which read as a glitch. */
+/* Splash composition. The elements were fine; the PLACEMENT was the problem --
+ * a left-aligned title at UI_MARGIN with 120 empty rows above it and 89 below
+ * reads as unplaced rather than composed, and 209 of 360 rows were carrying
+ * nothing at all. Centred, with a rule to give the title something to sit on
+ * and a footer to close the bottom.
+ *
+ * The meter keeps UI_WAVE_Y so the settling animation is untouched -- it is the
+ * best thing on this screen and nothing here needs to disturb it. */
+#define UI_SPL_TITLE_Y  72u
+#define UI_SPL_RULE_Y  118u
+#define UI_SPL_RULE_H    2u
+#define UI_SPL_SUM_Y   294u    /* library summary, once the playlist is read */
+#define UI_SPL_VER_Y   334u    /* footer */
+
+/* Centred on the screen rather than against a column. Returns the x it used. */
+static uint32_t fb_text_centre(uint32_t y, const char *s, uint32_t scale)
+{
+    uint32_t w = fb_text_width(s, scale);
+    uint32_t x = (w < FB_W) ? (FB_W - w) / 2u : 0u;
+    fb_text_clipped(x, y, s, scale, scale, FB_W - x);
+    return x;
+}
+
+/* Title plus the rule under it, at a fade position f/den. Shared so the static
+ * splash and the animated one cannot drift apart -- they are the same screen
+ * and a user who sees both should not be able to tell where one ends. */
+static void ui_splash_title(uint16_t bg, uint32_t f, uint32_t den)
+{
+    uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
+    uint16_t fg = ui_mix(bg, ui_accent, f, den);
+    fb_set_color(fg, bg);
+    uint32_t x = fb_text_centre(UI_SPL_TITLE_Y, "MP3 PLAYER", sc);
+    /* The rule takes the TITLE's width, not an arbitrary one, so the two read
+     * as a single mark however the fitted scale lands. */
+    uint32_t w = fb_text_width("MP3 PLAYER", sc);
+    fb_rect(x, UI_SPL_RULE_Y, w, UI_SPL_RULE_H, fg);
+}
+
+static void ui_splash_version(void)
+{
+    fb_set_color(UI_DIM, ui_grad_at(UI_SPL_VER_Y));
+    fb_text_centre(UI_SPL_VER_Y, "v" APP_VER, TS_1X);
+}
+
 static void ui_splash(void)
 {
     ui_gradient();
-    uint16_t bg = ui_grad_at(FB_H / 2u);
-    uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
-    fb_set_color(ui_accent, bg);
-    fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
+    ui_splash_title(ui_grad_at(UI_SPL_TITLE_Y), 1u, 1u);
+    ui_splash_version();
 }
 
 /* Boot animation: a pulse sweeps the meter while the title fades up.
@@ -1369,10 +1416,13 @@ static void ui_splash_anim(void)
     ui_gradient();
 
     uint16_t bed = ui_grad_at(UI_WAVE_Y);
-    uint16_t tbg = ui_grad_at(120u);
-    uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
+    uint16_t tbg = ui_grad_at(UI_SPL_TITLE_Y);
     uint32_t ww = ui_wave_w();
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
+
+    /* The footer does not fade -- it is not part of the reveal, and animating
+     * it would pull the eye to the least important thing on the screen. */
+    ui_splash_version();
 
     /* Settling noise: the meter starts as chaos and calms to rest.
      *
@@ -1391,8 +1441,7 @@ static void ui_splash_anim(void)
     const uint32_t FRAMES = 46u;
     for (uint32_t t = 0; t < FRAMES; t++) {
         uint32_t f = (t * 2u < FRAMES) ? (t * 2u * STEP_DEN / FRAMES) : STEP_DEN;
-        fb_set_color(ui_mix(tbg, ui_accent, f, STEP_DEN), tbg);
-        fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
+        ui_splash_title(tbg, f, STEP_DEN);
 
         /* Envelope: full early, nothing by the end. Squared so it holds up
          * before collapsing, rather than sagging from the first frame. */
@@ -1499,11 +1548,17 @@ static void ui_boot_note(const char *msg)
     ui_boot_t    = 0;
     ui_boot_next = 0;                       /* first tick paints immediately */
     fb_set_color(UI_WHITE, ui_boot_bg());
+    /* Centre the label AND its dots as one group. Centring the text alone would
+     * push the group right by the width of the dots, which looks like a
+     * mistake rather than a choice on an otherwise symmetric screen. */
+    uint32_t dots_w = UI_DOT_N * (UI_DOT_W + UI_DOT_GAP) - UI_DOT_GAP;
+    uint32_t grp_w  = fb_text_width(msg, TS_1X) + 8u + dots_w;
+    uint32_t x      = (grp_w < FB_W) ? (FB_W - grp_w) / 2u : UI_MARGIN;
     /* fb_text_clipped returns where it stopped, so the dots follow the label
      * instead of sitting at a hardcoded offset that a longer word would run
      * into. */
-    ui_boot_x = fb_text_clipped(UI_MARGIN, UI_BOOT_Y, msg,
-                                TS_1X, TS_1X, UI_INNER_W) + 8u;
+    ui_boot_x = fb_text_clipped(x, UI_BOOT_Y, msg,
+                                TS_1X, TS_1X, FB_W - x) + 8u;
 }
 
 static void ui_boot_tick(void)
@@ -1538,6 +1593,30 @@ static void ui_boot_clear(void)
     if (!ui_boot_msg) return;
     ui_boot_msg = 0;
     fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
+}
+
+/* What the card turned out to hold, shown once the .m3u has been read.
+ *
+ * The splash otherwise says nothing about whether anything was found -- the
+ * next thing that happens is either music or an error screen, and until then a
+ * slow load is indistinguishable from a stuck one. This also gives the bottom
+ * of the screen something to carry.
+ *
+ * Counts LIVE entries, matching the N-of-M shown during playback: a number here
+ * that disagreed with the one a second later would undermine both. */
+static void ui_splash_summary(uint32_t n)
+{
+    char b[24];
+    uint32_t i = 0;
+    if (n >= 100u) b[i++] = (char)('0' + n / 100u % 10u);
+    if (n >= 10u)  b[i++] = (char)('0' + n / 10u  % 10u);
+    b[i++] = (char)('0' + n % 10u);
+    const char *tail = (n == 1u) ? " TRACK" : " TRACKS";
+    for (uint32_t k = 0; tail[k] && i < sizeof(b) - 1u; k++) b[i++] = tail[k];
+    b[i] = 0;
+
+    fb_set_color(UI_DIM, ui_grad_at(UI_SPL_SUM_Y));
+    fb_text_centre(UI_SPL_SUM_Y, b, TS_1X);
 }
 
 static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist code */
@@ -3847,6 +3926,10 @@ int main(void)
     ui_boot_note("LOADING PLAYLIST");
     pl_load();
     ui_boot_clear();
+    /* Only when there is something to report. A "0 TRACKS" line would be
+     * answered a moment later by the idle screen saying the same thing at
+     * length, and saying it twice in two places reads as a fault. */
+    if (pl_count) ui_splash_summary(pl_live_count());
 
     /* Try whatever is already in the slot -- a file picked from the Pocket's
      * browser, or one left there by a previous session. If that comes to
