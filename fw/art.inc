@@ -31,7 +31,19 @@
 #include "picojpeg.h"
 
 #define ART_MAX_SRC_W 320u              /* reduce mode: art up to ~2560 px wide */
-#define ART_MAX_BYTES (384u * 1024u)
+
+/* Largest APIC frame we will decode. This is NOT a memory limit -- the image
+ * streams through a 4 KB window and is never held whole -- it only bounds how
+ * long a track takes to load.
+ *
+ * It was 384 KB, described as refusing the absurd, and it was silently refusing
+ * the GOOD art: measured on this library, a 1494x1497 cover is an 847 KB frame
+ * and a 1280x1280 one is comparable. Those are ordinary sizes for high
+ * resolution covers, not absurd ones, and the symptom was a track that simply
+ * showed no art with no indication why. Large covers also take the CHEAP decode
+ * path (they reduce to well above panel size), so the only real cost is reading
+ * the bytes off SD. Prefer slower-but-shown over instant-and-missing. */
+#define ART_MAX_BYTES (2048u * 1024u)
 
 /* Full decode is capped so the accumulator below cannot overflow -- see the
  * bound there. 1024 is far above the sizes that ever need this path. */
@@ -52,6 +64,17 @@ static uint16_t art_acc[ART_ACC_ROWS][ART_IMG][3];
 static uint16_t art_rowcnt[ART_IMG];    /* source rows feeding each dest row */
 static uint16_t art_colcnt[ART_IMG];    /* source cols feeding each dest col */
 static uint16_t art_line[ART_IMG];      /* the row currently being emitted   */
+
+/* Source coordinate -> accumulator cell, precomputed.
+ *
+ * These replace `sx * aw / sw` in the innermost loop, which ran ONCE PER SOURCE
+ * PIXEL: 207,025 divisions for a 455 px cover, and VexRiscv takes ~34 cycles for
+ * a 32-bit divide -- about 117 ms, on its own more than the IDCT that full
+ * decode was added for. The row map absorbs the `% ART_ACC_ROWS` too, a second
+ * divide by a non-power-of-two. Both maps depend only on the axis, so the whole
+ * cost collapses into sw+sh divisions done once. */
+static uint8_t art_xmap[ART_FULL_MAX];  /* sx -> accumulator column   */
+static uint8_t art_yslot[ART_FULL_MAX]; /* sy -> accumulator row slot */
 static uint32_t art_jpg_pos, art_jpg_end;   /* file offsets of the image data */
 static uint32_t art_win_len, art_win_pos;   /* window currently held in tagbuf */
 
@@ -248,7 +271,12 @@ static int art_decode(uint32_t tag_len)
     uint32_t rh = reduce ? (ih + 7u) / 8u : ih;
     if (sw > rw) sw = rw;
     if (sh > rh) sh = rh;
-    if (!sw || !sh || (reduce && sw > ART_MAX_SRC_W)) return 0;
+    /* art_xmap/art_yslot are indexed by SOURCE coordinate, so both axes must fit
+     * them. sh was previously unguarded -- only sw was checked -- which an
+     * absurdly tall image in reduce mode (over 8192 px) would have walked off
+     * the end of. Full decode is already gated to ART_FULL_MAX above. */
+    if (!sw || !sh || sw > ART_FULL_MAX || sh > ART_FULL_MAX) return 0;
+    if (reduce && sw > ART_MAX_SRC_W) return 0;
 
     /* The accumulator is never larger than the source. Averaging down to
      * min(panel, source) and magnifying on the way out keeps the map onto it
@@ -261,8 +289,18 @@ static int art_decode(uint32_t tag_len)
     uint32_t ah = (sh < ART_IMG) ? sh : ART_IMG;
 
     for (uint32_t i = 0; i < ART_IMG; i++) art_rowcnt[i] = art_colcnt[i] = 0u;
-    for (uint32_t sy = 0; sy < sh; sy++) art_rowcnt[sy * ah / sh]++;
-    for (uint32_t sx = 0; sx < sw; sx++) art_colcnt[sx * aw / sw]++;
+    /* Build the coordinate maps and the counts in the same pass: sw+sh divides
+     * done once, in place of one divide per source PIXEL in the loop below. */
+    for (uint32_t sy = 0; sy < sh; sy++) {
+        uint32_t ay = sy * ah / sh;
+        art_yslot[sy] = (uint8_t)(ay % ART_ACC_ROWS);
+        art_rowcnt[ay]++;
+    }
+    for (uint32_t sx = 0; sx < sw; sx++) {
+        uint32_t ax = sx * aw / sw;
+        art_xmap[sx] = (uint8_t)ax;
+        art_colcnt[ax]++;
+    }
     for (uint32_t s = 0; s < ART_ACC_ROWS; s++)
         for (uint32_t dx = 0; dx < ART_IMG; dx++)
             art_acc[s][dx][0] = art_acc[s][dx][1] = art_acc[s][dx][2] = 0u;
@@ -291,19 +329,25 @@ static int art_decode(uint32_t tag_len)
                         uint32_t sy = reduce ? (my * byn + by)
                                              : (my * mcu_h + by * 8u + j);
                         if (sy >= sh) break;
-                        uint32_t arow = (sy * ah / sh) % ART_ACC_ROWS;
+                        /* Hoisted: the accumulator row, the row base pointer and
+                         * the block's row base are all constant across the pixel
+                         * loop, which is the only loop here that runs per pixel. */
+                        uint16_t (*arow)[3] = art_acc[art_yslot[sy]];
+                        uint32_t obase = blk + (reduce ? 0u : j * 8u);
+                        uint32_t sxbase = reduce ? (mx * bxn + bx)
+                                                 : (mx * mcu_w + bx * 8u);
+                        int mono = (info.m_comps == 1);
                         for (uint32_t i = 0; i < pn; i++) {
-                            uint32_t sx = reduce ? (mx * bxn + bx)
-                                                 : (mx * mcu_w + bx * 8u + i);
+                            uint32_t sx = sxbase + (reduce ? 0u : i);
                             if (sx >= sw) break;
-                            uint32_t o = blk + (reduce ? 0u : (j * 8u + i));
+                            uint32_t o = obase + (reduce ? 0u : i);
                             uint8_t r = info.m_pMCUBufR[o];
-                            uint8_t g = (info.m_comps == 1) ? r : info.m_pMCUBufG[o];
-                            uint8_t b = (info.m_comps == 1) ? r : info.m_pMCUBufB[o];
-                            uint32_t ax = sx * aw / sw;
-                            art_acc[arow][ax][0] += r;
-                            art_acc[arow][ax][1] += g;
-                            art_acc[arow][ax][2] += b;
+                            uint8_t g = mono ? r : info.m_pMCUBufG[o];
+                            uint8_t b = mono ? r : info.m_pMCUBufB[o];
+                            uint16_t *cell = arow[art_xmap[sx]];
+                            cell[0] += r;
+                            cell[1] += g;
+                            cell[2] += b;
                         }
                     }
                 }
