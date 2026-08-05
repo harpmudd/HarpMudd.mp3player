@@ -1,14 +1,14 @@
 # MP3 Player — Analogue Pocket
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, ID3 tags, nine
+decodes and plays it straight off the SD card, with album art, ID3 tags, ten
 switchable meters, an eight-preset equalizer and a progress bar.
 
 The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
 > **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, tags, album art, nine meters, the equalizer, the transport and saved
+> repeat, tags, album art, ten meters, the equalizer, the transport and saved
 > settings all work on real hardware. Not released yet.
 
 ## Installing
@@ -45,7 +45,7 @@ playlists at any time.
 | **Left** / **Right** | *Hold* — seek back / forward |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter (nine styles) |
+| **X** | Cycle the meter (ten styles) |
 | **Select** + **X** | Cycle the meter backwards |
 | **Y** | Cycle the EQ preset (eight) |
 | **Select** + **Y** | Cycle the EQ preset backwards |
@@ -140,7 +140,7 @@ on screen counts what will actually play, not how many lines are in the file.
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **Nine meters**, cycled with **X** (**Select**+**X** goes back) and remembered
+- **Ten meters**, cycled with **X** (**Select**+**X** goes back) and remembered
   between sessions:
   - **Bars** — scrolling loudness history with peak-hold markers.
   - **Waterfall** — a strip scrolling left, color tracking loudness, building a
@@ -156,9 +156,15 @@ on screen counts what will actually play, not how many lines are in the file.
     DAW's overview of a track.
   - **Mirrored bars** — the bar history grown up and down from the center.
   - **Peak dots** — only the peak markers, tracing the loudness contour.
+  - **Bitrate** — the encoder's bit allocation over time, on a fixed 0–320 kbps
+    scale so you can see where the file sits against the format's ceiling. A CBR
+    file draws a flat line; a VBR file visibly spends bits on the busy passages.
+    Underneath it, the encoder that made the file — `LAME3.100 - VBR` — read
+    from the LAME tag that sits alongside the duration header.
 
-  None of them is a spectrum: the decoder doesn't expose frequency bins, so
-  these show loudness, waveform and stereo rather than frequency content.
+  None of the audio ones is a spectrum: the decoder doesn't expose frequency
+  bins, so they show loudness, waveform and stereo rather than frequency
+  content.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the track position in the playlist when one is loaded.
