@@ -567,7 +567,7 @@ static const char *const ui_palette_name[] = {
     "LILAC", "BLUSH", "CORAL", "CRIMSON", "GOLD", "CREAM",
 };
 _Static_assert(sizeof(ui_palette_name) / sizeof(ui_palette_name[0]) == UI_PALETTE_N,
-               "ui_palette_name[] must name every colour in ui_palette[]");
+               "ui_palette_name[] must name every color in ui_palette[]");
 #define UI_ACCENT  0xFC65u
 static uint16_t ui_accent = UI_ACCENT;
 static uint32_t ui_pal_idx;
@@ -2581,13 +2581,13 @@ static void poll_input(void)
         if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
                              ui_accent_changed = 1u;
-                             ui_toast_set("COLOUR: ", 0xFFFFFFFFu,
+                             ui_toast_set("COLOR: ", 0xFFFFFFFFu,
                                           ui_palette_name[ui_pal_idx]);
                              settings_mark_dirty(); }
         if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
                              ui_accent_changed = 1u;
-                             ui_toast_set("COLOUR: ", 0xFFFFFFFFu,
+                             ui_toast_set("COLOR: ", 0xFFFFFFFFu,
                                           ui_palette_name[ui_pal_idx]);
                              settings_mark_dirty(); }
     }

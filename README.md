@@ -2,13 +2,13 @@
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
 decodes and plays it straight off the SD card, with album art, ID3 tags, nine
-switchable meters, an eight-preset equaliser and a progress bar.
+switchable meters, an eight-preset equalizer and a progress bar.
 
 The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
 > **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, tags, album art, nine meters, the equaliser, the transport and saved
+> repeat, tags, album art, nine meters, the equalizer, the transport and saved
 > settings all work on real hardware. Not released yet.
 
 ## Installing
@@ -50,7 +50,7 @@ playlists at any time.
 | **Y** | Cycle the EQ preset (eight) |
 | **Select** + **Y** | Cycle the EQ preset backwards |
 | **Select** | Show / hide the album art panel |
-| **L** / **R** | Cycle the accent colour (12 shades) |
+| **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
 
@@ -66,7 +66,7 @@ Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
 
-Volume, accent colour, repeat, shuffle, the meter, the art panel and the EQ
+Volume, accent color, repeat, shuffle, the meter, the art panel and the EQ
 preset are all remembered between sessions. Change them with the controls, or
 from **Core Settings** in the Analogue menu — either way they persist, and the
 two stay in step.
@@ -77,7 +77,7 @@ Hiding the album art is a preference, not a per-track state: a track with no
 artwork hides the panel without forgetting you want it, so the next track that
 has some brings it back.
 
-## Equaliser
+## Equalizer
 
 **Y** cycles eight presets; **Select**+**Y** goes back. The current one is named
 in the mode row, dimmed on `FLAT`.
@@ -143,7 +143,7 @@ on screen counts what will actually play, not how many lines are in the file.
 - **Nine meters**, cycled with **X** (**Select**+**X** goes back) and remembered
   between sessions:
   - **Bars** — scrolling loudness history with peak-hold markers.
-  - **Waterfall** — a strip scrolling left, colour tracking loudness, building a
+  - **Waterfall** — a strip scrolling left, color tracking loudness, building a
     picture of the track's dynamics.
   - **L/R levels** — horizontal bars per channel.
   - **Phase scope** — a goniometer with fading trails. Vertical is mono, wide is
@@ -152,9 +152,9 @@ on screen counts what will actually play, not how many lines are in the file.
     zero crossing so the trace holds still.
   - **VU** — twin analogue needles with real ballistics, a 100° sweep, and a
     fall to rest when you pause.
-  - **Waveform** — a scrolling envelope mirrored about a centre line, like a
+  - **Waveform** — a scrolling envelope mirrored about a center line, like a
     DAW's overview of a track.
-  - **Mirrored bars** — the bar history grown up and down from the centre.
+  - **Mirrored bars** — the bar history grown up and down from the center.
   - **Peak dots** — only the peak markers, tracing the loudness contour.
 
   None of them is a spectrum: the decoder doesn't expose frequency bins, so
@@ -194,7 +194,7 @@ saw it at boot against its live value, with a plain intact/clobbered verdict —
 a diagnostic, but the one that proves the fix rather than assuming it.
 **Select**+**B** dumps the framework's file descriptor for the same reason.
 
-The equaliser is FPGA logic rather than software, sitting between the audio
+The equalizer is FPGA logic rather than software, sitting between the audio
 queue and the DAC. Five biquads per channel share one multiplier, taking 116 of
 the 1,250 clocks between output samples, so it costs the decoder nothing.
 Its coefficients are generated and checked against a bit-exact model before
@@ -250,7 +250,7 @@ from that source file's own copyright header.
 - **SDRAM controller and i2s audio bridge** — Adam Gastineau
   ([agg23](https://github.com/agg23)) (MIT).
 - **[Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/)** — Robert
-  Bristow-Johnson. The equaliser's shelf and peaking filter formulas are his;
+  Bristow-Johnson. The equalizer's shelf and peaking filter formulas are his;
   the coefficients here are generated from them.
 - **[openFPGA framework](https://www.analogue.co/developer)** —
   [Analogue](https://www.analogue.co).
