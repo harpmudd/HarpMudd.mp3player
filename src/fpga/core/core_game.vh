@@ -371,26 +371,50 @@ sound_i2s #(.CHANNEL_WIDTH(16), .SIGNED_INPUT(1)) u_sound_i2s (
 // mechanisms tried before -- the 0184 target write and a nonvolatile data slot
 // -- both reached the user's .mp3 files. This cannot.
 //
-// TWO ARRAYS, split by direction, so neither has two writers across clock
-// domains: the bridge (clk_74a) writes set_load, the CPU (clk_sys) writes
-// set_save, and APF reads set_save. Firmware publishes button changes into
-// set_save and watches set_load for changes made in the menu.
+// ONE array, not two. The interact protocol is a read-MODIFY-write at a single
+// address: APF reads the word, applies the user's adjustment, writes it back,
+// and reads it again next frame. Splitting it by direction -- bridge writes one
+// array, bridge reads another -- meant APF never read back what it had just
+// written, so every setting snapped straight back to the core's value and the
+// menu items blinked without changing.
 //
-// ramstyle "logic": M10K is at 300/308 and 16 words of 32 bits would otherwise
-// take one of the seven left.
-(* ramstyle = "logic" *) reg [31:0] set_load [0:7];
-(* ramstyle = "logic" *) reg [31:0] set_save [0:7];
+// One array means two writers in two clock domains, so the CPU's writes cross
+// on a TOGGLE, the same idiom tgt_cmd.v uses for its command strobe: a level
+// pulse would not survive the clk_sys -> clk_74a ratio.
+//
+// CPU WRITES WIN a same-cycle collision. APF rewrites every word every frame,
+// so a dropped bridge write is re-sent 16 ms later and costs nothing; a dropped
+// CPU write would silently lose the user's button press for good.
+//
+// CPU reads are asynchronous and quasi-static -- these words change on a button
+// press, not continuously -- which is the same argument tgt_cmd.v makes for its
+// parameter registers.
+(* ramstyle = "logic" *) reg [31:0] set_reg [0:7];
+
+reg  [2:0]  cpu_set_idx;
+reg  [31:0] cpu_set_dat;
+reg         cpu_set_tgl = 1'b0;
+
+always @(posedge clk_sys) begin
+    if (soc_set_wr) begin
+        cpu_set_idx <= soc_set_idx;
+        cpu_set_dat <= soc_set_wdata;
+        cpu_set_tgl <= ~cpu_set_tgl;
+    end
+end
+
+reg [2:0] cpu_set_sync = 3'b0;
+always @(posedge clk_74a) cpu_set_sync <= {cpu_set_sync[1:0], cpu_set_tgl};
+wire cpu_set_wr_74 = cpu_set_sync[2] ^ cpu_set_sync[1];
 
 wire [2:0] set_widx = bridge_addr[4:2];
 
 always @(posedge clk_74a) begin
-    if (bridge_wr && bridge_addr[31:28] == 4'h2)
-        set_load[set_widx] <= bridge_wr_data;
+    if (cpu_set_wr_74)
+        set_reg[cpu_set_idx] <= cpu_set_dat;
+    else if (bridge_wr && bridge_addr[31:28] == 4'h2)
+        set_reg[set_widx] <= bridge_wr_data;
 end
 
-assign set_bridge_rd_data = set_save[set_widx];
-
-always @(posedge clk_sys) begin
-    if (soc_set_wr) set_save[soc_set_idx] <= soc_set_wdata;
-end
-assign soc_set_rdata = set_load[soc_set_idx];
+assign set_bridge_rd_data = set_reg[set_widx];
+assign soc_set_rdata      = set_reg[soc_set_idx];
