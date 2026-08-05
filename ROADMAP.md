@@ -66,7 +66,47 @@ exactly the guessing this project keeps being punished for.
 
 Writing stays off. `tools/settings_edit.py` is the persistence mechanism today.
 
-### Attempt 2 also FAILED — and worse than attempt 1
+### RESOLVED BY ISOLATION: `nonvolatile` itself is what breaks it
+
+Steps 1 and 2, one variable apart, 2026-08-05. This is the clean answer the
+earlier flailing never produced.
+
+**Step 1 — slot at `0x20000000`, everything EXCEPT `nonvolatile`.** Booted
+normally. The on-screen diagnostic read `SET 53504D33 014B0801`: our magic and
+`{version 1, volume 75, palette 8, repeat ALL}`, exactly the file's first eight
+bytes. So **APF does load into a core-served bridge region, the address is
+right, `core_top.v`'s new read case is right, and the register file captures
+the bridge writes with the correct byte order.** All of that is proven.
+
+**Step 2 — added `"nonvolatile": true` and changed nothing else.** **Hung on
+BOOT.** Not on quit this time; it never reached the core.
+
+So the flag is the problem, not the address, not the register file, not the
+shell edit. One variable, one answer — which is what the decomposition was for,
+and it is worth noting it worked even though the result was negative.
+
+Ruled out on the way: the `dataslot_requestwrite` handshake, which some slot
+operations use. `core_top.v` already hardwires `_ack` and `_ok` to 1, so APF is
+not waiting on that.
+
+**The lead worth following if anyone returns to this.** Analogue's own wording:
+*"The size of the file is determined by the Dataslot ID/Size Table BRAM in the
+core."* That table is `mf_datatable` — the same BRAM this core uses as scratch,
+with the 0190 response at words 0..63, the 0192 parameter struct at 64..127 and,
+until recently, the settings record at 128+. If APF consults that table for a
+nonvolatile slot's size and finds our data there, hanging on boot is exactly
+what one would expect.
+
+**And it may explain the original `0184` corruption too** — a bogus size read
+out of a table we were writing into would account for a size field landing on
+the wrong file. Both faults would then have one cause: *this core treats APF's
+slot-size table as free space.*
+
+That is a hypothesis, not a finding. Testing it means learning the table's real
+layout and moving our scratch out of it, which is a bigger change than anything
+tried so far. Nothing should be built on it without that groundwork.
+
+### Attempt 2 detail — the earlier, confounded attempt
 
 Slot at `0x20000000`, `core_top.v` serving bridge reads there, rev 19. Result:
 
