@@ -198,6 +198,44 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Background ramp: dithered, and tinted from the accent — HW-confirmed 2026-08-05
+
+User asked for a smoother gradient and for it to pick up the accent colour.
+Both wanted the same thing fixed.
+
+**40 bands were already 13 colours.** Between 0x2124 and black, RGB565 has 10
+green levels and 5 red/blue, so the 40 bands collapse to 13 distinct colours
+holding ~28 rows each — ~111 panel rows after the 4x scale. Rendering 40 bands
+against 360 side by side showed them identical: **more bands cannot help**, the
+colour space has no values in between. Dither is the only lever, one rect per
+row, alternating adjacent levels. Texture is 4 panel rows against a band's ~110.
+
+**The same shortage is why the tint needed luma headroom.** At luma 35 there is
+no room for hue: cream quantised to exactly the old neutral and several accents
+landed within one level of it. Normalising to luma 45, half-saturated, gives 10
+distinct ramp tops from 12 accents (mint/seafoam and blush/cream share, adjacent
+hues either way). Normalising to a FIXED luma rather than scaling the accent is
+what keeps text contrast constant as the palette cycles.
+
+**`ui_grad_at(y)` is the structural point.** One function owns what colour the
+background is at a row. Nine call sites previously rebuilt it with their own
+`ui_mix()` arithmetic — harmless against flat bands, but against a dithered ramp
+they would have disagreed with what was drawn and left patches behind text, the
+toast and the rounded corners. Anything that needs a background colour must come
+through it.
+
+Two coupling bugs found while wiring, both silent: the settings restore set
+`ui_accent` without the ramp (a saved colour would boot onto the default
+background until L/R was pressed — fixed by deriving it once after
+`settings_load()`, which also covers the early-return defaults path), and an
+accent change invalidated individual elements but never the background. The
+latter now forces a full repaint, which is the one place this costs anything —
+~360 rects plus chrome, pushed while the decoder is idle. Listen there first if
+a colour change ever ticks.
+
+`tools/gradient_preview.py` renders the options at 1:1 AND at 4x vertical, the
+latter being what the panel actually does. Judging dither at 1:1 flatters it.
+
 ## Cover art soft, large covers invisible, tags missing — FIXED, HW-confirmed 2026-08-05
 
 Three faults in the same load path, all found by measuring the user's real
