@@ -324,7 +324,27 @@ static int settings_load(void)
  * If files are damaged again, turn this to 0 and say so -- the mechanism above
  * would then be wrong or incomplete, and no third theory should be built
  * without new measurement. */
-#define SETTINGS_WRITE 1
+/* OFF AGAIN 2026-08-05, same day. The datatable fix was real and necessary but
+ * NOT SUFFICIENT: with the slot table protected and verified intact, a session
+ * still damaged two .mp3 files.
+ *
+ * The damage CHANGED CHARACTER, which is itself the finding:
+ *
+ *   before  every played file stamped with one bogus 21 MB size, taken from
+ *           the clobbered table
+ *   now     each played file rounded UP to a whole number of 128 KB CLUSTERS
+ *             1,801,236  -> 1,835,008   = exactly 14 clusters
+ *            14,046,164  -> 14,155,776  = exactly 108 clusters
+ *
+ * Both new sizes are exact cluster multiples, and only the two files that were
+ * in the MP3 slot moved. So APF is now writing back each slot's ALLOCATED size
+ * rather than its logical size. The audio survives -- the files gained trailing
+ * slack, they were not overwritten -- but they are still corrupted.
+ *
+ * That is a different fault from the table clobbering, and it is not explained
+ * by anything measured so far. Per the rule this file already states: no third
+ * theory without new measurement. */
+#define SETTINGS_WRITE 0
 
 #if SETTINGS_WRITE
 static int settings_write_now(void)
