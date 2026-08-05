@@ -143,12 +143,27 @@ module mp3_fb (
         endcase
     endfunction
 
-    // Top black guard-band: pocket_vector_fb.sv's hard-won finding -- the
-    // scaler overshoots into a bright artifact at a black->content luminance
-    // step on the FIRST active line specifically (not fixable via video.json).
-    // Force the first GUARD_TOP active lines to black so that step happens a
-    // few lines in, away from the DE edge, where the scaler handles it cleanly.
-    localparam [10:0] GUARD_TOP = 11'd3;
+    // Top black guard-band, INHERITED FROM pocket_vector_fb.sv AND NOW 0.
+    //
+    // That core found the scaler overshoots into a bright artifact at a
+    // black->content luminance step on the FIRST active line, and forced the
+    // first few active lines to black to move the step away from the DE edge.
+    // It was invisible there because a vector display's background IS black.
+    //
+    // Here it is not. The gradient's top is 0x2124, luma 34/255, so three
+    // forced-black lines read as a seam above the background -- visible in
+    // screenshots and over HDMI from the dock, less so on the handheld panel.
+    //
+    // And it was not buying anything. The guard does not REMOVE the
+    // black->content step, it relocates it; relocating a 34/255 step is worth
+    // nothing, where the artifact it was designed against was a step to bright
+    // vector lines at luma ~255. There has never been a bottom guard here
+    // either, and no artifact has ever been reported at that edge -- which is
+    // the same gentle step, and evidence the scaler copes with it.
+    //
+    // Left as a parameter rather than deleted: if a bright artifact ever does
+    // appear on the top line, 3 is the value that hides it.
+    localparam [10:0] GUARD_TOP = 11'd0;
 
     // ======================================================================
     // Async FIFO (clk_sys write -> clk_sdram read), Gray-coded pointers.
