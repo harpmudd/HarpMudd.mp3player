@@ -17,341 +17,7 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Settings write damages the user's files — CAUSE FOUND, write disabled
-
-**`SETTINGS_WRITE` is 0.** The cause is now known, proven by a prediction made
-in advance and hit exactly.
-
-### CONFIRMED: the damaged size is word 1 of the settings record
-
-`settings.bin` held `53 50 4D 33 | 01 4B 08 01`, so word 1 —
-`{version 1, volume 75, palette 8, repeat ALL}` — was `0x014B0801` =
-**21,694,465**. That number was computed and written down *before* the session,
-and checked against the card when nothing matched it.
-
-After a session of skipping tracks and flipping EQ presets, **every `.mp3` that
-had been in the MP3 slot came back at exactly 21,694,465 bytes.**
-
-One file was untouched: the one that never became the active slot file. That is
-the last piece — files are stamped one at a time as each occupies the slot,
-which is why every damaged file shares a single size and why the count grows
-with how much you skip around.
-
-**So APF does not treat the `0184` bridge address as raw payload.** Something in
-that path reads the word at *bridge address + 4* as a size and applies it to the
-file in the slot — the same shape as `0192`, where that pointer is a parameter
-*struct* APF parses. We have been handing it 32 bytes of settings where it
-expects a struct, and word 1 of our record lands in its size field.
-
-The earlier miss was not a refutation: one light session is simply not enough
-writes to trigger it.
-
-### What I got wrong, and made worse
-
-Wiring the EQ preset to `settings_mark_dirty()` meant **every Y press queued a
-write**. Flipping presets while skipping tracks turned an occasional write into
-a steady stream — which is why this event damaged five files where earlier ones
-damaged four over far longer use. A settings field attached to a control the
-user operates repeatedly is a different risk profile from one attached to
-volume, and I did not think about that when adding it.
-
-### Where this leaves it
-
-`0184` is unusable as we are using it, and the fault is ours rather than
-Analogue's: the command is documented as taking a bridge *source* address, but
-the observed behaviour is a parsed struct, and we never had a template to copy.
-`0192` was only ever solved by copying a real struct APF itself produced (via
-`0190`). There is no equivalent source for `0184`, so constructing one is
-exactly the guessing this project keeps being punished for.
-
-Writing stays off. `tools/settings_edit.py` is the persistence mechanism today.
-
-### RESOLVED BY ISOLATION: `nonvolatile` itself is what breaks it
-
-Steps 1 and 2, one variable apart, 2026-08-05. This is the clean answer the
-earlier flailing never produced.
-
-**Step 1 — slot at `0x20000000`, everything EXCEPT `nonvolatile`.** Booted
-normally. The on-screen diagnostic read `SET 53504D33 014B0801`: our magic and
-`{version 1, volume 75, palette 8, repeat ALL}`, exactly the file's first eight
-bytes. So **APF does load into a core-served bridge region, the address is
-right, `core_top.v`'s new read case is right, and the register file captures
-the bridge writes with the correct byte order.** All of that is proven.
-
-**Step 2 — added `"nonvolatile": true` and changed nothing else.** **Hung on
-BOOT.** Not on quit this time; it never reached the core.
-
-So the flag is the problem, not the address, not the register file, not the
-shell edit. One variable, one answer — which is what the decomposition was for,
-and it is worth noting it worked even though the result was negative.
-
-Ruled out on the way: the `dataslot_requestwrite` handshake, which some slot
-operations use. `core_top.v` already hardwires `_ack` and `_ok` to 1, so APF is
-not waiting on that.
-
-**The lead worth following if anyone returns to this.** Analogue's own wording:
-*"The size of the file is determined by the Dataslot ID/Size Table BRAM in the
-core."* That table is `mf_datatable` — the same BRAM this core uses as scratch,
-with the 0190 response at words 0..63, the 0192 parameter struct at 64..127 and,
-until recently, the settings record at 128+. If APF consults that table for a
-nonvolatile slot's size and finds our data there, hanging on boot is exactly
-what one would expect.
-
-**And it may explain the original `0184` corruption too** — a bogus size read
-out of a table we were writing into would account for a size field landing on
-the wrong file. Both faults would then have one cause: *this core treats APF's
-slot-size table as free space.*
-
-That is a hypothesis, not a finding. Testing it means learning the table's real
-layout and moving our scratch out of it, which is a bigger change than anything
-tried so far. Nothing should be built on it without that groundwork.
-
-### Attempt 2 detail — the earlier, confounded attempt
-
-Slot at `0x20000000`, `core_top.v` serving bridge reads there, rev 19. Result:
-
-1. APF rejected the slot outright — **"error in framework file id [4] size bad"**,
-   the core would not launch. Removing my `size_exact: 32` and setting
-   `parameters` to `0x0` got it booting.
-2. It then **did not load the settings** — the core came up on defaults, so
-   nothing ever reached the register file.
-3. And it **still hung on Quit.**
-
-Two independent failures, so the address was not the whole story. Reverted to
-rev 18.
-
-**Stop here.** Two hardware cycles have now been spent on changes derived from
-Analogue's documentation, and both failed in ways the documentation did not
-predict — the same documentation that misdescribed `0184`. There is no theory
-left worth spending someone's hardware time on.
-
-**If it is ever picked up again, decompose it first.** The two failures are
-confounded and must be separated before anything else is tried:
-
-- Declare the slot at `0x20000000` **without** `nonvolatile`, not deferload.
-  Does the core read its own settings back? That alone answers whether APF
-  loads into a core-served region and whether the register file captures the
-  bridge writes — with no shutdown path involved, so **no hang risk**.
-- Only if that passes is it worth adding `nonvolatile` and testing Quit.
-
-Doing it in that order costs the same number of cycles but each one answers a
-single question. Both attempts so far changed several things at once.
-
-### Attempt 2 detail — what was built (reverted, kept for reference)
-
-The first `nonvolatile` attempt hung the Pocket on Quit. The address was the
-mistake: `0xF8002200` is inside APF's own command region. Checking what real
-cores do settles it — agg23's Camera puts its SRAM backup slot at
-**`0x20000000`** and its ROM at `0x10000000`, and Analogue's own basicassets
-example uses `0x00000000`/`0x00400000`. **None uses `0xF8xxxxxx`.**
-
-So the slot now sits at `0x20000000`, and `core_top.v` serves bridge reads
-there. That is a **frozen-shell edit** and worth naming: the shell's read mux
-had `0xF8xxxxxx` as its only case, which means *no* core built on it could ever
-back a nonvolatile slot — APF has nowhere to read from at shutdown. Two lines,
-and nothing existing depends on the default case.
-
-Eight words live in `core_game.vh` as two arrays, split by direction so each has
-exactly one writer rather than the bridge (`clk_74a`) and CPU (`clk_sys`)
-sharing one: `set_load[]` bridge-written at boot and CPU-read, `set_save[]`
-CPU-written and bridge-read at exit. Firmware seeds the second from the first at
-startup, so an untouched session writes back what it read.
-
-`ramstyle = "logic"` on both is load-bearing — without it Quartus put them in
-an M10K and the count went 300 → 301 of 308.
-
-Compiled clean at rev 19: M10K back to 300/308, ALMs 30%, clk_sys slack
-+1.470 ns. **Not yet tested on hardware.**
-
-### TRIED AND FAILED: the first `nonvolatile` attempt hung the Pocket on Quit
-
-Built and tested 2026-08-04. The core ran normally, then **hung on Quit and
-needed a hard reboot**, and `settings.bin` was never written. Reverted.
-
-That is worse than not saving, and it went out on the strength of a
-documentation quote rather than a test — the same documentation that already
-misdescribed `0184` once. Reverted to: settings load from the card via `0180`,
-nothing writes, session-only.
-
-**Best guess at why, untested and not to be built on.** `0xF8xxxxxx` is APF's
-own *command* region, owned by `core_bridge_cmd`. Pointing a data slot's
-`address` into it likely makes APF's shutdown read-back collide with its own
-command interface. The datatable was chosen precisely because the frozen shell
-serves bridge reads **nowhere else** — so doing this properly needs a small
-bridge-readable RAM at an ordinary address, which means editing `core_top.v`.
-That is a real option and the only one left standing, but it is a frozen-shell
-change plus a Quartus round, and it must be proven on a card whose contents are
-expendable.
-
-No music was harmed by the attempt: all six `.mp3` files came back
-byte-for-byte identical.
-
-### The original reasoning for it (kept — the mechanism is still right)
-
-`0184` was never how cores are supposed to save. Analogue's `data.json`
-reference documents a top-level `nonvolatile` boolean — a sibling of
-`deferload`, not a `parameters` bit:
-
-> "If `true`, slot will be both loaded and unloaded on core exit."
-> "Slots marked as nonvolatile will be read out back onto the file they were
-> loaded from on SD... The data flush happens whenever the core is shutdown —
-> when a core is stopped with the root menu 'Quit' option, Pocket is turned
-> off, or Pocket is slept."
-
-**APF performs the write itself, from the core's memory, at shutdown.** The core
-issues no write command, so there is no parameter struct to get wrong and no
-size field to land on a song. It is the same class of mistake as the
-`deferload` one: a documented flag was sitting there and we built a runtime
-workaround instead. *Check the data.json field reference before inventing a
-runtime mechanism* — that lesson is already written down in
-[[apf-target-commands]] from the reload bug, and it applies again.
-
-**Why it should fit the frozen shell with no RTL change.** APF must read the
-data back over the bridge, and `core_top.v`'s read mux serves `0xF8xxxxxx`
-only — the datatable. But the datatable is both bridge-readable and
-bridge-writable (`32'hF8xx2xxx` in `core_bridge_cmd.v`). Point the settings
-slot's `address` at datatable word 128 (`0xF8002200`, where the record is
-already staged) and firmware reads and writes it with the existing
-`dt_read`/`dt_write`. Words 0..127 are the 0190/0192 structs; 128+ is free.
-
-Shape of the change:
-
-- `data.json`: settings slot gains `"nonvolatile": true` and
-  `"address": "0xF8002200"`, and drops `deferload` so it is actually loaded.
-- Firmware: `settings_load()` reads the datatable instead of issuing `0180`;
-  saving becomes a `dt_write` with no command at all. `settings_write_now()`
-  and every trace of `0184` are deleted.
-
-**Unverified.** Nothing above has been run on hardware. Test it on a scratch
-card holding only expendable `.mp3` files, with a snapshot either side — never
-on the real library. The cost of being wrong here is measured in destroyed
-music, and this fault has now proven it three times over.
-
-Known trade: settings persist at shutdown/sleep rather than immediately, so a
-battery pull loses the last change. That is how every save-data core behaves
-and is a fair price.
-
-Three times, every `.mp3` sharing the card with it came back reporting the same
-size — 21,037,825, then 21,365,505, then 20,382,465 — while `settings.bin` itself
-stayed 32 bytes.
-
-What the third event established, by measurement rather than inference:
-
-- **`chkdsk` passes.** This was never FAT corruption. The files really are that
-  size: they were *extended*, and the extension was recorded correctly.
-- **The originals are fine.** The card copies had been grown from good files, so
-  this is damage rather than a bad copy.
-- **Our magic is inside someone else's file.** `"SPM3"` (0x53504D33) appears in
-  one `.mp3` at offset 5,505,024 — a 128 KB cluster boundary immediately past
-  that file's real audio.
-- **The audio does not survive.** exFAT doesn't zero newly allocated clusters, so
-  the added region carries unrelated data; one file's audio no longer began with
-  a frame header. The earlier reading — "sizes wrong, audio intact" — is retired.
-
-Two mitigations were reasoned from that signature and **both failed**: deferring
-writes to paused/stopped, then isolating `settings.bin` in its own subdirectory.
-A third mitigation is not the answer.
-
-One recorded theory was **wrong** and is called out so it isn't rebuilt: four
-files landing on one size looks like a write to a fixed offset, where the size
-becomes offset + length. But `settings_store()` passes **offset 0, length 32**,
-and a write at offset 0 cannot extend a file to 20 MB. The fault lies either in
-what the target registers carry by the time APF reads them, or in APF's own
-handling — not in the offset we pass.
-
-### Mechanism found: the damaged size IS word 1 of the settings record
-
-Read as decimal for three events, and that is what hid it:
-
-```text
-21,037,825 = 0x01410301
-21,365,505 = 0x01460301
-20,382,465 = 0x01370301
-```
-
-The low 16 bits are identical all three times. Now decode them as the record's
-word 1, which `settings_write_now()` packs big-endian as
-`{SET_VERSION, volume, palette, repeat}`:
-
-| size | version | volume | palette | repeat |
-| --- | --- | --- | --- | --- |
-| `0x01410301` | 1 | 65 | 3 | 1 (ALL) |
-| `0x01460301` | 1 | 70 | 3 | 1 (ALL) |
-| `0x01370301` | 1 | 55 | 3 | 1 (ALL) |
-
-Every field is in range and every one is right. Version is constant because it
-is a constant; palette and repeat are constant because they had not been
-changed; **volume** is the one that moves — and 65 is the firmware default, and
-volume is both the most-changed setting and the thing that triggers a write.
-
-Confirmed independently against the card: the `settings.bin` on it right now
-holds volume 55, palette 3, repeat ALL — bytes 04..07 are `01 37 03 01` =
-`0x01370301`, byte-for-byte the third damaged size.
-
-So APF is not writing 32 bytes of payload at offset 0. Something in the write
-path reads the word at *bridge address + 4* and uses it as a **size**. Compare
-`0192`, where the bridge address points at a parameter *struct* APF parses
-("filename and flag/size") rather than at raw bytes; `0184`'s source pointer
-appears to be treated the same way, so our word 1 lands in a size field.
-
-This accounts for everything the earlier theories could not: why all four `.mp3`
-files share one size (each is stamped in turn while it occupies the MP3 slot),
-why `settings.bin` stays exactly 32 bytes (it is not the file being sized), why
-the low half never moved, and why a mitigation about *where* `settings.bin` lives
-changed nothing.
-
-### The first attempt MISSED — and why that was not a refutation
-
-An earlier, light session predicted `0x01370901` = 20,384,001 and saw nothing
-grow at all. Recorded here because the temptation was to treat one clean run as
-evidence the theory was dead, and it very nearly was treated that way.
-
-It was not a refutation. **A handful of writes is simply not enough to trigger
-it** — every damage event has followed heavy use. The right reading of a clean
-run was the one taken at the time: *necessary, not sufficient.* Had the theory
-been discarded on that miss, the confirming event above would have had to be
-re-derived from scratch.
-
-### Ruled out by inspection, so the measurement need not re-check it
-
-- **Slot ID.** `data.json` declares Settings as id 4; `SET_SLOT_ID` is 4.
-- **Slot writeability.** Analogue's `parameters` bitmap is bit 0 user-reloadable,
-  1 core-specific, 2 nonvolatile filename, **3 read-only**, 4 instance json,
-  5 init nonvolatile, 6 reset-on-load, 7 restart, 8 full reload, 9 persist
-  filename. Ours is `0x1` — bit 3 clear, and "must not be read-only" is the only
-  slot requirement 0184 documents.
-- **The parameters.** 0184 takes slot id `[15:0]`, slot offset, bridge *source*
-  address and length: the same four words as 0180, which works. The 48-bit offset
-  added in openFPGA 2.1 belongs to `0185`, a different command we never issue, so
-  there are no spare bits carrying a stray high half.
-- **The RTL.** `core_bridge_cmd`'s 0184 arm is structurally identical to its 0180
-  arm and latches `target_20/24/28/2C` at dequeue; `target_dataslot_id` is 16 bits
-  zero-extended.
-
-So the configuration is right and the command is issued correctly. It needs the
-measurement.
-
-### The test — built, not yet run, and now a prediction rather than a fishing trip
-
-`bash fw/build.sh probe` produces `mp3player.probe.rom`, in which **Select+Start
-performs exactly one 0184 and then latches**, painting the result code on screen.
-`tools/card_snapshot.py before | after | diff` records every file on the card —
-whole-file hashes, sizes in hex — and names the verdict.
-
-Because the mechanism above names a specific number, the run is now falsifiable:
-**write down word 1 of the record before pressing anything, and predict the
-damaged size.** With the card's current settings (volume 55, palette 3, repeat
-ALL) that is `0x01370301` = 20,382,465 bytes. A file landing on exactly that
-proves it; a file landing anywhere else refutes it and the mechanism goes back in
-the bin. Better still, set the volume to something distinctive first — one press
-of Up makes it 60 and the prediction becomes `0x013C0301` = 20,710,145.
-
-Full procedure, including why it must be run on an idle core with nothing loaded:
-**[tools/settings_probe.md](tools/settings_probe.md)**. It is destructive by
-design; expendable copies only.
-
-Details and the full reasoning live at the `SETTINGS_WRITE` definition in
-[fw/settings.inc](fw/settings.inc).
+**None open.** The settings-persistence blocker is resolved — see Fixed.
 
 # Enhancements
 
@@ -641,3 +307,61 @@ project has been bitten before by building on unconfirmed APF assumptions.
 
 If it ever becomes worth revisiting, the scratch-slot route is the one to prove
 first — it is the only one with no boot cost.
+
+## Settings persistence — SOLVED via interact.json (rev 20)
+
+The long one. Three mechanisms tried, three destroyed libraries along the way,
+and the answer turned out to be a mechanism that never touches a file.
+
+**What works now.** `interact.json` declares one `persist` variable per setting
+at a word of a register file at `0x20000000`. APF reads those words back from
+the core every frame, lets the user adjust them in Core Settings, writes them
+back, and saves them itself to
+`/Settings/HarpMudd.Mp3Player/Interact/_core/interact_persist.json`.
+
+**The core issues no write and no data slot is involved at any point** — which
+is exactly why it is safe. Both earlier mechanisms had a path to the user's
+`.mp3` files; this one has none.
+
+Because APF reads back *from* the core rather than only writing to it, changes
+made with the **buttons** persist too, not just menu ones.
+
+Confirmed on hardware 2026-08-05: settings survived a quit and relaunch, and
+**5 of 5 `.mp3` files byte-for-byte unchanged.**
+
+### The three attempts, and what each one taught
+
+**1. `0184` target write — destroyed three libraries.** Its bridge address is
+parsed as a struct whose second word APF reads as a SIZE, applied to whatever
+occupies the MP3 slot. Compounded by the root cause below.
+
+**2. `nonvolatile` data slot — hung the Pocket.** First at `0xF8002200`, inside
+APF's reserved command region; then at `0x20000000`, where it hung on boot with
+the flag as the only variable. Isolated by decomposition: the same config
+*without* `nonvolatile` booted and loaded fine, so the flag itself is
+incompatible with this shell. Never explained further.
+
+**3. `interact.json` — works.**
+
+### The root cause found on the way, worth more than the feature
+
+Reading APF's datatable off hardware before the core touched it showed
+`{slot_id, size}` pairs at stride 2 from word 0 — APF's **dataslot ID/size
+table**, which Analogue's docs mention but never locate. **Our `0190` response
+struct sat at word 0**, and APF writes 64 words there on every `getfile`, which
+`pl_open_name()` issues on every track change. So the first skip destroyed
+APF's record of every slot's size, and `0184` takes the size it writes from
+that table.
+
+Structs relocated to words 64 / 128 / 192. Verified: after a track change every
+slot id and fixed size is unchanged and slot 2's size correctly tracks the
+playing file. `Select+A` still shows that check.
+
+That fix was necessary but not sufficient — a later write still rounded two
+files up to whole clusters — which is why `0184` stays off for good.
+
+### Deliberate leftovers
+
+- `data.json` still declares slot 4 for `settings/settings.bin`. Nothing reads
+  it now. Harmless, but it is cruft and could be removed.
+- `tools/settings_edit.py` edits that dead file. Superseded by Core Settings.

@@ -1,4 +1,11 @@
-"""Read and edit settings.bin on the card, without a hex editor.
+"""SUPERSEDED 2026-08-05 -- kept only for reading an old settings.bin.
+
+Settings now persist through interact.json: APF stores them in
+/Settings/HarpMudd.Mp3Player/Interact/_core/interact_persist.json and they are
+changed from the Pocket's Core Settings menu, or with the buttons. The core no
+longer reads settings.bin at all, so editing it here changes nothing.
+
+Read and edit settings.bin on the card, without a hex editor.
 
     python tools/settings_edit.py                     # show what is stored
     python tools/settings_edit.py --volume 70 --accent SEAFOAM
