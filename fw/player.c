@@ -409,7 +409,7 @@ static char track_trk[8];
  * software divides every frame inside the decode budget. */
 #define VOL_MAX   100u
 #define VOL_STEP  5u
-static uint32_t paused, volume = 65u;    /* overridden by settings.bin if present */
+static uint32_t paused, volume = 65u;    /* overridden by the saved setting     */
 
 /* Fade-in after ANY audio discontinuity, in samples (~46 ms at 44.1 kHz).
  *
@@ -638,7 +638,7 @@ typedef struct {
     uint32_t y, scale, on, pos, next;
 } ui_marquee_t;
 static ui_marquee_t ui_mq_title, ui_mq_artist;
-/* Visualisations, cycled with X. The choice persists in settings.bin.
+/* Visualisations, cycled with X. The choice persists via interact.json.
  *
  * All three run off what the decoder already produces -- there are no frequency
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over

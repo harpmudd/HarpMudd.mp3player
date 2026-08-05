@@ -30,14 +30,6 @@
                 "extensions": [
                     "m3u"
                 ]
-            },
-            {
-                "name": "Settings",
-                "id": 4,
-                "required": false,
-                "parameters": "0x1",
-                "filename": "settings/settings.bin",
-                "deferload": true
             }
         ]
     }

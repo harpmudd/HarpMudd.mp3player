@@ -21,7 +21,7 @@ enhancement is.
 
 # Enhancements
 
-## PNG album art — MEASURED AND DEPRIORITISED
+## PNG album art — MEASURED AND DEPRIORITIZED
 
 **Measured 2026-08-04, as this entry asked: 19 `.mp3` files across the card,
 `Desktop\songs` and `Music`. Seven carry embedded art. All seven are
@@ -176,24 +176,13 @@ the names are already parsed into `pl_text[]`, so this is a UI job — a
 scrollable list, and a decision about whether it overlays the now-playing
 screen or replaces it.
 
-## Housekeeping — small, safe, and none of it urgent
+## Tune the EQ presets by ear
 
-Loose ends from the persistence work. Nothing here affects behaviour.
-
-- **`data.json` still declares slot 4** for `settings/settings.bin`. Nothing
-  reads it; settings live in the Pocket's own storage now. Removing it also
-  means deleting the shipped `settings.bin`. Low risk, but it changes the slot
-  table, so it wants one boot to confirm.
-- **`tools/settings_edit.py`** edits that dead file, and
-  **`tools/settings_probe.md`** documents a `0184` test for a command the core
-  no longer contains. Both are headed as superseded; they could simply go.
-- **British spellings** remain in this file (1) and `docs/EQ_DESIGN.md` (6).
-  The README and the on-screen text are US throughout; these are internal notes
-  and were left alone deliberately.
-- **The EQ presets have never been tuned by ear.** The curves are numerically
-  verified and the shapes match their names, but whether ROCK *sounds* like
-  rock is a listening call, not an engineering one. This is the only item on
-  the whole list that needs a person rather than a change.
+The only item on this list that needs a person rather than a change. The curves
+are numerically verified and each shape matches the name it carries, but nobody
+has judged whether ROCK actually *sounds* like rock. Expect to adjust the gains
+in `tools/gen_eq_coeffs.py` and regenerate; the engine itself should not need
+touching.
 
 ## Cleanup: retire what the click hunt left behind
 
@@ -269,7 +258,7 @@ open per entry on every playlist load (~1 s behind the splash for a 30-track
 list, worse for longer). Not worth a boot delay on every launch for a number that
 converges on its own. A third option, probing into a spare scratch slot so it
 could run during playback, was set aside because it depends on unverified APF
-behaviour (whether `0192` can open into an empty `deferload` slot) and this
+behavior (whether `0192` can open into an empty `deferload` slot) and this
 project has been bitten before by building on unconfirmed APF assumptions.
 
 If it ever becomes worth revisiting, the scratch-slot route is the one to prove
@@ -379,8 +368,10 @@ playing file. `Select+A` still shows that check.
 That fix was necessary but not sufficient — a later write still rounded two
 files up to whole clusters — which is why `0184` stays off for good.
 
-### Deliberate leftovers
+### Cleaned up afterwards
 
-- `data.json` still declares slot 4 for `settings/settings.bin`. Nothing reads
-  it now. Harmless, but it is cruft and could be removed.
-- `tools/settings_edit.py` edits that dead file. Superseded by Core Settings.
+Slot 4, the shipped `settings.bin`, `tools/settings_edit.py` and
+`tools/settings_probe.md` are all gone — nothing read them once APF took over
+the storing. `fw/settings.inc` lost 200 lines of forensics with them; that
+history lives in this file and in git rather than at the top of a source file
+that no longer does any of it.

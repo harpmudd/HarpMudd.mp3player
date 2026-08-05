@@ -189,13 +189,6 @@ def cmd_diff(args):
             expected.append("%s -- the firmware image, replaced by hand between "
                             "snapshots" % k)
             continue
-        if base == "settings.bin":
-            same = ea and eb and ea.get("size") == eb.get("size")
-            expected.append("%s -- the write TARGET; %s"
-                            % (k, "rewritten at the same size, which is exactly "
-                                  "right" if same else "SIZE CHANGED, which is not"))
-            if same:
-                continue
         if ea is None:
             print("ADDED    %s  %s" % (k, report_size(eb.get("size", 0))))
             changed += 1

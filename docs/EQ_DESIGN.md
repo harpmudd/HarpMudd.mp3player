@@ -1,6 +1,6 @@
 # Preset EQ — design outline
 
-How a preset equaliser would fit this core. Written before any code so the
+How a preset equalizer would fit this core. Written before any code so the
 decisions that are awkward to reverse — where it sits, what rate it runs at, what
 it is allowed to consume — are settled on paper.
 
@@ -151,7 +151,7 @@ wanted.
   notice on hardware. 16 is used, for two bits of margin on a threshold with a
   cliff in it. Sixteen fractional bits plus the headroom needs 33 bits of state
   against a worst case measured with full-scale sines parked on each band
-  centre, so **32 bits cannot hold both** — 36 leaves 18 dB above the worst
+  center, so **32 bits cannot hold both** — 36 leaves 18 dB above the worst
   observed.
 - **Accumulator: 58 bits.** The original 40 predates fixing the state width and
   cannot be right: an 18-bit coefficient times a 36-bit state is a 54-bit
@@ -212,7 +212,7 @@ as well would put the same word on screen twice at once.
 Playback is not interrupted: the filter is in the RTL and the audio never stops
 flowing, so a preset change is seamless in a way a track change can never be.
 
-The name is dimmed on `FLAT` and drawn in the accent colour otherwise — the same
+The name is dimmed on `FLAT` and drawn in the accent color otherwise — the same
 "off but still visible" treatment the repeat and shuffle icons use. The region is
 cleared to the width of the WIDEST name (`CLASSICAL`, 101 px) rather than the
 current one, or switching to `POP` would leave the tail of the previous preset
@@ -231,7 +231,7 @@ reviving it is a one-line change rather than a re-derivation. The ASCII preview
 in the generator still renders it too.
 
 Worth keeping from the attempt: the shapes read clearly at the meter's real
-36x72 geometry, and drawing bars from the CENTRE line rather than filled from
+36x72 geometry, and drawing bars from the CENTER line rather than filled from
 the bottom is what made them legible — filled bars bury the shape under a solid
 mass.
 
@@ -301,7 +301,7 @@ for it so that change does not become a rework.
 ### The honest current-state caveat
 
 `SETTINGS_WRITE` is 0, so **the EQ choice would reset to `FLAT` on every
-relaunch**, exactly as volume and accent colour do now. The settings byte should
+relaunch**, exactly as volume and accent color do now. The settings byte should
 be added regardless — the record is versioned and the field is free — but the
 README must not describe EQ as remembered until the write blocker is resolved.
 
@@ -313,7 +313,7 @@ One new register, decoded beside `R_PCM_RATE` in `mp3_soc.v`:
     R_EQ    write: preset index (0 = flat/bypass)
 ```
 
-Firmware side mirrors the accent colour exactly, which was just built and is a
+Firmware side mirrors the accent color exactly, which was just built and is a
 good template:
 
 - a preset-name table with a `_Static_assert` tying its length to the preset count

@@ -25,8 +25,8 @@ They can live anywhere on the card, but keeping them there puts them next to
 the core and makes them quick to find in the file browser.
 
 `mp3player.rom` in that folder is the firmware — the core won't start without
-it. Your settings are kept by the Pocket, not in that folder, so there is
-nothing else to copy or back up.
+it. That and your music are the only things that belong there; your settings
+are kept by the Pocket itself, so there is nothing else to copy or back up.
 
 ## Playing
 
