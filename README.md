@@ -2,15 +2,14 @@
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
 decodes and plays it straight off the SD card, with album art, ID3 tags, nine
-switchable meters and a progress bar.
+switchable meters, an eight-preset equaliser and a progress bar.
 
 The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
 > **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, tags, album art, nine meters and the transport all work on real
-> hardware. Saving settings is **disabled** — it is implicated in filesystem
-> damage, see [Known limitations](#known-limitations). Not released yet.
+> repeat, tags, album art, nine meters, the equaliser, the transport and saved
+> settings all work on real hardware. Not released yet.
 
 ## Installing
 
@@ -26,8 +25,8 @@ They can live anywhere on the card, but keeping them there puts them next to
 the core and makes them quick to find in the file browser.
 
 `mp3player.rom` in that folder is the firmware — the core won't start without
-it. `settings/settings.bin` holds your volume, colour and playback modes; the
-core reads it at launch but does not currently write it.
+it. Your settings are kept by the Pocket, not in that folder, so there is
+nothing else to copy or back up.
 
 ## Playing
 
@@ -48,6 +47,8 @@ playlists at any time.
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (nine styles) |
 | **Select** + **X** | Cycle the meter backwards |
+| **Y** | Cycle the EQ preset (eight) |
+| **Select** + **Y** | Cycle the EQ preset backwards |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent colour (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
@@ -65,15 +66,42 @@ Left and Right do one thing tapped and another held, and both resolve on
 release, so a tap can never also trigger the hold. Select works the same way: a
 Select used as a modifier doesn't toggle the art panel.
 
-Volume, accent colour, repeat, shuffle, the meter style and the art panel all
-reset when the core restarts. They *can* be preset by editing
-`settings/settings.bin`, which the core reads at launch — but it no longer writes
-that file, so changes made with the controls last only for the session. See
-[Known limitations](#known-limitations) for why.
+Volume, accent colour, repeat, shuffle, the meter, the art panel and the EQ
+preset are all remembered between sessions. Change them with the controls, or
+from **Core Settings** in the Analogue menu — either way they persist, and the
+two stay in step.
+
+The Pocket stores them itself, so nothing is written to your music folder.
 
 Hiding the album art is a preference, not a per-track state: a track with no
 artwork hides the panel without forgetting you want it, so the next track that
 has some brings it back.
+
+## Equaliser
+
+**Y** cycles eight presets; **Select**+**Y** goes back. The current one is named
+in the mode row, dimmed on `FLAT`.
+
+| | |
+|---|---|
+| **FLAT** | true bypass — bit-identical to no EQ at all |
+| **BASS** | low shelf lift, gentle upper-mid dip |
+| **ROCK** | smile curve — lows and highs up, mids back |
+| **POP** | presence lift around 2–4 kHz |
+| **JAZZ** | warm lows, relaxed upper-mid |
+| **CLASSICAL** | near-flat with a slight high-shelf air lift |
+| **VOCAL** | mid forward, lows trimmed |
+| **TREBLE** | high shelf lift |
+
+It runs in the FPGA, not on the CPU: five cascaded biquads per channel on one
+time-multiplexed multiplier, using about 6% of the clocks available between
+samples. The decoder never knows it is there, so changing preset is seamless —
+no gap, no reload, and audible immediately even while paused.
+
+Presets are loudness-matched rather than peak-matched, so switching between them
+changes the tone without changing how loud the music seems. `FLAT` is a true
+bypass — a multiplexer, not a filter set to neutral — so with the EQ off you get
+exactly the audio you would get without it.
 
 ## Playlists
 
@@ -96,6 +124,10 @@ running — press the **Analogue** button and choose **Load Playlist**.
 Tracks advance automatically. **Repeat** decides what happens at the end of the
 list: off stops, *all* loops, *one* repeats the current track. **Shuffle** plays
 everything once before repeating any.
+
+A misspelled or missing filename costs you that one track and nothing else — the
+core steps over it and carries on, and says how many it skipped. The track count
+on screen counts what will actually play, not how many lines are in the file.
 
 ## What it shows
 
@@ -125,8 +157,8 @@ everything once before repeating any.
   None of them is a spectrum: the decoder doesn't expose frequency bins, so
   these show loudness, waveform and stereo rather than frequency content.
 - **Elapsed and total time**, with a progress bar.
-- **Repeat and shuffle indicators**, dimmed rather than hidden when off, and the
-  track position in the playlist when one is loaded.
+- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
+  **EQ preset name**, and the track position in the playlist when one is loaded.
 
 CBR and VBR MPEG-1 Layer III are supported at every standard bitrate and sample
 rate, mono or stereo.<br clear="right">
@@ -145,10 +177,24 @@ engine rather than writing pixels itself, keeping the interface out of the
 decoder's way.
 
 Reading files uses Analogue framework commands no core had driven before, for
-random reads, opening a file by name and writing one back. Making them work meant
-fixing a handshake bug — the "command finished" signal stays asserted until the
-*next* command starts, so a naive reader sees the previous command's completion
-and every read after the first returns nothing.
+random reads and for opening a file by name. Making them work meant fixing a
+handshake bug — the "command finished" signal stays asserted until the *next*
+command starts, so a naive reader sees the previous command's completion and
+every read after the first returns nothing.
+
+It also meant finding that the framework keeps its record of every data slot's
+size in the same small memory a core uses to talk to it, at the very start. This
+core had been writing its own scratch there, so the first track change destroyed
+that record — which is what corrupted `.mp3` files whenever settings were saved.
+The scratch now lives above it, and the core can check the table is intact at
+any time.
+
+The equaliser is FPGA logic rather than software, sitting between the audio
+queue and the DAC. Five biquads per channel share one multiplier, which fits in
+about 6% of the clocks between output samples, so it costs the decoder nothing.
+Its coefficients are generated and checked against a bit-exact model before
+anything is compiled, and the hardware is verified sample-for-sample against
+that model.
 
 Switching tracks in a playlist leans on the same path: the core asks the
 framework to describe the file already in the slot, then hands that description
@@ -161,19 +207,20 @@ back with one path component changed. Nothing about the layout is assumed.
   nearly all of them, approximate for a VBR file whose encoder wrote no header.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 low-sample-rate files and Layer I/II
   are not handled.
-- **JPEG album art only.** PNG cover art is detected and skipped — see
-  [ROADMAP.md](ROADMAP.md), where it is the first item.
+- **JPEG album art only.** PNG cover art is detected and skipped rather than
+  shown wrong. Worth doing if PNG covers turn out to be common; a scan of a real
+  library found none, so it is not near the top of
+  [ROADMAP.md](ROADMAP.md).
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
-- **Settings are not saved.** The core reads `settings/settings.bin` at launch
-  but writes nothing to the card. Writing has been disabled because it is
-  implicated in filesystem damage: on three occasions every `.mp3` sharing the
-  card with it came back with the same wrong size, and on the third the files'
-  cluster chains ran on into unrelated data. The write is the only thing this
-  core ever sent to the card, and it stays off until the mechanism is understood
-  — a music player that might damage a library is not worth a convenience.
-  Tracked in [ROADMAP.md](ROADMAP.md).
+- **The core never writes to your card.** Not a limitation so much as a
+  deliberate property, and worth stating plainly: settings are stored by the
+  Pocket itself, and nothing this core does touches your music folder. An
+  earlier version saved settings by writing a file, and that write damaged
+  `.mp3` files three times before the cause was found — the core was
+  overwriting the framework's own record of every file's size. Both are fixed,
+  and the write is gone entirely rather than repaired.
 
 ## Credits
 
@@ -197,6 +244,9 @@ from the source file's own copyright header.
   ([richgel999](https://github.com/richgel999)) (public domain).
 - **SDRAM controller and i2s audio bridge** — Adam Gastineau
   ([agg23](https://github.com/agg23)) (MIT).
+- **[Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/)** — Robert
+  Bristow-Johnson. The equaliser's shelf and peaking filter formulas are his;
+  the coefficients here are generated from them.
 - **[openFPGA framework](https://www.analogue.co/developer)** —
   [Analogue](https://www.analogue.co).
 - **[Inter typeface](https://rsms.me/inter/)** — Rasmus Andersson
