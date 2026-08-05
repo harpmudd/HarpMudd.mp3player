@@ -595,6 +595,7 @@ static uint32_t ui_pal_idx;
 static char     ui_toast[24];
 static uint32_t ui_toast_t0;               /* 0 = inactive */
 static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone */
+static uint32_t ui_toast_end;              /* x the last toast draw reached    */
 #define UI_TRACK   0x18E3u   /* unfilled part of the meter -- a visible track
                               * rather than bare background, so the meter reads
                               * as one object at any level */
@@ -2237,11 +2238,30 @@ static void ui_draw_dynamic(void)
             ui_toast_step = step;
             if (step >= UI_TOAST_STEPS) {
                 fb_rect(UI_MARGIN, UI_TOAST_Y, UI_INNER_W, UI_TOAST_H, tbg2);
-                ui_toast_t0 = 0;
+                ui_toast_t0  = 0;
+                ui_toast_end = UI_MARGIN;
             } else {
                 fb_set_color(ui_mix(UI_WHITE, tbg2, step, UI_TOAST_STEPS), tbg2);
-                fb_text_clipped(UI_MARGIN, UI_TOAST_Y, ui_toast,
-                                TS_1X, TS_1X, UI_INNER_W);
+                uint32_t end = fb_text_clipped(UI_MARGIN, UI_TOAST_Y, ui_toast,
+                                               TS_1X, TS_1X, UI_INNER_W);
+                /* Erase only the TAIL the previous message left behind.
+                 *
+                 * CHAR paints its own background, so a message replacing a
+                 * LONGER one only repaints the cells it covers and the old
+                 * ending stays on screen -- visible when flipping settings
+                 * faster than a toast fades. Clearing the whole line instead
+                 * would cost a rect on every one of the ten fade steps and
+                 * put an erase-then-draw on a single-buffered framebuffer,
+                 * which is what makes things flicker when scanout catches the
+                 * gap.
+                 *
+                 * fb_text_clipped returns where it stopped, so the leftover is
+                 * exactly [end, previous end). In the common case -- the same
+                 * string redrawn a shade dimmer -- end is unchanged and this
+                 * costs nothing. */
+                if (end < ui_toast_end)
+                    fb_rect(end, UI_TOAST_Y, ui_toast_end - end, UI_TOAST_H, tbg2);
+                ui_toast_end = end;
             }
         }
     }
