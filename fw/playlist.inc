@@ -38,8 +38,12 @@
  * response struct, so an overlap is a read-after-write on itself. The param
  * struct was originally at word 256 -- past the end of a 256-word RAM, so the
  * address wrapped and landed straight back on the response struct. */
-#define DT_RESP_W   0u      /* response struct  (APF writes) */
-#define DT_PARAM_W  64u     /* parameter struct (APF reads)  */
+/* MUST stay above APF's dataslot ID/size table, which occupies the START of
+ * this BRAM as {slot_id, size} pairs -- measured, see core_game.vh. The
+ * response struct used to sit at word 0 and APF overwrote the table with it on
+ * every 0190. */
+#define DT_RESP_W   64u     /* response struct  (APF writes) */
+#define DT_PARAM_W  128u    /* parameter struct (APF reads)  */
 #define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window */
 
 static inline void dt_write(uint32_t word, uint32_t val)

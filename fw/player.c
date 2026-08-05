@@ -1465,6 +1465,91 @@ static void ui_boot_clear(void)
     fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
 }
 
+static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist code */
+
+/* APF's datatable exactly as it stood before this core touched it. 1 KB, taken
+ * once at boot, because by the time anyone can press a button our own 0190 has
+ * already overwritten words 0..63. */
+static uint32_t dt_snap[256];
+
+static void dt_snapshot(void)
+{
+    for (uint32_t w = 0; w < 256u; w++) dt_snap[w] = dt_read(w);
+}
+
+/* APF's dataslot ID/size table, BOOT value against LIVE value.
+ *
+ * The table is {slot_id, size} pairs at stride 2 from word 0 -- measured, not
+ * assumed. Our 0190 response struct used to sit at word 0 and APF overwrote 64
+ * words there on every getfile, destroying the table on the first track change.
+ * The structs now live at words 64+.
+ *
+ * This screen is the verification: change track, then press Select+A. If BOOT
+ * and LIVE still agree, the table survived and the fix holds. If LIVE has
+ * turned into path characters, something is still writing over it.
+ */
+static void dt_dump_boot(void)
+{
+    fb_rect(0, 0, FB_W, FB_H, UI_BG);
+    fb_set_color(ui_accent, UI_BG);
+    fb_text_clipped(UI_MARGIN, 6u, "SLOT TABLE  boot / live", TS_1X, TS_1X,
+                    UI_INNER_W);
+
+    char b[44], *q;
+    uint32_t y = 26u;
+    int bad = 0;
+
+    for (uint32_t w = 0; w < 8u; w++) {
+        uint32_t live = dt_read(w);
+        if (live != dt_snap[w]) bad = 1;
+        q = b;
+        *q++ = 'w'; q = ui_dec(q, w);
+        while (q - b < 4) *q++ = ' ';
+        *q++ = ' ';
+        for (int sh = 28; sh >= 0; sh -= 4) {
+            uint32_t n = (dt_snap[w] >> sh) & 0xFu;
+            *q++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
+        }
+        *q++ = ' '; *q++ = (live == dt_snap[w]) ? '=' : '!'; *q++ = ' ';
+        for (int sh = 28; sh >= 0; sh -= 4) {
+            uint32_t n = (live >> sh) & 0xFu;
+            *q++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
+        }
+        *q = 0;
+        fb_set_color((live == dt_snap[w]) ? UI_WHITE : UI_RED, UI_BG);
+        fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
+        y += 17u;
+    }
+
+    y += 8u;
+    fb_set_color(bad ? UI_RED : ui_accent, UI_BG);
+    fb_text_clipped(UI_MARGIN, y, bad ? "TABLE CLOBBERED" : "TABLE INTACT",
+                    TS_1X, TS_1X, UI_INNER_W);
+    y += 22u;
+
+    /* Where our own structs live now, so the screen is self-describing. */
+    fb_set_color(UI_DIM, UI_BG);
+    fb_text_clipped(UI_MARGIN, y, "resp w64  param w128  set w192",
+                    TS_1X, TS_1X, UI_INNER_W);
+    y += 17u;
+
+    /* And the live words our structs occupy, to confirm they are where we
+     * think and not somewhere unexpected. */
+    q = b;
+    const char *t = "w64 "; while (*t) *q++ = *t++;
+    for (int sh = 28; sh >= 0; sh -= 4) {
+        uint32_t n = (dt_read(64u) >> sh) & 0xFu;
+        *q++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
+    }
+    t = "  w128 "; while (*t) *q++ = *t++;
+    for (int sh = 28; sh >= 0; sh -= 4) {
+        uint32_t n = (dt_read(128u) >> sh) & 0xFu;
+        *q++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
+    }
+    *q = 0;
+    fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
+}
+
 static void ui_idle_screen(const char *reason)
 {
     ui_splash();
@@ -2342,6 +2427,7 @@ static short pcm[MAX_NCHAN * MAX_NGRAN * MAX_NSAMP];
 static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
 static uint32_t pl_reload_pending;       /* user picked a different .m3u       */
 static uint32_t pl_dump_req;             /* Select+B: show the 0190 struct     */
+static uint32_t dt_dump_req;             /* Select+A: show the boot datatable  */
 static uint32_t ui_dump_mode;            /* dump screen is up; drawing paused  */
 
 static void poll_input(void)
@@ -2360,8 +2446,13 @@ static void poll_input(void)
      * nothing, which is what separates it from pause: stop is a state you
      * leave with play, not a toggle. Stopping also returns to 0:00. */
     if (edge & KEY_A) {
-        paused ^= 1u;
-        if (!(paused & 1u)) stopped = 0;      /* playing is never "stopped" */
+        /* Select+A shows the boot datatable snapshot, mirroring Select+B for
+         * the 0190 struct. Plain A still plays/pauses. */
+        if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
+        else {
+            paused ^= 1u;
+            if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
+        }
     }
     if (edge & KEY_X) {
         /* Select+X steps BACK. Nine modes on one button is a lot of taps to
@@ -3402,6 +3493,24 @@ int main(void)
 
     vol_apply();
 
+    /* ---- DIAGNOSTIC: dump APF's datatable, hold SELECT at boot ----
+     *
+     * Analogue's docs say a slot's size comes from "the Dataslot ID/Size Table
+     * BRAM in the core" and that 0xF8xxxxxx is reserved for framework
+     * communication -- but they never give the table's layout. This core has
+     * been using that same BRAM as scratch (0190 response at words 0..63, 0192
+     * parameters at 64..127, settings at 128+), which is the leading suspect
+     * for both the 0184 corruption and the nonvolatile boot hang.
+     *
+     * So read it before anything of ours touches it. MUST run before
+     * settings_load() and pl_load(): the first 0190 overwrites words 0..63.
+     *
+     * SNAPSHOT here, VIEW later. Gating this on a held button did not work:
+     * it runs microseconds after the CPU leaves reset, before the Pocket has
+     * delivered any controller state, so the read was always 0. The capture
+     * has to happen now; the viewing does not. Select+A shows it. */
+    dt_snapshot();
+
     /* Settings FIRST, so the splash is drawn in the accent the user actually
      * chose. It only reads a slot -- nothing on screen depends on it -- and
      * painting before it meant the very first thing shown was always the
@@ -3531,6 +3640,14 @@ int main(void)
 
         /* Select+B: freeze on the raw 0190 struct. Press again to resume;
          * decoding continues throughout, only drawing is suspended. */
+        if (dt_dump_req) {
+            dt_dump_req = 0;
+            ui_dump_mode ^= 1u;
+            if (ui_dump_mode) dt_dump_boot();
+            else              ui_draw_chrome();
+            continue;
+        }
+
         if (pl_dump_req) {
             pl_dump_req = 0;
             ui_dump_mode ^= 1u;

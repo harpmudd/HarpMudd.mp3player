@@ -204,8 +204,29 @@ assign datatable_data = soc_dt_wdata;
 // at word 0. They must not overlap: 0192's parameters are built FROM a 0190
 // response, so one clobbering the other is a read-after-write on itself.
 // Response occupies words 0..63; parameters start at word 64.
-assign target_buffer_resp_struct  = 32'hF8002000;   // word  0 -- APF writes
-assign target_buffer_param_struct = 32'hF8002100;   // word 64 -- APF reads
+// MEASURED 2026-08-05, not assumed. A boot-time dump of this BRAM before the
+// core touched it read:
+//
+//   w0=1 w1=0x1CB40(117568)  w2=2 w3=0        w4=3 w5=0x395(917)  w6=4 w7=0x20(32)
+//
+// which is APF's DATASLOT ID/SIZE TABLE -- {slot_id, size} pairs at stride 2 --
+// matching mp3player.rom, the empty MP3 slot, playlist.m3u and settings.bin
+// exactly. Analogue's docs say a slot's size "is determined by the Dataslot
+// ID/Size Table BRAM in the core"; this is that table.
+//
+// The response struct USED TO SIT AT WORD 0. APF writes 64 words there on every
+// 0190 getfile, and pl_open_name() issues one on every track change -- so the
+// first skip destroyed APF's record of every slot's size. That is the root of
+// the 0184 file corruption and the nonvolatile boot hang both.
+//
+// Everything now lives above word 63. data.json allows up to 32 slots, so the
+// table could in principle reach word 63; starting at 64 is safe for a full
+// complement. Words 224-226 also hold something APF writes (they decode as a
+// date and a time), so nothing goes near them either.
+//
+//   64..127  0190 response      128..191  0192 parameters      192..199 settings
+assign target_buffer_resp_struct  = 32'hF8002100;   // word  64
+assign target_buffer_param_struct = 32'hF8002200;   // word 128
 
 // -- 5. APF target-command bridge (clk_sys <-> clk_74a) -----------------------
 // STAGE 2 GOAL: no core in this workspace has ever driven these. 0192 hands off

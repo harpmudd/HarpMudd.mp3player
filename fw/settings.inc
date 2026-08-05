@@ -217,8 +217,8 @@
  *
  * Words 0..63 are the 0190 response, 64..127 the 0192 parameters; 128 is clear
  * of both. Byte offset 128*4 = 0x200, hence 0xF8002200. */
-#define SET_DT_W     128u
-#define SET_DT_ADDR  0xF8002200u
+#define SET_DT_W     192u
+#define SET_DT_ADDR  0xF8002300u
 
 /* The record is handled as BYTES, packed into datatable words big-endian --
  * the convention the bridge's byte swap already imposes, and the one
