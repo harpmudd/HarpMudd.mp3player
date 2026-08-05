@@ -66,7 +66,38 @@ exactly the guessing this project keeps being punished for.
 
 Writing stays off. `tools/settings_edit.py` is the persistence mechanism today.
 
-### Attempt 2 — `nonvolatile` at an ORDINARY address (built, untested)
+### Attempt 2 also FAILED — and worse than attempt 1
+
+Slot at `0x20000000`, `core_top.v` serving bridge reads there, rev 19. Result:
+
+1. APF rejected the slot outright — **"error in framework file id [4] size bad"**,
+   the core would not launch. Removing my `size_exact: 32` and setting
+   `parameters` to `0x0` got it booting.
+2. It then **did not load the settings** — the core came up on defaults, so
+   nothing ever reached the register file.
+3. And it **still hung on Quit.**
+
+Two independent failures, so the address was not the whole story. Reverted to
+rev 18.
+
+**Stop here.** Two hardware cycles have now been spent on changes derived from
+Analogue's documentation, and both failed in ways the documentation did not
+predict — the same documentation that misdescribed `0184`. There is no theory
+left worth spending someone's hardware time on.
+
+**If it is ever picked up again, decompose it first.** The two failures are
+confounded and must be separated before anything else is tried:
+
+- Declare the slot at `0x20000000` **without** `nonvolatile`, not deferload.
+  Does the core read its own settings back? That alone answers whether APF
+  loads into a core-served region and whether the register file captures the
+  bridge writes — with no shutdown path involved, so **no hang risk**.
+- Only if that passes is it worth adding `nonvolatile` and testing Quit.
+
+Doing it in that order costs the same number of cycles but each one answers a
+single question. Both attempts so far changed several things at once.
+
+### Attempt 2 detail — what was built (reverted, kept for reference)
 
 The first `nonvolatile` attempt hung the Pocket on Quit. The address was the
 mistake: `0xF8002200` is inside APF's own command region. Checking what real

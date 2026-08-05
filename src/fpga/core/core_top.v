@@ -293,23 +293,9 @@ core_bridge_cmd icb (
     .datatable_q               (datatable_q)
 );
 
-// A core cannot expose ANY of its own memory to a bridge read through this mux
-// as it originally stood -- 0xF8xxxxxx (core_bridge_cmd) was the only case. That
-// makes a `nonvolatile` data slot impossible for every core built on this shell,
-// because APF reads a nonvolatile slot's contents back over the bridge at
-// shutdown and there is nowhere for it to read from.
-//
-// 0x2xxxxxxx is added for exactly that. It is the address real cores use for a
-// save slot (agg23's SRAM backup sits there), and it is well clear of the
-// asset-load addresses (0x0, 0x00400000, 0x10000000) and of APF's command
-// region. Pointing a data slot INTO the command region is what hung the Pocket
-// on Quit -- see fw/settings.inc.
-wire [31:0] save_bridge_rd_data;
-
 always @(*) begin
     casex (bridge_addr)
         32'hF8xxxxxx: bridge_rd_data = cmd_bridge_rd_data;
-        32'h2xxxxxxx: bridge_rd_data = save_bridge_rd_data;
         default:      bridge_rd_data = 32'h0;
     endcase
 end

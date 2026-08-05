@@ -133,14 +133,7 @@ module mp3_soc #(
     output reg  [9:0]   dt_addr,
     output reg          dt_wren,
     output reg  [31:0]  dt_wdata,
-    input  wire [31:0]  dt_q,
-
-    // Nonvolatile settings, 8 words. APF loads set_rdata's array from
-    // settings.bin at boot and writes set_wdata's array back at shutdown.
-    output reg  [2:0]   set_idx,
-    output reg          set_wr,
-    output reg  [31:0]  set_wdata,
-    input  wire [31:0]  set_rdata
+    input  wire [31:0]  dt_q
 );
 
     // ---------------------------------------------------------------- CPU ---
@@ -361,8 +354,7 @@ module mp3_soc #(
                      R_FB_ADDR = 8'h48, R_FB_SIZE = 8'h4C, R_FB_COLOR= 8'h50,
                      R_FB_GO   = 8'h54, R_FB_STALL= 8'h58, R_SLOT_SZ = 8'h5C,
                      R_DT_ADDR = 8'h60, R_DT_DATA = 8'h64,
-                     R_EQ      = 8'h68, R_SET_IDX = 8'h6C,
-                     R_SET_DAT = 8'h70;
+                     R_EQ      = 8'h68;
 
     // Bitstream/firmware interlock. Firmware compares this against its own
     // expected value and refuses to run on a mismatch.
@@ -372,7 +364,7 @@ module mp3_soc #(
     // stale RTL. That has already happened three times here, each time looking
     // like a logic bug (dead peripheral, no audio, unresponsive buttons) rather
     // than what it was. BUMP THIS whenever the MMIO map changes.
-    localparam [31:0] CORE_VERSION = 32'h4D503313;   // "MP3" + rev 19 (nonvolatile settings)
+    localparam [31:0] CORE_VERSION = 32'h4D503312;   // "MP3" + rev 18 (preset EQ, R_EQ)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -433,7 +425,6 @@ module mp3_soc #(
         tgt_go      <= 1'b0;
         fb_cmd_push <= 1'b0;
         dt_wren     <= 1'b0;
-        set_wr      <= 1'b0;
 
         if (rst) begin
             status0 <= 32'd0; status1 <= 32'd0;
@@ -450,15 +441,12 @@ module mp3_soc #(
             // sound before firmware programs the real rate.
             pcm_rate <= 32'd3435974;   // 48 kHz at clk_sys = 60 MHz
             eq_preset <= 3'd0;         // FLAT: bypass until asked otherwise
-            set_idx <= 3'd0; set_wdata <= 32'd0;
         end else if (d_req & d_is_mmio & dWE) begin
             case (mmio_reg)
                 R_CONSOLE: begin con_char <= dDAT_MOSI[7:0]; con_wr <= 1'b1; end
                 R_AUDIO:   ;   /* handled by pcm_push -> pcm_fifo */
                 R_PCM_RATE: pcm_rate <= dDAT_MOSI;
                 R_EQ:       eq_preset <= dDAT_MOSI[2:0];
-                R_SET_IDX:  set_idx   <= dDAT_MOSI[2:0];
-                R_SET_DAT:  begin set_wdata <= dDAT_MOSI; set_wr <= 1'b1; end
                 R_PCM_ST:  ;   /* handled by pcm_flush -> pcm_fifo, above */
                 R_STAT0:   status0 <= dDAT_MOSI;
                 R_STAT1:   status1 <= dDAT_MOSI;
@@ -517,7 +505,6 @@ module mp3_soc #(
             R_FB_GO:   mmio_rdata = {31'd0, fb_cmd_full};
             R_FB_STALL: mmio_rdata = fb_stall_ctr;
             R_EQ:      mmio_rdata = {29'd0, eq_preset};
-            R_SET_DAT: mmio_rdata = set_rdata;
             R_STAT0:   mmio_rdata = status0;
             R_STAT1:   mmio_rdata = status1;
             R_STAT2:   mmio_rdata = status2;

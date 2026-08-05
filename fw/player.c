@@ -50,8 +50,6 @@
 #define R_DT_ADDR   0x80000060u   /* W: datatable word address                  */
 #define R_DT_DATA   0x80000064u   /* R/W: datatable word at that address        */
 #define R_EQ        0x80000068u   /* R/W: EQ preset index, 0 = FLAT (bypass)    */
-#define R_SET_IDX   0x8000006Cu   /* W:   nonvolatile settings word index, 0..7 */
-#define R_SET_DAT   0x80000070u   /* R:   loaded word   W: word to save         */
 
 /* Target command selector, written to R_TGT_GO bits [1:0]. */
 #define TGT_READ     0u   /* 0180 */
@@ -138,7 +136,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503313u   /* rev 19: nonvolatile settings      */
+#define EXPECT_VERSION 0x4D503312u   /* rev 18: preset EQ (R_EQ)          */
 
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */
@@ -3409,11 +3407,6 @@ int main(void)
      * painting before it meant the very first thing shown was always the
      * default orange regardless of what had been saved. */
     settings_load();
-    /* Seed the save array from whatever was loaded, so a session that changes
-     * nothing writes back exactly what it read rather than zeros. APF flushes
-     * this array to settings.bin at quit/power-off/sleep whether we touched it
-     * or not. */
-    settings_store();
 
     /* Something deliberate on screen BEFORE the slow work -- reading the
      * playlist, opening a track, decoding cover art. Previously the first
