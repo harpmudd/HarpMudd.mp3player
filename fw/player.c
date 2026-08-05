@@ -780,6 +780,89 @@ static uint16_t ui_mix(uint16_t a, uint16_t b, uint32_t t, uint32_t n)
     return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
+/* Top of the background ramp, tinted toward the user's accent. Recomputed
+ * whenever the accent changes; the bottom stays black. */
+static uint16_t ui_grad_top_c = UI_GRAD_TOP;
+
+/* Luma the tinted top is normalised to. The ramp used to be a fixed neutral
+ * graphite at luma 35, and at that brightness RGB565 has almost no room for
+ * hue: measured over the twelve accents, CREAM quantises to exactly the old
+ * neutral and several others land within one level of it, so a tint would have
+ * been invisible on half the palette. 45 buys enough levels to tell them apart
+ * while keeping the background far below the white type it sits under. */
+#define UI_GRAD_LUMA 45u
+
+/* Accent -> a dark tinted ramp top. Normalising to a FIXED luma rather than
+ * scaling the accent directly is what keeps this safe: every colour lands at
+ * the same brightness, so the contrast the text was tuned against does not move
+ * when the user cycles the palette, and no accent can produce a background that
+ * competes with the type. Then pulled halfway to neutral, because a full
+ * saturation cast is what made an earlier coloured ramp read as murky behind
+ * the card -- this should say "tinted", not "coloured". */
+static void ui_grad_set(uint16_t accent)
+{
+    uint32_t r = ((accent >> 11) & 0x1Fu) * 255u / 31u;
+    uint32_t g = ((accent >> 5)  & 0x3Fu) * 255u / 63u;
+    uint32_t b = (accent & 0x1Fu) * 255u / 31u;
+
+    uint32_t l = (2126u * r + 7152u * g + 722u * b) / 10000u;
+    if (!l) l = 1u;
+    /* Rounded, not truncated. Flooring here cost up to a level of green on half
+     * the palette, which at this brightness is a visible fraction of the whole
+     * tint -- and made the built colours differ from the ones that were
+     * reviewed in tools/gradient_preview.py. */
+    r = (r * UI_GRAD_LUMA + l / 2u) / l;
+    g = (g * UI_GRAD_LUMA + l / 2u) / l;
+    b = (b * UI_GRAD_LUMA + l / 2u) / l;
+    r = (r + UI_GRAD_LUMA + 1u) / 2u;     /* half-saturated */
+    g = (g + UI_GRAD_LUMA + 1u) / 2u;
+    b = (b + UI_GRAD_LUMA + 1u) / 2u;
+    if (r > 255u) r = 255u;
+    if (g > 255u) g = 255u;
+    if (b > 255u) b = 255u;
+
+    ui_grad_top_c = (uint16_t)(((r * 31u + 127u) / 255u) << 11 |
+                               ((g * 63u + 127u) / 255u) << 5  |
+                               ((b * 31u + 127u) / 255u));
+}
+
+/* THE colour of the background at row y. Every consumer must come through here
+ * -- the ramp is dithered, so anything that reconstructs a background colour
+ * by its own arithmetic will disagree with what was actually drawn and leave a
+ * patch. There were nine such call sites before this existed.
+ *
+ * Why dither at all: 40 bands between the old top and black collapse to
+ * THIRTEEN distinct RGB565 colours, each holding for ~28 rows -- ~111 panel
+ * rows once the Pocket's 4x integer scale is applied, which is the visible
+ * banding. Drawing more bands changes nothing, because the colour space has no
+ * values in between. Alternating adjacent levels row to row lands the eye on
+ * intermediate colours RGB565 cannot name. The cost is fine horizontal texture
+ * at one framebuffer row -- 4 panel rows, ~2 arcminutes at arm's length against
+ * a band's ~110 -- so it should fuse where a band edge cannot.
+ *
+ * Text is the one place this is imperfect: CHAR paints its own background in a
+ * single colour, so a glyph cell gets one row's colour for all 16 of its rows.
+ * The mismatch is at most one level, which is the same error the old band
+ * boundaries already made when a glyph straddled one. */
+static uint16_t ui_grad_at(uint32_t y)
+{
+    static const uint8_t thr[4] = { 1u, 5u, 3u, 7u };   /* eighths, ordered */
+    if (y >= FB_H) y = FB_H - 1u;
+    uint32_t den = FB_H - 1u;
+    uint32_t rem = den - y;                 /* bottom is black: ideal = top*rem/den */
+    uint32_t t   = thr[y & 3u];
+    uint32_t lv[3] = { (uint32_t)((ui_grad_top_c >> 11) & 0x1Fu),
+                       (uint32_t)((ui_grad_top_c >> 5)  & 0x3Fu),
+                       (uint32_t)(ui_grad_top_c & 0x1Fu) };
+    for (uint32_t k = 0; k < 3u; k++) {
+        uint32_t num  = lv[k] * rem;
+        uint32_t base = num / den;
+        if ((num - base * den) * 8u > t * den) base++;
+        lv[k] = base;
+    }
+    return (uint16_t)((lv[0] << 11) | (lv[1] << 5) | lv[2]);
+}
+
 /* Rounded rect. The engine has no corner primitive, so the corners are cut
  * back out afterwards with the GRADIENT's local colour at each row -- a flat
  * background colour would leave four visible notches against the ramp. r rows
@@ -796,10 +879,8 @@ static void fb_round_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
         while ((inner + 1u) * (inner + 1u) + dy * dy <= r * r) inner++;
         uint32_t cut = r - inner;
         if (!cut) continue;
-        uint16_t top = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              (y + i) * UI_BANDS / FB_H, UI_BANDS);
-        uint16_t bot = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              (y + h - 1u - i) * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t top = ui_grad_at(y + i);
+        uint16_t bot = ui_grad_at(y + h - 1u - i);
         fb_rect(x, y + i, cut, 1, top);
         fb_rect(x + w - cut, y + i, cut, 1, top);
         fb_rect(x, y + h - 1u - i, cut, 1, bot);
@@ -820,15 +901,8 @@ static void ui_art_bg_range(uint32_t x, uint32_t w)
 {
     if (!w || x >= FB_W) return;
     if (x + w > FB_W) w = FB_W - x;
-    uint32_t band = (FB_H + UI_BANDS - 1u) / UI_BANDS;
-    for (uint32_t i = 0; i < UI_BANDS; i++) {
-        uint32_t y = i * band;
-        if (y + band <= ART_Y || y >= ART_Y + ART_H) continue;
-        uint32_t y0 = y > ART_Y ? y : ART_Y;
-        uint32_t y1 = (y + band < ART_Y + ART_H) ? (y + band) : (ART_Y + ART_H);
-        fb_rect(x, y0, w, y1 - y0,
-                ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, i, UI_BANDS));
-    }
+    for (uint32_t y = ART_Y; y < ART_Y + ART_H && y < FB_H; y++)
+        fb_rect(x, y, w, 1, ui_grad_at(y));
 }
 
 /* Blit the stash to the current position, clipped at the right edge. The panel
@@ -849,15 +923,14 @@ static void ui_art_draw(void)
     fb_copy(0, ART_STASH_Y, art_x, ART_Y, w, ART_H);
 }
 
+/* One rect per ROW, not per band. 360 commands against 40 -- affordable
+ * because this is a repaint, never a per-frame path, and the SDRAM work is
+ * identical either way since the pixel count does not change. Per-row is what
+ * lets ui_grad_at() dither at all. */
 static void ui_gradient(void)
 {
-    uint32_t band = (FB_H + UI_BANDS - 1u) / UI_BANDS;
-    for (uint32_t i = 0; i < UI_BANDS; i++) {
-        uint32_t y = i * band;
-        uint32_t h = (y + band > FB_H) ? (FB_H - y) : band;
-        if (!h) break;
-        fb_rect(0, y, FB_W, h, ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, i, UI_BANDS));
-    }
+    for (uint32_t y = 0; y < FB_H; y++)
+        fb_rect(0, y, FB_W, 1, ui_grad_at(y));
 }
 
 static void ui_toast_set(const char *msg, uint32_t n, const char *suffix)
@@ -962,10 +1035,8 @@ static void ui_art_round(void)
         while ((inner + 1u) * (inner + 1u) + dy * dy <= r * r) inner++;
         uint32_t cut = r - inner;
         if (!cut) continue;
-        uint16_t top = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              (ART_Y + i) * UI_BANDS / FB_H, UI_BANDS);
-        uint16_t bot = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              (ART_Y + ART_H - 1u - i) * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t top = ui_grad_at(ART_Y + i);
+        uint16_t bot = ui_grad_at(ART_Y + ART_H - 1u - i);
         fb_rect(0,           ART_STASH_Y + i,              cut, 1, top);
         fb_rect(ART_W - cut, ART_STASH_Y + i,              cut, 1, top);
         fb_rect(0,           ART_STASH_Y + ART_H - 1u - i, cut, 1, bot);
@@ -1002,16 +1073,8 @@ static void ui_wave_clear(void)
      * that. */
     vu_face = 0;
 
-    uint32_t band = (FB_H + UI_BANDS - 1u) / UI_BANDS;
-    for (uint32_t i = 0; i < UI_BANDS; i++) {
-        uint32_t y = i * band;
-        if (y + band <= UI_WAVE_Y || y >= UI_WAVE_Y + UI_WAVE_H) continue;
-        uint32_t y0 = y > UI_WAVE_Y ? y : UI_WAVE_Y;
-        uint32_t y1 = (y + band < UI_WAVE_Y + UI_WAVE_H)
-                    ? (y + band) : (UI_WAVE_Y + UI_WAVE_H);
-        fb_rect(UI_MARGIN, y0, UI_INNER_W, y1 - y0,
-                ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, i, UI_BANDS));
-    }
+    for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
+        fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu; }
 }
 
@@ -1285,8 +1348,7 @@ static void poll_input(void);
 static void ui_splash(void)
 {
     ui_gradient();
-    uint16_t bg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, (FB_H / 2u) * UI_BANDS / FB_H,
-                         UI_BANDS);
+    uint16_t bg = ui_grad_at(FB_H / 2u);
     uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
     fb_set_color(ui_accent, bg);
     fb_text_clipped(UI_MARGIN, 120u, "MP3 PLAYER", sc, sc, FB_W - UI_MARGIN);
@@ -1306,10 +1368,8 @@ static void ui_splash_anim(void)
 {
     ui_gradient();
 
-    const uint32_t bed_y = UI_WAVE_Y * UI_BANDS / FB_H;
-    uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, bed_y, UI_BANDS);
-    uint16_t tbg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, 120u * UI_BANDS / FB_H,
-                          UI_BANDS);
+    uint16_t bed = ui_grad_at(UI_WAVE_Y);
+    uint16_t tbg = ui_grad_at(120u);
     uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
     uint32_t ww = ui_wave_w();
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
@@ -1421,7 +1481,7 @@ static uint32_t    ui_boot_next, ui_boot_t, ui_boot_x;
 
 static uint16_t ui_boot_bg(void)
 {
-    return ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, UI_BOOT_Y * UI_BANDS / FB_H, UI_BANDS);
+    return ui_grad_at(UI_BOOT_Y);
 }
 
 /* A 7x7 disc, one rect per row -- the way every other icon here is built,
@@ -1580,8 +1640,7 @@ static void ui_idle_screen(const char *reason)
 {
     ui_splash();
 
-    uint16_t bg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT, (FB_H / 2u) * UI_BANDS / FB_H,
-                         UI_BANDS);
+    uint16_t bg = ui_grad_at((FB_H / 2u));
     if (reason) {
         fb_set_color(UI_RED, bg);
         fb_text_clipped(UI_MARGIN, 150u, reason, TS_1X, TS_1X, FB_W - UI_MARGIN);
@@ -1643,6 +1702,19 @@ static void ui_draw_dynamic(void)
     if (ui_accent_changed) {
         ui_accent_changed = 0;
         ui_accent = ui_palette[ui_pal_idx];
+        /* The BACKGROUND is tinted from the accent now, so a colour change is
+         * no longer a matter of recolouring a few elements -- the whole screen
+         * is a different colour underneath them, and every cached element sits
+         * on it. Hence a full repaint here, where the explicit invalidations
+         * below were previously enough on their own.
+         *
+         * This is the one place the tint costs something: a repaint is ~360
+         * gradient rects plus the chrome, pushed while the decoder is not
+         * running. Colour is changed by a deliberate button press rather than
+         * continuously, so it should stay under the FIFO's reserve -- but this
+         * is the thing to listen for if a colour change ever ticks. */
+        ui_grad_set(ui_accent);
+        ui_draw_chrome();
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
         }
@@ -1685,8 +1757,7 @@ static void ui_draw_dynamic(void)
             if (wave_pk[i] > wave[i]) wave_pk[i]--;
 
         uint32_t ww  = ui_wave_w();
-        uint16_t bed = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              UI_WAVE_Y * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t bed = ui_grad_at(UI_WAVE_Y);
 
         /* ---- WATERFALL ----------------------------------------------------
          * Scroll the whole strip one pixel left with a single COPY, then draw
@@ -2095,8 +2166,7 @@ static void ui_draw_dynamic(void)
         if (total) q = ui_mmss(q, total);
         else { *q++ = '-'; *q++ = '-'; *q++ = ':'; *q++ = '-'; *q++ = '-'; }
         *q = 0;
-        uint16_t cbg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              UI_TIME_Y * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t cbg = ui_grad_at(UI_TIME_Y);
         /* Clear FIRST, then set the colour. fb_rect() writes the colour
          * registers (fg = bg = its fill), so setting the text colour before a
          * clear leaves fg == bg and the glyphs paint invisibly. */
@@ -2205,8 +2275,7 @@ static void ui_draw_dynamic(void)
          * and below, so redrawing only the bar would leave the old knob's
          * overhang behind as two floating stubs. */
         fb_rect(UI_MARGIN, UI_PROG_Y - 3u, UI_INNER_W, UI_PROG_H + 6u,
-                ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                       UI_PROG_Y * UI_BANDS / FB_H, UI_BANDS));
+                ui_grad_at(UI_PROG_Y));
         if (done) fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
         if (UI_INNER_W > done)
             fb_rect(UI_MARGIN + done, UI_PROG_Y, UI_INNER_W - done,
@@ -2227,8 +2296,7 @@ static void ui_draw_dynamic(void)
      * text. Redrawn only when the step changes, so a 10-step fade costs ten
      * repaints of one short line, not one per frame. */
     if (ui_toast_t0) {
-        uint16_t tbg2 = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                               UI_TOAST_Y * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t tbg2 = ui_grad_at(UI_TOAST_Y);
         uint32_t age  = cycles() - ui_toast_t0;
         uint32_t step = (age <= UI_TOAST_HOLD) ? 0u
                       : ((age - UI_TOAST_HOLD) * UI_TOAST_STEPS) / UI_TOAST_FADE;
@@ -2269,8 +2337,7 @@ static void ui_draw_dynamic(void)
     /* Transport state, in the gap to the right of the clock. Both strings are
      * the same length so one overwrites the other cleanly. */
     {
-        uint16_t tbg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              (UI_TIME_Y + 10u) * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t tbg = ui_grad_at((UI_TIME_Y + 10u));
         /* Left end of its own row. The arrows sit at a FIXED x derived from
          * the WIDER of the two words, so switching PLAYING <-> PAUSED cannot
          * shuffle them sideways. */
@@ -2417,8 +2484,7 @@ static void ui_draw_dynamic(void)
         *q++ = ' '; *q++ = 'F';
         q = ui_hex2(q, (uint8_t)cur_file_id);
         *q = 0;
-        uint16_t dbg = ui_mix(UI_GRAD_TOP, UI_GRAD_BOT,
-                              (FB_H - 24u) * UI_BANDS / FB_H, UI_BANDS);
+        uint16_t dbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), dbg);
         fb_set_color(UI_RED, dbg);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
@@ -2647,12 +2713,14 @@ static void poll_input(void)
          * be forgotten. ui_accent_changed still drives the invalidation work. */
         if (edge & KEY_R1) { ui_pal_idx = (ui_pal_idx + 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
+                             ui_grad_set(ui_accent);
                              ui_accent_changed = 1u;
                              ui_toast_set("COLOR: ", 0xFFFFFFFFu,
                                           ui_palette_name[ui_pal_idx]);
                              settings_mark_dirty(); }
         if (edge & KEY_L1) { ui_pal_idx = (ui_pal_idx + UI_PALETTE_N - 1u) % UI_PALETTE_N;
                              ui_accent = ui_palette[ui_pal_idx];
+                             ui_grad_set(ui_accent);
                              ui_accent_changed = 1u;
                              ui_toast_set("COLOR: ", 0xFFFFFFFFu,
                                           ui_palette_name[ui_pal_idx]);
@@ -3756,6 +3824,13 @@ int main(void)
      * painting before it meant the very first thing shown was always the
      * default orange regardless of what had been saved. */
     settings_load();
+
+    /* Derive the background tint ONCE, here, where ui_accent has reached its
+     * final value whether it was restored or left at the default. Doing it
+     * inside the restore instead would miss the default path entirely --
+     * settings_load() returns early when nothing has been saved -- and the
+     * first boot would show a saved-colour UI on the untinted ramp. */
+    ui_grad_set(ui_accent);
 
     /* Something deliberate on screen BEFORE the slow work -- reading the
      * playlist, opening a track, decoding cover art. Previously the first
