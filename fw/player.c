@@ -1501,7 +1501,15 @@ static void dt_dump_boot(void)
 
     for (uint32_t w = 0; w < 8u; w++) {
         uint32_t live = dt_read(w);
-        if (live != dt_snap[w]) bad = 1;
+        /* A size entry is ALLOWED to change: APF updates it when the slot's
+         * file changes, which is the whole point of the table. Slot 2 is the
+         * MP3 slot and moves on every track change -- flagging that as damage
+         * was wrong and reported a healthy table as clobbered.
+         *
+         * What must never move: the slot IDs (even words), and the sizes of
+         * the three files that are fixed for the session. */
+        int may_change = (w == 3u);          /* slot 2's size */
+        if (live != dt_snap[w] && !may_change) bad = 1;
         q = b;
         *q++ = 'w'; q = ui_dec(q, w);
         while (q - b < 4) *q++ = ' ';
@@ -1510,20 +1518,23 @@ static void dt_dump_boot(void)
             uint32_t n = (dt_snap[w] >> sh) & 0xFu;
             *q++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
         }
-        *q++ = ' '; *q++ = (live == dt_snap[w]) ? '=' : '!'; *q++ = ' ';
+        *q++ = ' ';
+        *q++ = (live == dt_snap[w]) ? '=' : (may_change ? '~' : '!');
+        *q++ = ' ';
         for (int sh = 28; sh >= 0; sh -= 4) {
             uint32_t n = (live >> sh) & 0xFu;
             *q++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
         }
         *q = 0;
-        fb_set_color((live == dt_snap[w]) ? UI_WHITE : UI_RED, UI_BG);
+        fb_set_color((live == dt_snap[w]) ? UI_WHITE
+                                          : (may_change ? UI_DIM : UI_RED), UI_BG);
         fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
         y += 17u;
     }
 
     y += 8u;
     fb_set_color(bad ? UI_RED : ui_accent, UI_BG);
-    fb_text_clipped(UI_MARGIN, y, bad ? "TABLE CLOBBERED" : "TABLE INTACT",
+    fb_text_clipped(UI_MARGIN, y, bad ? "TABLE CLOBBERED" : "TABLE INTACT  (~ = ok)",
                     TS_1X, TS_1X, UI_INNER_W);
     y += 22u;
 
