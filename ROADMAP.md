@@ -198,7 +198,7 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
-## Text rendered thin and hazy — FIXED, awaiting HW confirmation
+## Text rendered thin and hazy — FIXED, HW-confirmed 2026-08-05
 
 Reported as "the mp3 information could be in a sharper more crisp font". The
 typeface was not the problem. Two independent defects were, both of which made
@@ -238,6 +238,11 @@ compose path (`tools/font_preview.py`, `--focus` for the body-text case). Bold
 closes the counters in `0 b p`; Medium reads hazier on a dark background, which
 is the fault being fixed; 16px widens every glyph and would move layout. Those
 three change advances and carry layout risk the two correctness fixes do not.
+
+**Confirmed on hardware 2026-08-05.** The same build also carries the guard-band
+removal, and `docs/screenshot.png` now proves that one numerically rather than by
+eye: row 0 of a native 400×360 capture reads (33, 36, 33), the top of the ramp,
+where a guard band would have left pure black.
 
 **What this does NOT fix: the 2× title.** It is a magnified 16px master, and no
 blend or raster change makes that sharp. The only real fix is a natively-sized
