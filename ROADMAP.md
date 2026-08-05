@@ -198,6 +198,70 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Cover art soft, large covers invisible, tags missing — FIXED, HW-confirmed 2026-08-05
+
+Three faults in the same load path, all found by measuring the user's real
+library with `tools/library_check.py` rather than by reasoning about typical
+files. That tool now predicts what the core will do with a card before booting
+it, and its limits are read out of `fw/art.inc` so it cannot drift.
+
+**Art was always decoded at 1/8.** picojpeg's reduce mode yields one pixel per
+8x8 block, which is sharp for a big cover and useless for a small one: measured,
+300 px became 37x37 and 455 px became 56x56, both then MAGNIFIED to the 92 px
+panel. Mode is now chosen per image. The gate pays for itself — full decode
+costs an IDCT per block, so it is affordable only on small images, which are
+exactly the ones reduce mode fails; anything from 736 px up keeps the cheap
+path. Scaling is a box filter now, not a nearest-pixel pick.
+
+**Large covers were rejected outright.** `ART_MAX_BYTES` was 384 KB, commented as
+refusing the absurd, and was refusing the good art: a 1494x1497 cover is an
+847 KB frame. Symptom was a track with no art and nothing to say why. The cap
+never protected memory — the image streams through a window and is never held
+whole. Raised to 2 MB.
+
+**Tags behind artwork were unreachable.** Three tracks put APIC FIRST, with
+41 KB, 34 KB and 847 KB of picture ahead of every text frame. The in-memory
+parser stops at the first frame overrunning what is loaded, and the fallback
+caps at the 32 KB ring, so no amount of pulling more in could reach them.
+`id3_walk_collect()` walks the tag off the card, skipping a picture by
+arithmetic — cost scales with the NUMBER of frames, not the tag size, and a
+sliding 512-byte window keeps it to 3 reads. Runs only where the cheap path
+failed. Separately, UTF-16 text frames now decode instead of being refused.
+
+**Two bugs were caught by modelling before they reached hardware**, which is the
+part worth keeping. `tools/art_scale_model.py` found that accumulating into 92
+rows from a source shorter than 92 lets one MCU row span 23 accumulator slots
+against 20 — two rows silently adding into each other. And modelling the tag
+walk against real files found an off-by-one that put the next frame's first
+letter on the end of every walked title. Neither would have announced itself.
+
+**A latent bug surfaced on the way:** block offsets were `(by*bxn + bx)*64`,
+which agrees with picojpeg for H1V1/H2V1/H2V2 but not H1V2, where the second
+block is written to 128 (`picojpeg.c`: `copyY(0)`, `copyY(128)`).
+
+### The open item: loads are slower, and the cause is NOT what it looks like
+
+User's verdict: "a tad longer, but not unbearable". Accepted for now. The cause
+splits in two and it is worth not conflating them.
+
+Small covers (300-500 px, eight of the ten on the test card) read the SAME bytes
+as before — 15 to 41 KB — and are slower purely because of the IDCT. Buying that
+back means a scaled IDCT inside picojpeg: a 4x4 transform from the top-left
+coefficients gives half scale at roughly a quarter the cost, and a 455 px cover
+at half scale is still 227 px, comfortably above the panel. That is surgery on
+third-party code and should not be attempted on a hunch.
+
+The 847 KB cover is a different problem: it streams through a 4 KB buffer
+(`_tag_size` in `fw/link.ld`), so it costs **207 separate target reads**. Raising
+that buffer is a one-line change and should be the FIRST thing tried, but it
+needs confirming that a target read larger than 4 KB works — no core here has
+issued one, so it is unproven rather than safe.
+
+**Select+Start now shows the load breakdown** (head, size, art, prefill, total,
+in ms). Those phases have been measured since the click hunt and never
+displayed, so every question about a slow load was previously answered by
+estimating. Read them before touching either lever.
+
 ## Text rendered thin and hazy — FIXED, HW-confirmed 2026-08-05
 
 Reported as "the mp3 information could be in a sharper more crisp font". The
