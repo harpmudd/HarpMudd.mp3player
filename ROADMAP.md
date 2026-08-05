@@ -21,58 +21,6 @@ enhancement is.
 
 # Enhancements
 
-## Preset EQ — BUILT AND SHIPPED (rev 18)
-
-Eight presets on `Y`, `Select+Y` to reverse, the preset named in the mode row,
-choice persisted in the settings record. Coefficients generated and verified in
-python, the RTL checked bit-exact against that model over 576 samples on all 8
-presets and both channels, M10K unchanged at 300/308.
-
-Two things the design worried about, resolved by measurement rather than
-assumption:
-
-- **Preset changes do not click.** The design called for a ~4 ms duck and said
-  "do not ship it and hope". Extended hardware use produced no audible click, so
-  the duck is not built. See `docs/EQ_DESIGN.md`.
-- **The curve-over-the-meter display was built and rejected** by the user;
-  the mode row names the preset instead.
-
-Left undone: the presets are numerically correct but have never been tuned by
-ear. That is a listening pass, not an engineering one.
-
-The design notes below are kept for the reasoning.
-
-### Original design entry
-
-Worth doing, and the obvious implementation is the wrong one.
-
-**Not in firmware.** The free CPU budget is 8.7 M instr/s at worst case (36.4 M
-total at 60 MHz and 1.65 CPI, less the 27.7 M Helix needs for 320 kbps / 48 kHz).
-A 5-band stereo biquad at 44.1 kHz is 441,000 biquad evaluations a second, and a
-Direct Form I biquad on RV32 is ~15-20 instructions once loads, stores and
-saturation are counted — 6.6 to 8.8 M instr/s, i.e. essentially all of it. It
-would also be spending the exact budget that keeps the decoder fed, which is the
-one way to bring the audio tics back.
-
-**In the RTL it is nearly free.** Output is 48 kHz and clk_sys is 60 MHz, so there
-are ~1250 clocks per output sample. Twenty biquads (10 bands x 2 channels) at 5
-MACs each is ~100 MACs, which one pipelined multiplier retires in ~150 cycles —
-about 12% of the time available. Cost is one DSP block, a small coefficient ROM
-and 20 x 4 words of state. Zero CPU, and the decoder never knows it exists.
-
-Where it goes: between `pcm_fifo` and `sound_i2s`, which is already a clean
-16-bit stereo hand-off. Presets rather than per-band control keeps it to a ROM of
-coefficient sets and one selector.
-
-Two cautions. This is the first change in a long time that needs a **Quartus
-recompile** rather than a firmware rebuild, so budget a timing closure round.
-And generate the coefficients offline in python and paste the table in — a
-hand-written filter table is exactly the mistake that cost a hardware round on
-the VU needle's sine table.
-
-Full design outline, including the fixed-point formats, the 97%-full block RAM
-constraint and the verification plan: **[docs/EQ_DESIGN.md](docs/EQ_DESIGN.md)**.
-
 ## PNG album art — MEASURED AND DEPRIORITISED
 
 **Measured 2026-08-04, as this entry asked: 19 `.mp3` files across the card,
@@ -228,6 +176,25 @@ the names are already parsed into `pl_text[]`, so this is a UI job — a
 scrollable list, and a decision about whether it overlays the now-playing
 screen or replaces it.
 
+## Housekeeping — small, safe, and none of it urgent
+
+Loose ends from the persistence work. Nothing here affects behaviour.
+
+- **`data.json` still declares slot 4** for `settings/settings.bin`. Nothing
+  reads it; settings live in the Pocket's own storage now. Removing it also
+  means deleting the shipped `settings.bin`. Low risk, but it changes the slot
+  table, so it wants one boot to confirm.
+- **`tools/settings_edit.py`** edits that dead file, and
+  **`tools/settings_probe.md`** documents a `0184` test for a command the core
+  no longer contains. Both are headed as superseded; they could simply go.
+- **British spellings** remain in this file (1) and `docs/EQ_DESIGN.md` (6).
+  The README and the on-screen text are US throughout; these are internal notes
+  and were left alone deliberately.
+- **The EQ presets have never been tuned by ear.** The curves are numerically
+  verified and the shapes match their names, but whether ROCK *sounds* like
+  rock is a listening call, not an engineering one. This is the only item on
+  the whole list that needs a person rather than a change.
+
 ## Cleanup: retire what the click hunt left behind
 
 Fixing the track-change click took many attempts, and several mechanisms
@@ -307,6 +274,58 @@ project has been bitten before by building on unconfirmed APF assumptions.
 
 If it ever becomes worth revisiting, the scratch-slot route is the one to prove
 first — it is the only one with no boot cost.
+
+## Preset EQ — BUILT AND SHIPPED (rev 18)
+
+Eight presets on `Y`, `Select+Y` to reverse, the preset named in the mode row,
+choice persisted in the settings record. Coefficients generated and verified in
+python, the RTL checked bit-exact against that model over 576 samples on all 8
+presets and both channels, M10K unchanged at 300/308.
+
+Two things the design worried about, resolved by measurement rather than
+assumption:
+
+- **Preset changes do not click.** The design called for a ~4 ms duck and said
+  "do not ship it and hope". Extended hardware use produced no audible click, so
+  the duck is not built. See `docs/EQ_DESIGN.md`.
+- **The curve-over-the-meter display was built and rejected** by the user;
+  the mode row names the preset instead.
+
+Left undone: the presets are numerically correct but have never been tuned by
+ear. That is a listening pass, not an engineering one.
+
+The design notes below are kept for the reasoning.
+
+### Original design entry
+
+Worth doing, and the obvious implementation is the wrong one.
+
+**Not in firmware.** The free CPU budget is 8.7 M instr/s at worst case (36.4 M
+total at 60 MHz and 1.65 CPI, less the 27.7 M Helix needs for 320 kbps / 48 kHz).
+A 5-band stereo biquad at 44.1 kHz is 441,000 biquad evaluations a second, and a
+Direct Form I biquad on RV32 is ~15-20 instructions once loads, stores and
+saturation are counted — 6.6 to 8.8 M instr/s, i.e. essentially all of it. It
+would also be spending the exact budget that keeps the decoder fed, which is the
+one way to bring the audio tics back.
+
+**In the RTL it is nearly free.** Output is 48 kHz and clk_sys is 60 MHz, so there
+are ~1250 clocks per output sample. Twenty biquads (10 bands x 2 channels) at 5
+MACs each is ~100 MACs, which one pipelined multiplier retires in ~150 cycles —
+about 12% of the time available. Cost is one DSP block, a small coefficient ROM
+and 20 x 4 words of state. Zero CPU, and the decoder never knows it exists.
+
+Where it goes: between `pcm_fifo` and `sound_i2s`, which is already a clean
+16-bit stereo hand-off. Presets rather than per-band control keeps it to a ROM of
+coefficient sets and one selector.
+
+Two cautions. This is the first change in a long time that needs a **Quartus
+recompile** rather than a firmware rebuild, so budget a timing closure round.
+And generate the coefficients offline in python and paste the table in — a
+hand-written filter table is exactly the mistake that cost a hardware round on
+the VU needle's sine table.
+
+Full design outline, including the fixed-point formats, the 97%-full block RAM
+constraint and the verification plan: **[docs/EQ_DESIGN.md](docs/EQ_DESIGN.md)**.
 
 ## Settings persistence — SOLVED via interact.json (rev 20)
 
