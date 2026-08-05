@@ -1350,55 +1350,65 @@ static void poll_input(void);
 /* Gradient and title only. Shown while the first track loads, so the wait is a
  * deliberate-looking screen rather than a flash of instructions that is then
  * replaced -- which read as a glitch. */
-/* Splash composition. The elements were fine; the PLACEMENT was the problem --
- * a left-aligned title at UI_MARGIN with 120 empty rows above it and 89 below
- * reads as unplaced rather than composed, and 209 of 360 rows were carrying
- * nothing at all. Centred, with a rule to give the title something to sit on
- * and a footer to close the bottom.
+/* Splash composition: the PLAYER, with nothing loaded into it.
  *
- * The meter keeps UI_WAVE_Y so the settling animation is untouched -- it is the
- * best thing on this screen and nothing here needs to disturb it. */
-#define UI_SPL_TITLE_Y  72u
-#define UI_SPL_RULE_Y  118u
-#define UI_SPL_RULE_H    2u
-#define UI_SPL_SUM_Y   294u    /* library summary, once the playlist is read */
-#define UI_SPL_VER_Y   334u    /* footer */
+ * A centred title on an empty field was tried and rejected, and the reason is
+ * worth keeping: the player screen is a left-aligned card with a meter and a
+ * transport row, so a centred splash is a second visual language for the same
+ * product. Reusing the player's own skeleton -- same card geometry at the same
+ * UI_TITLE_Y, the meter where the meter always is, an info row where the
+ * transport sits, the progress bar on its own line -- means the boot screen and
+ * the player are one design rather than two that happen to ship together.
+ *
+ * It also fills the frame honestly. The old splash left 209 of 360 rows
+ * carrying nothing; here every band of the screen has the same job it has
+ * during playback. */
+/* Anchored to the BOTTOM of the card, not tucked under the title. The card is
+ * UI_CARD_H to match the player's, which carries four lines; the splash has
+ * two, so placing the version directly under the title leaves the lower half
+ * visibly empty and the card looks unfinished. Top and bottom anchored, the
+ * same space reads as deliberate. 14px inset mirrors the card's top inset. */
+#define UI_SPL_VER_Y    (UI_TITLE_Y - 14u + UI_CARD_H - 14u - 16u)
+#define UI_SPL_INFO_Y  262u    /* the transport row's line */
 
-/* Centred on the screen rather than against a column. Returns the x it used. */
-static uint32_t fb_text_centre(uint32_t y, const char *s, uint32_t scale)
+/* Card, title and version. Shared by the static splash and the animated one so
+ * they cannot drift -- they are the same screen, and previously each drew the
+ * title itself. `f/den` is the title's fade position; the card and version do
+ * not fade, because animating the frame draws the eye to the furniture. */
+static void ui_splash_card(uint32_t f, uint32_t den)
 {
-    uint32_t w = fb_text_width(s, scale);
-    uint32_t x = (w < FB_W) ? (FB_W - w) / 2u : 0u;
-    fb_text_clipped(x, y, s, scale, scale, FB_W - x);
-    return x;
+    /* Identical geometry to ui_draw_chrome()'s card, at full width since the
+     * splash has no art panel to make room for. */
+    fb_round_rect(UI_MARGIN - 8u, UI_TITLE_Y - 14u,
+                  UI_INNER_W + 16u, UI_CARD_H, 8u, UI_PANEL);
+
+    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
+    fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
+
+    fb_set_color(UI_DIM, UI_PANEL);
+    fb_text_clipped(UI_MARGIN, UI_SPL_VER_Y, "v" APP_VER, TS_1X, TS_1X,
+                    UI_INNER_W);
 }
 
-/* Title plus the rule under it, at a fade position f/den. Shared so the static
- * splash and the animated one cannot drift apart -- they are the same screen
- * and a user who sees both should not be able to tell where one ends. */
-static void ui_splash_title(uint16_t bg, uint32_t f, uint32_t den)
+/* Boot progress, on the player's own progress bar. Not decoration: until this
+ * existed the splash said nothing between "playlist read" and "music", so a
+ * slow load and a stuck one looked identical. Stages rather than a true
+ * fraction -- the work is a handful of discrete steps of very different
+ * lengths, and a smoothly interpolated lie would be worse than four honest
+ * jumps. */
+static void ui_splash_progress(uint32_t pct)
 {
-    uint32_t sc = fb_text_fit("MP3 PLAYER", FB_W - 2u * UI_MARGIN, TS_2X);
-    uint16_t fg = ui_mix(bg, ui_accent, f, den);
-    fb_set_color(fg, bg);
-    uint32_t x = fb_text_centre(UI_SPL_TITLE_Y, "MP3 PLAYER", sc);
-    /* The rule takes the TITLE's width, not an arbitrary one, so the two read
-     * as a single mark however the fitted scale lands. */
-    uint32_t w = fb_text_width("MP3 PLAYER", sc);
-    fb_rect(x, UI_SPL_RULE_Y, w, UI_SPL_RULE_H, fg);
-}
-
-static void ui_splash_version(void)
-{
-    fb_set_color(UI_DIM, ui_grad_at(UI_SPL_VER_Y));
-    fb_text_centre(UI_SPL_VER_Y, "v" APP_VER, TS_1X);
+    uint32_t done = (UI_INNER_W * pct) / 100u;
+    fb_rect(UI_MARGIN, UI_PROG_Y, UI_INNER_W, UI_PROG_H, UI_TRACK);
+    if (done) fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
 }
 
 static void ui_splash(void)
 {
     ui_gradient();
-    ui_splash_title(ui_grad_at(UI_SPL_TITLE_Y), 1u, 1u);
-    ui_splash_version();
+    ui_splash_card(1u, 1u);
+    ui_splash_progress(0);
 }
 
 /* Boot animation: a pulse sweeps the meter while the title fades up.
@@ -1416,13 +1426,11 @@ static void ui_splash_anim(void)
     ui_gradient();
 
     uint16_t bed = ui_grad_at(UI_WAVE_Y);
-    uint16_t tbg = ui_grad_at(UI_SPL_TITLE_Y);
     uint32_t ww = ui_wave_w();
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
 
-    /* The footer does not fade -- it is not part of the reveal, and animating
-     * it would pull the eye to the least important thing on the screen. */
-    ui_splash_version();
+    /* The bar is part of the frame, not the reveal: drawn once, at zero. */
+    ui_splash_progress(0);
 
     /* Settling noise: the meter starts as chaos and calms to rest.
      *
@@ -1441,7 +1449,7 @@ static void ui_splash_anim(void)
     const uint32_t FRAMES = 46u;
     for (uint32_t t = 0; t < FRAMES; t++) {
         uint32_t f = (t * 2u < FRAMES) ? (t * 2u * STEP_DEN / FRAMES) : STEP_DEN;
-        ui_splash_title(tbg, f, STEP_DEN);
+        ui_splash_card(f, STEP_DEN);
 
         /* Envelope: full early, nothing by the end. Squared so it holds up
          * before collapsing, rather than sagging from the first frame. */
@@ -1516,7 +1524,7 @@ static void ui_splash_anim(void)
  * Costs nothing. There is no audio at boot, which is the same reason
  * ui_splash_anim() can redraw a whole meter every frame here and nowhere else.
  */
-#define UI_BOOT_Y     255u     /* just under the meter, grouped with it */
+#define UI_BOOT_Y     292u     /* below the PLAYLIST row, above the bar */
 #define UI_DOT_N      3u
 #define UI_DOT_W      7u
 #define UI_DOT_GAP    6u
@@ -1548,17 +1556,16 @@ static void ui_boot_note(const char *msg)
     ui_boot_t    = 0;
     ui_boot_next = 0;                       /* first tick paints immediately */
     fb_set_color(UI_WHITE, ui_boot_bg());
-    /* Centre the label AND its dots as one group. Centring the text alone would
-     * push the group right by the width of the dots, which looks like a
-     * mistake rather than a choice on an otherwise symmetric screen. */
-    uint32_t dots_w = UI_DOT_N * (UI_DOT_W + UI_DOT_GAP) - UI_DOT_GAP;
-    uint32_t grp_w  = fb_text_width(msg, TS_1X) + 8u + dots_w;
-    uint32_t x      = (grp_w < FB_W) ? (FB_W - grp_w) / 2u : UI_MARGIN;
-    /* fb_text_clipped returns where it stopped, so the dots follow the label
+    /* Left-aligned at UI_MARGIN, like every other row on this screen and on
+     * the player it is imitating. An earlier version centred the label and its
+     * dots; centring reads as a different screen, which is the whole thing
+     * this layout exists to avoid.
+     *
+     * fb_text_clipped returns where it stopped, so the dots follow the label
      * instead of sitting at a hardcoded offset that a longer word would run
      * into. */
-    ui_boot_x = fb_text_clipped(x, UI_BOOT_Y, msg,
-                                TS_1X, TS_1X, FB_W - x) + 8u;
+    ui_boot_x = fb_text_clipped(UI_MARGIN, UI_BOOT_Y, msg,
+                                TS_1X, TS_1X, UI_INNER_W) + 8u;
 }
 
 static void ui_boot_tick(void)
@@ -1595,12 +1602,11 @@ static void ui_boot_clear(void)
     fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
 }
 
-/* What the card turned out to hold, shown once the .m3u has been read.
- *
- * The splash otherwise says nothing about whether anything was found -- the
- * next thing that happens is either music or an error screen, and until then a
- * slow load is indistinguishable from a stuck one. This also gives the bottom
- * of the screen something to carry.
+/* What the card turned out to hold, on the row the transport occupies during
+ * playback. A labelled pair rather than a bare number: "10 TRACKS" alone in the
+ * middle of a screen reads as a caption for nothing, where PLAYLIST on the left
+ * and the count on the right reads like the spec row on a piece of gear -- and
+ * matches how the transport row is laid out a moment later.
  *
  * Counts LIVE entries, matching the N-of-M shown during playback: a number here
  * that disagreed with the one a second later would undermine both. */
@@ -1615,8 +1621,13 @@ static void ui_splash_summary(uint32_t n)
     for (uint32_t k = 0; tail[k] && i < sizeof(b) - 1u; k++) b[i++] = tail[k];
     b[i] = 0;
 
-    fb_set_color(UI_DIM, ui_grad_at(UI_SPL_SUM_Y));
-    fb_text_centre(UI_SPL_SUM_Y, b, TS_1X);
+    uint16_t bg = ui_grad_at(UI_SPL_INFO_Y);
+    fb_set_color(UI_DIM, bg);
+    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y, "PLAYLIST", TS_1X, TS_1X,
+                    UI_INNER_W);
+    fb_set_color(ui_accent, bg);
+    uint32_t w = fb_text_width(b, TS_1X);
+    fb_text_clipped(FB_W - UI_MARGIN - w, UI_SPL_INFO_Y, b, TS_1X, TS_1X, w);
 }
 
 static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist code */
@@ -3915,6 +3926,7 @@ int main(void)
      * playlist, opening a track, decoding cover art. Previously the first
      * paint came after all of that. */
     ui_splash_anim();
+    ui_splash_progress(15u);
 
     /* Before the track, deliberately: reading the playlist slot makes APF drop
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
@@ -3930,11 +3942,16 @@ int main(void)
      * answered a moment later by the idle screen saying the same thing at
      * length, and saying it twice in two places reads as a fault. */
     if (pl_count) ui_splash_summary(pl_live_count());
+    ui_splash_progress(45u);
 
     /* Try whatever is already in the slot -- a file picked from the Pocket's
      * browser, or one left there by a previous session. If that comes to
      * nothing and a playlist exists, start it; the common case is then launch
      * straight into music with no interaction at all. */
+    /* The last thing drawn before load_track(), which opens the file, reads the
+     * tag and decodes the artwork -- comfortably the longest stage, and the one
+     * where a silent screen previously looked like a hang. */
+    ui_splash_progress(80u);
     if (!load_track()) {
         /* The splash is already up; leave it while the playlist track loads
          * rather than flashing instructions that are about to be replaced. */

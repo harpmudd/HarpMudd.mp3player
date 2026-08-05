@@ -26,12 +26,28 @@ SRC = (ROOT / "fw" / "player.c").read_text(encoding="utf-8", errors="replace")
 FB_W, FB_H = 400, 360
 
 
+_consts = {}
+
+
 def const(name, default=None):
-    m = re.search(r"#define\s+%s\s+\(?(\d+)u?" % name, SRC)
+    """Resolve a #define to a number, evaluating simple expressions built from
+    constants already resolved. Layout values are sometimes derived from each
+    other (the version line is anchored off the card), and hardcoding the
+    arithmetic here is exactly the drift this tool exists to prevent."""
+    if name in _consts:
+        return _consts[name]
+    m = re.search(r"#define\s+%s\s+(.+)" % name, SRC)
     if m:
-        return int(m.group(1))
+        body = m.group(1).split("/*")[0].strip()
+        expr = re.sub(r"(\d)u\b", r"\1", body)
+        try:
+            v = int(eval(expr, {"__builtins__": {}}, dict(_consts)))
+            _consts[name] = v
+            return v
+        except Exception:
+            pass
     if default is None:
-        raise SystemExit("constant %s not found in player.c" % name)
+        raise SystemExit("constant %s not resolvable in player.c" % name)
     return default
 
 
@@ -42,11 +58,12 @@ UI_BOOT_Y = const("UI_BOOT_Y")
 UI_DOT_N = const("UI_DOT_N")
 UI_DOT_W = const("UI_DOT_W")
 UI_DOT_GAP = const("UI_DOT_GAP")
-T_Y = const("UI_SPL_TITLE_Y")
-R_Y = const("UI_SPL_RULE_Y")
-R_H = const("UI_SPL_RULE_H")
-S_Y = const("UI_SPL_SUM_Y")
+UI_TITLE_Y = const("UI_TITLE_Y")
+UI_CARD_H = const("UI_CARD_H")
 V_Y = const("UI_SPL_VER_Y")
+I_Y = const("UI_SPL_INFO_Y")
+UI_PROG_Y = const("UI_PROG_Y")
+UI_PROG_H = const("UI_PROG_H")
 VER = re.search(r'#define\s+APP_VER\s+"([^"]+)"', SRC).group(1)
 
 UI_DIM = 0x94B2
@@ -145,29 +162,46 @@ def before():
 
 
 def after():
+    """Exactly what fw/player.c now draws, at the 45% progress stage."""
     im = new_frame()
+    round_rect(im, UI_MARGIN - 8, UI_TITLE_Y - 14,
+               (FB_W - 2 * UI_MARGIN) + 16, UI_CARD_H, 8, 0x2945)
+    FP.draw_text(im, UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", ACCENT,
+                 FP.load_font(15, 600, 14), "round", FP.COV_WEIGHT, 2,
+                 lambda _y: 0x2945)
+    FP.draw_text(im, UI_MARGIN, V_Y, "v" + VER, UI_DIM,
+                 FP.load_font(15, 600, 14), "round", FP.COV_WEIGHT, 1,
+                 lambda _y: 0x2945)
     meter(im)
-    tw = width("MP3 PLAYER", 2)
-    tx = (FB_W - tw) // 2
-    text(im, tx, T_Y, "MP3 PLAYER", ACCENT, 2)
-    rect(im, tx, R_Y, tw, R_H, ACCENT)
-
+    text(im, UI_MARGIN, I_Y, "PLAYLIST", UI_DIM, 1)
+    s2 = "10 TRACKS"
+    text(im, FB_W - UI_MARGIN - width(s2, 1), I_Y, s2, ACCENT, 1)
     lbl = "LOADING PLAYLIST"
-    dw = UI_DOT_N * (UI_DOT_W + UI_DOT_GAP) - UI_DOT_GAP
-    gw = width(lbl, 1) + 8 + dw
-    gx = (FB_W - gw) // 2
-    text(im, gx, UI_BOOT_Y, lbl, UI_WHITE, 1)
-    dots(im, gx + width(lbl, 1) + 8, UI_BOOT_Y + 4)
-
-    s = "10 TRACKS"
-    text(im, (FB_W - width(s, 1)) // 2, S_Y, s, UI_DIM, 1)
-    v = "v" + VER
-    text(im, (FB_W - width(v, 1)) // 2, V_Y, v, UI_DIM, 1)
+    text(im, UI_MARGIN, UI_BOOT_Y, lbl, UI_WHITE, 1)
+    dots(im, UI_MARGIN + width(lbl, 1) + 8, UI_BOOT_Y + 4)
+    rect(im, UI_MARGIN, UI_PROG_Y, FB_W - 2 * UI_MARGIN, UI_PROG_H, 0x18E3)
+    rect(im, UI_MARGIN, UI_PROG_Y, (FB_W - 2 * UI_MARGIN) * 45 // 100,
+         UI_PROG_H, ACCENT)
     return im
 
 
+UI_PANEL = 0x2945
+
+
+def round_rect(im, x, y, w, h, r, c):
+    rect(im, x, y + r, w, h - 2 * r, c)
+    for i in range(r):
+        dy = r - i
+        inner = 0
+        while (inner + 1) ** 2 + dy * dy <= r * r:
+            inner += 1
+        cut = r - inner
+        rect(im, x + cut, y + i, w - 2 * cut, 1, c)
+        rect(im, x + cut, y + h - 1 - i, w - 2 * cut, 1, c)
+
+
 def main():
-    panels = [("BEFORE", before()), ("AFTER", after())]
+    panels = [("BEFORE  original", before()), ("AFTER  the player, empty", after())]
     zoom, pad, lab = 2, 12, 20
     W = len(panels) * (FB_W * zoom + pad) + pad
     H = FB_H * zoom + lab + 2 * pad
@@ -181,8 +215,9 @@ def main():
                     (x, pad + lab))
     out = ROOT / "docs" / "splash_preview.png"
     sheet.save(out)
-    print("layout read from player.c: title y=%d rule y=%d summary y=%d ver y=%d"
-          % (T_Y, R_Y, S_Y, V_Y))
+    print("layout read from player.c: card y=%d h=%d, ver y=%d, info y=%d, "
+          "boot y=%d, bar y=%d"
+          % (UI_TITLE_Y - 14, UI_CARD_H, V_Y, I_Y, UI_BOOT_Y, UI_PROG_Y))
     print("wrote %s" % out)
 
 
