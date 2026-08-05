@@ -162,13 +162,13 @@ crom[121] = -18'sd4584  ;  // b1
 crom[122] = 18'sd6195   ;  // b2
 crom[123] = 18'sd4086   ;  // a1
 crom[124] = 18'sd5521   ;  // a2
-// ---- CLASSICAL (preset 5), preamp -0.21 dB
+// ---- CLASSICAL (preset 5), preamp -0.55 dB
 //   lowshelf      80 Hz
-crom[125] = 18'sd65536  ;  // b0
-crom[126] = -18'sd129915;  // b1
-crom[127] = 18'sd64386  ;  // b2
-crom[128] = -18'sd129915;  // a1
-crom[129] = 18'sd64386  ;  // a2
+crom[125] = 18'sd65603  ;  // b0
+crom[126] = -18'sd129978;  // b1
+crom[127] = 18'sd64383  ;  // b2
+crom[128] = -18'sd129979;  // a1
+crom[129] = 18'sd64449  ;  // a2
 //   peak         250 Hz
 crom[130] = 18'sd65536  ;  // b0
 crom[131] = -18'sd128893;  // b1
@@ -182,17 +182,17 @@ crom[137] = 18'sd57506  ;  // b2
 crom[138] = -18'sd121989;  // a1
 crom[139] = 18'sd57506  ;  // a2
 //   peak        4000 Hz
-crom[140] = 18'sd65536  ;  // b0
-crom[141] = -18'sd90809 ;  // b1
-crom[142] = 18'sd39322  ;  // b2
-crom[143] = -18'sd90809 ;  // a1
-crom[144] = 18'sd39322  ;  // a2
+crom[140] = 18'sd62583  ;  // b0
+crom[141] = -18'sd88646 ;  // b1
+crom[142] = 18'sd39776  ;  // b2
+crom[143] = -18'sd88646 ;  // a1
+crom[144] = 18'sd36824  ;  // a2
 //   highshelf  12000 Hz
-crom[145] = 18'sd73533  ;  // b0
-crom[146] = -18'sd4584  ;  // b1
-crom[147] = 18'sd6195   ;  // b2
-crom[148] = 18'sd4086   ;  // a1
-crom[149] = 18'sd5521   ;  // a2
+crom[145] = 18'sd77890  ;  // b0
+crom[146] = -18'sd7277  ;  // b1
+crom[147] = 18'sd6594   ;  // b2
+crom[148] = 18'sd6123   ;  // a1
+crom[149] = 18'sd5548   ;  // a2
 // ---- VOCAL (preset 6), preamp -0.45 dB
 //   lowshelf      80 Hz
 crom[150] = 18'sd65436  ;  // b0
@@ -261,6 +261,6 @@ prom[1] = 18'sd52832  ;  // BASS       -1.87 dB
 prom[2] = 18'sd50662  ;  // ROCK       -2.24 dB
 prom[3] = 18'sd59240  ;  // POP        -0.88 dB
 prom[4] = 18'sd59056  ;  // JAZZ       -0.90 dB
-prom[5] = 18'sd63956  ;  // CLASSICAL  -0.21 dB
+prom[5] = 18'sd61548  ;  // CLASSICAL  -0.55 dB
 prom[6] = 18'sd62243  ;  // VOCAL      -0.45 dB
 prom[7] = 18'sd57301  ;  // TREBLE     -1.17 dB

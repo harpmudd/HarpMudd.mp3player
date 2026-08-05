@@ -54,7 +54,12 @@ PRESETS = [
     ("ROCK",      [+5, +2, -2, +2, +4]),
     ("POP",       [-1, 0, +2, +3, +1]),
     ("JAZZ",      [+3, +1, 0, -1, +2]),
-    ("CLASSICAL", [0, 0, 0, 0, +2]),
+    # Was [0,0,0,0,+2]: dead flat to ~8 kHz with a -0.21 dB preamp, i.e. audibly
+    # IDENTICAL to FLAT on any real material, which reads as a broken control
+    # rather than a subtle one. Now an actual voicing -- a little hall warmth,
+    # neutral mids so timbre stays honest, upper mids eased so massed strings
+    # do not get edgy, air on top.
+    ("CLASSICAL", [+2, 0, 0, -2, +3]),
     ("VOCAL",     [-3, -1, +3, +2, 0]),
     ("TREBLE",    [0, 0, 0, +2, +6]),
 ]

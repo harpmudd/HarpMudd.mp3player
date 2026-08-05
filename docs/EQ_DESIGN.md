@@ -200,7 +200,7 @@ Eight presets, wrapping:
 | 2 | `ROCK` | smile curve — lows and highs up, mids back |
 | 3 | `POP` | presence lift around 2-4 kHz |
 | 4 | `JAZZ` | warm lows, relaxed upper-mid |
-| 5 | `CLASSICAL` | near-flat with a slight high-shelf air lift |
+| 5 | `CLASSICAL` | warmth at the bottom, neutral mids, upper mids eased so massed strings do not get edgy, air on top |
 | 6 | `VOCAL` | mid forward, lows trimmed |
 | 7 | `TREBLE` | high shelf lift |
 

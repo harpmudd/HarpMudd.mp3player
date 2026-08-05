@@ -89,7 +89,7 @@ in the mode row, dimmed on `FLAT`.
 | **ROCK** | smile curve — lows and highs up, mids back |
 | **POP** | presence lift around 2–4 kHz |
 | **JAZZ** | warm lows, relaxed upper-mid |
-| **CLASSICAL** | near-flat with a slight high-shelf air lift |
+| **CLASSICAL** | gentle warmth, honest mids, eased upper mids, air |
 | **VOCAL** | mid forward, lows trimmed |
 | **TREBLE** | high shelf lift |
 
