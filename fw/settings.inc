@@ -302,9 +302,78 @@ static int settings_load(void)
  * Settings therefore load from the card and are session-only. Use
  * tools/settings_edit.py to change what persists.
  */
+/* RE-ENABLED 2026-08-05, on a MECHANISM rather than a theory -- which is the
+ * bar the history above sets, and it is now met.
+ *
+ * The corruption cause was found by reading APF's datatable off hardware: our
+ * 0190 response struct sat at word 0, directly on APF's DATASLOT ID/SIZE TABLE
+ * ({slot_id, size} pairs at stride 2). Every track change issues a 0190, so
+ * APF overwrote its own record of every slot's size with 64 words of file
+ * path -- and 0184 takes the size it writes FROM that table. That is why a
+ * write stamped a garbage size onto whatever file was in the MP3 slot, and why
+ * damage always followed use and never a fresh boot.
+ *
+ * The structs are now at words 64/128/192, clear of the table, and the fix is
+ * VERIFIED on hardware: after a track change every slot id and every fixed
+ * size is unchanged, and slot 2's size correctly updates to the playing file.
+ * Select+A shows that check.
+ *
+ * The record stages at word 192, also clear of the table and of the date/time
+ * APF keeps at words 224-226.
+ *
+ * If files are damaged again, turn this to 0 and say so -- the mechanism above
+ * would then be wrong or incomplete, and no third theory should be built
+ * without new measurement. */
+#define SETTINGS_WRITE 1
+
+#if SETTINGS_WRITE
+static int settings_write_now(void)
+{
+    uint8_t rec[SET_BYTES];
+    for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
+
+    for (uint32_t i = 0; i < 4u; i++) rec[SET_B_MAGIC + i] = set_magic[i];
+    rec[SET_B_VERSION] = SET_VERSION;
+    rec[SET_B_VOLUME]  = (uint8_t)volume;
+    rec[SET_B_PALETTE] = (uint8_t)ui_pal_idx;
+    rec[SET_B_REPEAT]  = rep_mode;
+    rec[SET_B_SHUFFLE] = shuffle_on;
+    rec[SET_B_ART]     = art_pref ? 1u : 0u;
+    rec[SET_B_VIZ]     = viz_mode;
+    rec[SET_B_EQ]      = eq_idx;
+
+    /* Big-endian into the words -- the convention the bridge's byte swap
+     * imposes, and the one settings_load() reads back with. */
+    for (uint32_t w = 0; w < SET_BYTES / 4u; w++)
+        dt_write(SET_DT_W + w, ((uint32_t)rec[w*4+0] << 24) |
+                               ((uint32_t)rec[w*4+1] << 16) |
+                               ((uint32_t)rec[w*4+2] << 8)  |
+                                (uint32_t)rec[w*4+3]);
+
+    refill_drain();                     /* one command in flight, ever */
+    uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
+    REG(R_TGT_ID)  = SET_SLOT_ID;
+    REG(R_TGT_OFF) = 0;
+    REG(R_TGT_ADR) = SET_DT_ADDR;       /* the datatable, not RAM */
+    REG(R_TGT_LEN) = SET_BYTES;
+    REG(R_TGT_GO)  = TGT_WRITE;
+
+    uint32_t deadline = cycles() + CLK_HZ * 2u;
+    for (;;) {
+        uint32_t st = REG(R_TGT_GO);
+        if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
+        if ((int32_t)(cycles() - deadline) >= 0) return 0;
+    }
+}
+#endif
+
 static int settings_store(void)
 {
+#if SETTINGS_WRITE
+    return settings_write_now();
+#else
     return 1;                       /* report success; simply never write */
+#endif
 }
 
 /* Called from the main loop. Does nothing until the settings have been stable
