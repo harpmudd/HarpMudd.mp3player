@@ -1524,7 +1524,12 @@ static void ui_splash_anim(void)
  * Costs nothing. There is no audio at boot, which is the same reason
  * ui_splash_anim() can redraw a whole meter every frame here and nowhere else.
  */
-#define UI_BOOT_Y     292u     /* below the PLAYLIST row, above the bar */
+/* The SAME row the playlist summary lands on, deliberately. The two are
+ * sequential, never simultaneous -- the indicator runs while the .m3u is being
+ * read and ui_boot_clear() wipes the row the moment it is done, which is
+ * exactly when PLAYLIST / N TRACKS replaces it. One status line that changes
+ * what it says, rather than two lines where one is always blank. */
+#define UI_BOOT_Y     UI_SPL_INFO_Y
 #define UI_DOT_N      3u
 #define UI_DOT_W      7u
 #define UI_DOT_GAP    6u

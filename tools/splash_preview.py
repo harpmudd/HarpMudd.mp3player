@@ -40,8 +40,18 @@ def const(name, default=None):
     if m:
         body = m.group(1).split("/*")[0].strip()
         expr = re.sub(r"(\d)u\b", r"\1", body)
+        # Resolve any constants the expression names, recursively, so the order
+        # things are asked for here cannot matter. UI_BOOT_Y is defined in terms
+        # of UI_SPL_INFO_Y, and a fixed order would break the next time two
+        # layout constants are chained.
+        env = dict(_consts)
+        for ident in set(re.findall(r"[A-Za-z_]\w*", expr)):
+            if ident not in env:
+                v = const(ident, default=-1)
+                if v != -1:
+                    env[ident] = v
         try:
-            v = int(eval(expr, {"__builtins__": {}}, dict(_consts)))
+            v = int(eval(expr, {"__builtins__": {}}, env))
             _consts[name] = v
             return v
         except Exception:
@@ -161,8 +171,9 @@ def before():
     return im
 
 
-def after():
-    """Exactly what fw/player.c now draws, at the 45% progress stage."""
+def after(loading=False):
+    """Exactly what fw/player.c now draws. The status row carries the loading
+    indicator first, then the playlist summary in its place."""
     im = new_frame()
     round_rect(im, UI_MARGIN - 8, UI_TITLE_Y - 14,
                (FB_W - 2 * UI_MARGIN) + 16, UI_CARD_H, 8, 0x2945)
@@ -173,14 +184,18 @@ def after():
                  FP.load_font(15, 600, 14), "round", FP.COV_WEIGHT, 1,
                  lambda _y: 0x2945)
     meter(im)
-    text(im, UI_MARGIN, I_Y, "PLAYLIST", UI_DIM, 1)
-    s2 = "10 TRACKS"
-    text(im, FB_W - UI_MARGIN - width(s2, 1), I_Y, s2, ACCENT, 1)
-    lbl = "LOADING PLAYLIST"
-    text(im, UI_MARGIN, UI_BOOT_Y, lbl, UI_WHITE, 1)
-    dots(im, UI_MARGIN + width(lbl, 1) + 8, UI_BOOT_Y + 4)
+    if loading:
+        lbl = "LOADING PLAYLIST"
+        text(im, UI_MARGIN, UI_BOOT_Y, lbl, UI_WHITE, 1)
+        dots(im, UI_MARGIN + width(lbl, 1) + 8, UI_BOOT_Y + 4)
+        pct = 15
+    else:
+        text(im, UI_MARGIN, I_Y, "PLAYLIST", UI_DIM, 1)
+        s2 = "10 TRACKS"
+        text(im, FB_W - UI_MARGIN - width(s2, 1), I_Y, s2, ACCENT, 1)
+        pct = 80
     rect(im, UI_MARGIN, UI_PROG_Y, FB_W - 2 * UI_MARGIN, UI_PROG_H, 0x18E3)
-    rect(im, UI_MARGIN, UI_PROG_Y, (FB_W - 2 * UI_MARGIN) * 45 // 100,
+    rect(im, UI_MARGIN, UI_PROG_Y, (FB_W - 2 * UI_MARGIN) * pct // 100,
          UI_PROG_H, ACCENT)
     return im
 
@@ -201,7 +216,9 @@ def round_rect(im, x, y, w, h, r, c):
 
 
 def main():
-    panels = [("BEFORE  original", before()), ("AFTER  the player, empty", after())]
+    panels = [("BEFORE  original", before()),
+              ("AFTER  reading the playlist", after(loading=True)),
+              ("AFTER  playlist read", after())]
     zoom, pad, lab = 2, 12, 20
     W = len(panels) * (FB_W * zoom + pad) + pad
     H = FB_H * zoom + lab + 2 * pad
