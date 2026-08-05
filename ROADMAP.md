@@ -355,7 +355,28 @@ Details and the full reasoning live at the `SETTINGS_WRITE` definition in
 
 # Enhancements
 
-## Preset EQ — feasible, but belongs in the RTL
+## Preset EQ — BUILT AND SHIPPED (rev 18)
+
+Eight presets on `Y`, `Select+Y` to reverse, the preset named in the mode row,
+choice persisted in the settings record. Coefficients generated and verified in
+python, the RTL checked bit-exact against that model over 576 samples on all 8
+presets and both channels, M10K unchanged at 300/308.
+
+Two things the design worried about, resolved by measurement rather than
+assumption:
+
+- **Preset changes do not click.** The design called for a ~4 ms duck and said
+  "do not ship it and hope". Extended hardware use produced no audible click, so
+  the duck is not built. See `docs/EQ_DESIGN.md`.
+- **The curve-over-the-meter display was built and rejected** by the user;
+  the mode row names the preset instead.
+
+Left undone: the presets are numerically correct but have never been tuned by
+ear. That is a listening pass, not an engineering one.
+
+The design notes below are kept for the reasoning.
+
+### Original design entry
 
 Worth doing, and the obvious implementation is the wrong one.
 
@@ -590,10 +611,8 @@ ever painted in idle mode**. The core had left the boot screen; the replacement
 was indistinguishable from it and the explanation was raised into a void. It now
 takes a reason line and paints it statically.
 
-**Still worth exercising on hardware:** a mistyped *middle* entry (auto-advance
-steps over it), a mistyped *last* entry with repeat OFF (playlist ends rather
-than restarting at track 1), and an `.m3u` where every entry is wrong (idle
-screen reading "No playable tracks in playlist", not the splash).
+**Fully confirmed on hardware 2026-08-05**, including mistyped entries in any
+position. One bad line costs one track and nothing else.
 
 ### The track count, and the limit that is deliberate
 

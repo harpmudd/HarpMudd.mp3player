@@ -251,7 +251,17 @@ needed.
 
 ### Two things the user would notice that the engine alone does not solve
 
-**1. Changing preset will click unless it is handled.** Swapping biquad
+**1. Changing preset will click unless it is handled — MEASURED: it does not.**
+
+Confirmed on hardware 2026-08-05 after extended use: cycling presets while
+playing produces **no audible click**, and the duck below was never built. The
+concern was sound in principle and is left here for the reasoning, but it did
+not materialise — most likely because the cascade's state decays in ~23 ms and
+the coefficient swap lands inside that.
+
+Build the duck only if a click actually turns up. The original text follows.
+
+**1. (original concern) Changing preset will click unless it is handled.** Swapping biquad
 coefficients while the filter state is non-zero is a step discontinuity, and a
 step discontinuity is exactly the click this project spent ten rounds chasing in
 the FIFO. Do not ship it and hope.
