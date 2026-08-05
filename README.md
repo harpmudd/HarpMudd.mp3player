@@ -94,9 +94,12 @@ in the mode row, dimmed on `FLAT`.
 | **TREBLE** | high shelf lift |
 
 It runs in the FPGA, not on the CPU: five cascaded biquads per channel on one
-time-multiplexed multiplier, using about 6% of the clocks available between
-samples. The decoder never knows it is there, so changing preset is seamless —
-no gap, no reload, and audible immediately even while paused.
+time-multiplexed multiplier, using 116 of the 1,250 clocks available between
+output samples — under 10%. The decoder never knows it is there, so changing
+preset is seamless: no gap, no reload, and no interruption to playback.
+
+It works while paused too — the preset changes and the name updates, there is
+just nothing to hear until you press play.
 
 Presets are loudness-matched rather than peak-matched, so switching between them
 changes the tone without changing how loud the music seems. `FLAT` is a true
@@ -186,12 +189,14 @@ It also meant finding that the framework keeps its record of every data slot's
 size in the same small memory a core uses to talk to it, at the very start. This
 core had been writing its own scratch there, so the first track change destroyed
 that record — which is what corrupted `.mp3` files whenever settings were saved.
-The scratch now lives above it, and the core can check the table is intact at
-any time.
+The scratch now lives above it. **Select**+**A** shows that table as the core
+saw it at boot against its live value, with a plain intact/clobbered verdict —
+a diagnostic, but the one that proves the fix rather than assuming it.
+**Select**+**B** dumps the framework's file descriptor for the same reason.
 
 The equaliser is FPGA logic rather than software, sitting between the audio
-queue and the DAC. Five biquads per channel share one multiplier, which fits in
-about 6% of the clocks between output samples, so it costs the decoder nothing.
+queue and the DAC. Five biquads per channel share one multiplier, taking 116 of
+the 1,250 clocks between output samples, so it costs the decoder nothing.
 Its coefficients are generated and checked against a bit-exact model before
 anything is compiled, and the hardware is verified sample-for-sample against
 that model.
@@ -224,8 +229,8 @@ back with one path component changed. Nothing about the layout is assumed.
 
 ## Credits
 
-This core stands on other people's work. Where a name appears below it came
-from the source file's own copyright header.
+This core stands on other people's work. Where code is included, the name comes
+from that source file's own copyright header.
 
 - **[Helix MP3 decoder](https://github.com/ultraembedded/libhelix-mp3)** —
   © 1995–2002 [RealNetworks, Inc.](https://www.realnetworks.com), released to
