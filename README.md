@@ -134,7 +134,7 @@ on screen counts what will actually play, not how many lines are in the file.
 
 ## What it shows
 
-<img src="docs/screenshot.png" width="280" align="right" alt="Now-playing screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 2 of 5, 02:31 of 03:41, and a progress bar">
+<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a STOPPED label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
 - **Title and artist** from the ID3v2 tag, in a real proportional typeface with
   anti-aliased text.
