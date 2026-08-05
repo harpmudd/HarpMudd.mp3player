@@ -198,6 +198,55 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Text rendered thin and hazy — FIXED, awaiting HW confirmation
+
+Reported as "the mp3 information could be in a sharper more crisp font". The
+typeface was not the problem. Two independent defects were, both of which made
+every glyph on screen lose light it was owed.
+
+**The blend was gamma-wrong.** `mp3_fb.sv` interpolated foreground to background
+linearly over RGB565 code values. RGB565 is sRGB — gamma-encoded, roughly a 2.2
+power law — so averaging code values does not average *light*. A pixel at half
+coverage, weighted 8/16, emits about 22% of the foreground rather than 50%.
+Every partially covered pixel was therefore under-lit. On light type over a dark
+ramp that reads as thin, unevenly weighted stems: the perceptual signature is
+"blurry", never "too dark", which is why it survived this long.
+
+Fixed by replacing the coverage-as-weight assumption with a 16-entry table
+fitted to the palette this core actually draws, over the background it actually
+draws on, luma-weighted — `tools/gen_text_gamma.py`, which also has a `--check`
+mode asserting the RTL still carries the derived table. RMS error per coverage
+level drops between 3× and 16×. The largest corrections are at LOW coverage
+(1→4, 2→6), which is the faint edge pixel that carries perceived sharpness.
+Cost: 16 five-bit constants in logic. No M10K, no DSP, no new multiplier.
+
+**The atlas quantiser threw away the faint pixels.** `gen_font_rom.py` reduced
+8-bit coverage to 4-bit with `>> 4`, wrong at both ends: it saturates from 240
+up, so near-solid pixels stored as fully solid, and it floors everything under
+16 to zero, so the faintest coverage was *deleted*. Those are exactly the pixels
+the eye integrates into a smooth stem edge. Now rounds properly. 27% of atlas
+words changed; the ROM is the same 3040 words and the same 10 M10K.
+
+**Glyph advances are byte-identical**, verified by diffing `font_metrics.h`
+across the regeneration — the advance is measured from the 8-bit raster before
+quantisation, so nothing about text layout, clipping, or the toast
+end-position logic moves. That is why this was safe to take in one step.
+
+**Weight and size were evaluated and deliberately not changed.** Medium 500 and
+Bold 700 and a 16px body were all rendered through a bit-exact model of the
+compose path (`tools/font_preview.py`, `--focus` for the body-text case). Bold
+closes the counters in `0 b p`; Medium reads hazier on a dark background, which
+is the fault being fixed; 16px widens every glyph and would move layout. Those
+three change advances and carry layout risk the two correctness fixes do not.
+
+**What this does NOT fix: the 2× title.** It is a magnified 16px master, and no
+blend or raster change makes that sharp. The only real fix is a natively-sized
+large atlas, which does not fit — a 32px 4bpp atlas needs ~43 more M10K and 8
+are free. Moving the atlas to SDRAM (~48 KB, against 360 KB used of 32 MB) would
+buy native large text *and* hand back the 10 M10K the current atlas occupies,
+which is the constraint binding everything else. Not attempted; it is a project,
+not a change.
+
 ## Playlist stops dead at the first bad filename — FIXED, HW-confirmed
 
 Fixed in `5986761`, confirmed on hardware 2026-08-04: the core boots and plays

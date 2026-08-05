@@ -36,11 +36,13 @@
 // writes because colour/size registers persist between glyphs.
 //
 // CHAR also fixes the OTHER complaint about the old UI -- jagged text. The
-// 8x8 source font is upscaled by Scale2x/EPX (crisp diagonals, unlike bilinear
-// which just blurs a bitmap font), and wherever EPX decides a corner should be
-// broken the pixel is written as the 50% blend of fg and bg instead of a hard
-// flip. That is genuine anti-aliasing for one adder per colour channel: the
-// only coverages EPX can produce here are 0, 1/2 and 1.
+// source is a real typeface (Inter) rendered to a 16x16 cell at 4 bits of
+// coverage per pixel by tools/gen_font_rom.py, so the anti-aliasing is genuine
+// greyscale rather than reconstructed: the engine blends fg->bg by the stored
+// coverage directly. (An earlier design stored an 8x8 1-bit font and upscaled
+// it with Scale2x/EPX, which yields only 0, 1/2 and 1 coverage and still reads
+// as a bitmap font pretending to be bigger. That is gone -- do not reason from
+// it.) See cov_weight() below for why coverage is not used as the weight.
 //
 //   clk_sys (CPU) --async FIFO--> clk_sdram ENGINE+ARBITER
 //     FILL  : burst-read display line -> scanout line buffer (time-critical:
@@ -324,9 +326,49 @@ module mp3_fb (
     wire [3:0]  cov     = rowbits[{ex, 2'b00} +: 4];
 
     // The coverage value IS the anti-aliasing -- blend fg->bg by it directly.
-    // Nudge 15 to 16 so full coverage is exactly fg and the divide is a shift
-    // rather than a division by 15.
-    wire [4:0] cov16 = {1'b0, cov} + ((cov == 4'hF) ? 5'd1 : 5'd0);
+    //
+    // The weight is NOT the coverage. RGB565 is gamma-encoded (~2.2), so
+    // interpolating code values linearly does not interpolate LIGHT: a pixel at
+    // half coverage, weighted 8/16, emits about 22% of the foreground rather
+    // than 50%. Every partially covered pixel was therefore under-lit, which on
+    // light-on-dark type reads as thin, hazy stems -- "not crisp". It never
+    // looked "too dark", which is why it went unnoticed for so long.
+    //
+    // These weights are fitted to the palette this core actually draws, over
+    // the background ramp it actually draws on, luma-weighted. Fitting rather
+    // than deriving because one table has to serve every fg/bg pair; the fit
+    // cuts RMS error by 3x to 16x per level, worst at the extremes and best in
+    // the midtones. Regenerate with tools/gen_text_gamma.py if the palette
+    // changes materially; tools/gen_text_gamma.py --check asserts they agree.
+    //
+    // 0 and 15 stay exact. An untouched pixel IS the background and a solid one
+    // IS the foreground; fitting those would trade two exactly-right answers
+    // for a slightly better average and make glyph interiors subtly wrong.
+    //
+    // Cost: 16 five-bit constants. Synthesises to logic -- no M10K, no DSP, and
+    // the multiplier it feeds is the one that was already there.
+    function [4:0] cov_weight(input [3:0] c);
+        case (c)
+            4'd0 : cov_weight = 5'd0;
+            4'd1 : cov_weight = 5'd4;
+            4'd2 : cov_weight = 5'd6;
+            4'd3 : cov_weight = 5'd7;
+            4'd4 : cov_weight = 5'd8;
+            4'd5 : cov_weight = 5'd10;
+            4'd6 : cov_weight = 5'd10;
+            4'd7 : cov_weight = 5'd11;
+            4'd8 : cov_weight = 5'd12;
+            4'd9 : cov_weight = 5'd13;
+            4'd10: cov_weight = 5'd13;
+            4'd11: cov_weight = 5'd14;
+            4'd12: cov_weight = 5'd15;
+            4'd13: cov_weight = 5'd15;
+            4'd14: cov_weight = 5'd16;
+            4'd15: cov_weight = 5'd16;
+        endcase
+    endfunction
+
+    wire [4:0] cov16 = cov_weight(cov);
     wire [4:0] inv16 = 5'd16 - cov16;
 
     wire [10:0] mix_r = char_fg[15:11] * cov16 + char_bg[15:11] * inv16;

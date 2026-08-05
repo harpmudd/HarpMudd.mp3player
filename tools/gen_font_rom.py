@@ -67,7 +67,13 @@ for code in range(FIRST, LAST + 1):
             w = 0
             for i in range(8):
                 x = half * 8 + i
-                cov = px[x, y] >> 4          # 8-bit -> 4-bit coverage
+                # 8-bit -> 4-bit coverage, ROUNDED. ">> 4" was wrong at both
+                # ends: it saturates from 240 up, so near-solid pixels rendered
+                # as fully solid, and it floors everything under 16 to zero, so
+                # the faintest edge coverage was DELETED. Those faint pixels are
+                # what the eye integrates into a smooth stem edge; dropping them
+                # is what made the type look harsh next to its own anti-aliasing.
+                cov = (px[x, y] * 15 + 127) // 255
                 w |= (cov & 0xF) << (i * 4)
             words.append(w)
 
