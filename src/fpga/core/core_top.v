@@ -293,9 +293,18 @@ core_bridge_cmd icb (
     .datatable_q               (datatable_q)
 );
 
+// The shell originally served bridge reads at 0xF8xxxxxx only, which makes an
+// interact.json variable impossible: APF reads every UI element back FROM THE
+// CORE each frame at the variable's address, and there was nowhere to read
+// from. 0x2xxxxxxx is added for that. It is clear of the loader's window
+// (ADDRESS_MASK_UPPER_4 = 0) and of 0xF8xxxxxx, which is the only region the
+// spec reserves.
+wire [31:0] set_bridge_rd_data;
+
 always @(*) begin
     casex (bridge_addr)
         32'hF8xxxxxx: bridge_rd_data = cmd_bridge_rd_data;
+        32'h2xxxxxxx: bridge_rd_data = set_bridge_rd_data;
         default:      bridge_rd_data = 32'h0;
     endcase
 end

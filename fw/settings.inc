@@ -204,8 +204,6 @@
 
 #define SET_SLOT_ID  4u
 #define SET_VERSION  1u
-#define SET_BYTES    32u                /* fixed: the file must not change size */
-#define SET_QUIET    (CLK_HZ)           /* settle before writing */
 
 /* 0184 sources its bytes from a BRIDGE address, and the shell's bridge read mux
  * (core_top.v) serves 0xF8xxxxxx only -- the datatable. Everything else reads
@@ -220,180 +218,108 @@
 #define SET_DT_W     192u
 #define SET_DT_ADDR  0xF8002300u
 
-/* The record is handled as BYTES, packed into datatable words big-endian --
- * the convention the bridge's byte swap already imposes, and the one
- * slot_filename() proved. Reading the file back gives those same bytes, so the
- * two directions agree without either depending on word order. */
-static const uint8_t set_magic[4] = { 'S', 'P', 'M', '3' };
-
-static uint32_t set_dirty_at;           /* 0 = nothing pending */
+static uint32_t set_dirty_at;
+static uint32_t set_poll_at;           /* 0 = nothing pending */
 static uint8_t  set_present;            /* a settings file was found at boot */
-
-/* Byte offsets. Append only, and bump SET_VERSION -- an older file is ignored
- * rather than misread. */
-enum {
-    SET_B_MAGIC = 0,       /* 4 bytes */
-    SET_B_VERSION = 4, SET_B_VOLUME = 5, SET_B_PALETTE = 6,
-    SET_B_REPEAT = 7,  SET_B_SHUFFLE = 8, SET_B_ART = 9,
-    SET_B_VIZ = 10,    SET_B_EQ = 11
-};
 
 static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
 
+/* ---------------------------------------------------------------------------
+ * PERSISTENCE, third mechanism and the first that cannot touch a data slot.
+ *
+ * interact.json declares one `persist` variable per setting, each at a word of
+ * the register file at 0x20000000. Per Analogue: "Each frame, all of the UI
+ * elements are read back from the core at a specified 32-bit BRIDGE address,
+ * updated with new user-adjusted values, and finally written back", and
+ * `persist` "retains the value set by the user after the core is shut down",
+ * saved to /Settings/<core>/Interact/interact_persist.json.
+ *
+ * So APF does the storing, into its OWN file. Nothing here writes the card, and
+ * no data slot is involved at any point. That is the entire reason for this
+ * route: 0184 and the nonvolatile slot both reached the user's .mp3 files, three
+ * libraries between them. This mechanism has no path to them.
+ *
+ * Because APF reads back from the core rather than only writing to it, a change
+ * made with the BUTTONS is picked up and persisted too -- it is not merely a
+ * menu of defaults.
+ *
+ * Direction is resolved by comparing against what we last published: if the
+ * word APF hands back differs from that, the user moved it in the Core Settings
+ * menu and we adopt it. Otherwise ours stands.
+ */
+enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_ART, SW_VIZ, SW_EQ, SW_N };
+
+/* What we last published. Initialised to a value APF can never write for
+ * these ranges, so the FIRST poll always counts as a change and adopts
+ * whatever APF has -- we must not publish before adopting, or our defaults
+ * would overwrite the persisted values on the way past. */
+static uint32_t set_pub[SW_N] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                  0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                  0xFFFFFFFFu };
+
+static uint32_t set_rd(uint32_t w) { REG(R_SET_IDX) = w; return REG(R_SET_DAT); }
+static void     set_wr(uint32_t w, uint32_t v)
+{
+    REG(R_SET_IDX) = w;
+    REG(R_SET_DAT) = v;
+    set_pub[w] = v;
+}
+
+/* Publish every current value. Called at boot after adopting, and whenever a
+ * setting changes. Two MMIO writes per word -- nothing to debounce. */
+static int settings_store(void)
+{
+    set_wr(SW_VOL,  volume);
+    set_wr(SW_PAL,  ui_pal_idx);
+    set_wr(SW_REP,  rep_mode);
+    set_wr(SW_SHUF, shuffle_on ? 1u : 0u);
+    set_wr(SW_ART,  art_pref ? 1u : 0u);
+    set_wr(SW_VIZ,  viz_mode);
+    set_wr(SW_EQ,   eq_idx);
+    return 1;
+}
+
+/* Take whatever APF has for us -- the persisted values at boot, or a menu
+ * change at runtime. Every field is range-checked: a value from a file on the
+ * card must not be able to silence the player or index off a palette. */
 static int settings_load(void)
 {
-    /* Read with 0180, the way it worked for months. The nonvolatile-slot
-     * experiment that replaced this HUNG THE POCKET ON QUIT -- see the note at
-     * settings_store(). */
-    volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)(UNCACHED + TAG_OFF);
-    for (uint32_t i = 0; i < SET_BYTES; i++) b[i] = 0u;
+    uint32_t v;
 
-    if (!target_read_slot(SET_SLOT_ID, 0, TAG_OFF, SET_BYTES)) return 0;
-    for (uint32_t i = 0; i < 4u; i++)
-        if (b[SET_B_MAGIC + i] != set_magic[i]) return 0;   /* not ours */
-    if (b[SET_B_VERSION] != SET_VERSION) return 0;          /* older layout */
+    /* ALL ZERO means APF has not written yet -- the words power up at zero and
+     * the core can reach this before APF's first pass. Adopting that would set
+     * the volume to 0 and hand the user a silent player that looks broken.
+     * An all-default state is indistinguishable from an unwritten one, so the
+     * firmware defaults stand and the next poll picks up the real values. */
+    uint32_t any = 0;
+    for (uint32_t w = 0; w < SW_N; w++) any |= set_rd(w);
+    if (!any) return 0;
 
-    /* Range-check every field. A corrupt or half-written file must not be able
-     * to leave the player silent, or index off the end of the palette. */
-    uint32_t v = b[SET_B_VOLUME];
-    if (v <= VOL_MAX) { volume = v; vol_apply(); }
-
-    v = b[SET_B_PALETTE];
-    if (v < UI_PALETTE_N) { ui_pal_idx = v; ui_accent = ui_palette[v]; }
-
-    v = b[SET_B_REPEAT];
-    if (v <= REP_ONE) rep_mode = (uint8_t)v;
-
-    shuffle_on = b[SET_B_SHUFFLE] ? 1u : 0u;
-    art_pref   = b[SET_B_ART] ? 1u : 0u;
-
-    v = b[SET_B_VIZ];
-    if (v < VIZ_COUNT) viz_mode = (uint8_t)v;
-
-    /* Applied to the RTL here rather than waiting for the first Y press, so a
-     * saved preset is actually in effect from the first note. */
-    v = b[SET_B_EQ];
-    if (v < EQ_COUNT) { eq_idx = (uint8_t)v; REG(R_EQ) = eq_idx; }
+    v = set_rd(SW_VOL);   if (v <= VOL_MAX)      { volume = v; vol_apply(); }
+    v = set_rd(SW_PAL);   if (v < UI_PALETTE_N)  { ui_pal_idx = v;
+                                                   ui_accent = ui_palette[v]; }
+    v = set_rd(SW_REP);   if (v <= REP_ONE)        rep_mode = (uint8_t)v;
+    v = set_rd(SW_SHUF);  shuffle_on = v ? 1u : 0u;
+    v = set_rd(SW_ART);   art_pref   = v ? 1u : 0u;
+    v = set_rd(SW_VIZ);   if (v < VIZ_COUNT)       viz_mode = (uint8_t)v;
+    v = set_rd(SW_EQ);    if (v < EQ_COUNT)      { eq_idx = (uint8_t)v;
+                                                   REG(R_EQ) = eq_idx; }
     set_present = 1;
     return 1;
 }
 
-/* DOES NOTHING, deliberately. There is no safe way for this core to write the
- * card, and two separate mechanisms have now been tried and rejected:
- *
- *   0184 target write   -- DESTROYS FILES. Its bridge address is treated as a
- *       parameter struct whose second word APF reads as a SIZE, applied to
- *       whatever file occupies the MP3 slot. Confirmed by prediction; it took
- *       out the user's whole library three times. No safe value exists for
- *       that word, so the command is not used at all.
- *
- *   nonvolatile slot    -- HANGS THE POCKET ON QUIT. data.json declared the
- *       slot nonvolatile with its address at 0xF8002200 so APF would read the
- *       record back and save it itself. The core ran fine, then hung on Quit
- *       and needed a hard reboot; settings.bin was never written.
- *
- *       Best guess, untested: 0xF8xxxxxx is APF's own COMMAND region, owned by
- *       core_bridge_cmd. Pointing a data slot's address into it likely makes
- *       APF's shutdown read-back collide with its own command interface. The
- *       datatable was chosen because the frozen shell serves bridge reads
- *       NOWHERE ELSE -- so doing this properly needs a small bridge-readable
- *       RAM outside F8, which means editing core_top.v. Not attempted.
- *
- * Settings therefore load from the card and are session-only. Use
- * tools/settings_edit.py to change what persists.
- */
-/* RE-ENABLED 2026-08-05, on a MECHANISM rather than a theory -- which is the
- * bar the history above sets, and it is now met.
- *
- * The corruption cause was found by reading APF's datatable off hardware: our
- * 0190 response struct sat at word 0, directly on APF's DATASLOT ID/SIZE TABLE
- * ({slot_id, size} pairs at stride 2). Every track change issues a 0190, so
- * APF overwrote its own record of every slot's size with 64 words of file
- * path -- and 0184 takes the size it writes FROM that table. That is why a
- * write stamped a garbage size onto whatever file was in the MP3 slot, and why
- * damage always followed use and never a fresh boot.
- *
- * The structs are now at words 64/128/192, clear of the table, and the fix is
- * VERIFIED on hardware: after a track change every slot id and every fixed
- * size is unchanged, and slot 2's size correctly updates to the playing file.
- * Select+A shows that check.
- *
- * The record stages at word 192, also clear of the table and of the date/time
- * APF keeps at words 224-226.
- *
- * If files are damaged again, turn this to 0 and say so -- the mechanism above
- * would then be wrong or incomplete, and no third theory should be built
- * without new measurement. */
-/* OFF AGAIN 2026-08-05, same day. The datatable fix was real and necessary but
- * NOT SUFFICIENT: with the slot table protected and verified intact, a session
- * still damaged two .mp3 files.
- *
- * The damage CHANGED CHARACTER, which is itself the finding:
- *
- *   before  every played file stamped with one bogus 21 MB size, taken from
- *           the clobbered table
- *   now     each played file rounded UP to a whole number of 128 KB CLUSTERS
- *             1,801,236  -> 1,835,008   = exactly 14 clusters
- *            14,046,164  -> 14,155,776  = exactly 108 clusters
- *
- * Both new sizes are exact cluster multiples, and only the two files that were
- * in the MP3 slot moved. So APF is now writing back each slot's ALLOCATED size
- * rather than its logical size. The audio survives -- the files gained trailing
- * slack, they were not overwritten -- but they are still corrupted.
- *
- * That is a different fault from the table clobbering, and it is not explained
- * by anything measured so far. Per the rule this file already states: no third
- * theory without new measurement. */
-#define SETTINGS_WRITE 0
-
-#if SETTINGS_WRITE
-static int settings_write_now(void)
+/* Watch for changes made in the Core Settings menu while running. APF rewrites
+ * every word each frame, so a word differing from what we published is the
+ * user having moved it. */
+static int settings_poll_menu(void)
 {
-    uint8_t rec[SET_BYTES];
-    for (uint32_t i = 0; i < SET_BYTES; i++) rec[i] = 0u;
-
-    for (uint32_t i = 0; i < 4u; i++) rec[SET_B_MAGIC + i] = set_magic[i];
-    rec[SET_B_VERSION] = SET_VERSION;
-    rec[SET_B_VOLUME]  = (uint8_t)volume;
-    rec[SET_B_PALETTE] = (uint8_t)ui_pal_idx;
-    rec[SET_B_REPEAT]  = rep_mode;
-    rec[SET_B_SHUFFLE] = shuffle_on;
-    rec[SET_B_ART]     = art_pref ? 1u : 0u;
-    rec[SET_B_VIZ]     = viz_mode;
-    rec[SET_B_EQ]      = eq_idx;
-
-    /* Big-endian into the words -- the convention the bridge's byte swap
-     * imposes, and the one settings_load() reads back with. */
-    for (uint32_t w = 0; w < SET_BYTES / 4u; w++)
-        dt_write(SET_DT_W + w, ((uint32_t)rec[w*4+0] << 24) |
-                               ((uint32_t)rec[w*4+1] << 16) |
-                               ((uint32_t)rec[w*4+2] << 8)  |
-                                (uint32_t)rec[w*4+3]);
-
-    refill_drain();                     /* one command in flight, ever */
-    uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
-    REG(R_TGT_ID)  = SET_SLOT_ID;
-    REG(R_TGT_OFF) = 0;
-    REG(R_TGT_ADR) = SET_DT_ADDR;       /* the datatable, not RAM */
-    REG(R_TGT_LEN) = SET_BYTES;
-    REG(R_TGT_GO)  = TGT_WRITE;
-
-    uint32_t deadline = cycles() + CLK_HZ * 2u;
-    for (;;) {
-        uint32_t st = REG(R_TGT_GO);
-        if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
-        if ((int32_t)(cycles() - deadline) >= 0) return 0;
-    }
-}
-#endif
-
-static int settings_store(void)
-{
-#if SETTINGS_WRITE
-    return settings_write_now();
-#else
-    return 1;                       /* report success; simply never write */
-#endif
+    int changed = 0;
+    for (uint32_t w = 0; w < SW_N; w++)
+        if (set_rd(w) != set_pub[w]) { changed = 1; break; }
+    if (!changed) return 0;
+    settings_load();
+    settings_store();          /* re-publish so pub[] tracks again */
+    return 1;
 }
 
 /* Called from the main loop. Does nothing until the settings have been stable
@@ -415,13 +341,24 @@ static int settings_store(void)
 
 static void settings_pump(void)
 {
-    if (!set_dirty_at) return;
-    set_flush_now = 0;
-    set_dirty_at  = 0;
+    /* A change of ours: publish it. Immediate -- the quiet window and the
+     * wait-for-paused both existed to keep an SD round trip away from the
+     * decoder, and there is no SD access here at all now, just MMIO writes. */
+    if (set_dirty_at) {
+        set_flush_now = 0;
+        set_dirty_at  = 0;
+        settings_store();
+        return;
+    }
 
-    /* Immediate. The quiet window and the wait-for-paused both existed to keep
-     * an SD round trip away from the decoder; there is no SD round trip any
-     * more, just two MMIO writes into the datatable. APF does the actual save
-     * at shutdown. */
-    settings_store();
+    /* Otherwise watch for a change made in the Core Settings menu. Throttled:
+     * APF rewrites these words every frame and there is no reason to compare
+     * seven of them at the main loop's rate. */
+    if ((int32_t)(cycles() - set_poll_at) < 0) return;
+    set_poll_at = cycles() + CLK_HZ / 10u;
+    if (settings_poll_menu()) {
+        ui_accent_changed = 1u;
+        ui_mode_dirty     = 1u;
+        ui_wave_force     = 1u;
+    }
 }

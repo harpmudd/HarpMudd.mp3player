@@ -1,7 +1,108 @@
 {
     "interact": {
         "magic": "APF_VER_1",
-        "variables": [],
+        "variables": [
+            {
+                "name": "Volume",
+                "id": 10,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000000",
+                "defaultval": 65,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 100,
+                    "adjust_small": 1,
+                    "adjust_large": 5
+                }
+            },
+            {
+                "name": "Accent",
+                "id": 11,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000004",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 11,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
+                "name": "Repeat",
+                "id": 12,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000008",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 2,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
+                "name": "Shuffle",
+                "id": 13,
+                "type": "check",
+                "enabled": true,
+                "persist": true,
+                "address": "0x2000000C",
+                "defaultval": 0,
+                "value": 1
+            },
+            {
+                "name": "Album art",
+                "id": 14,
+                "type": "check",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000010",
+                "defaultval": 1,
+                "value": 1
+            },
+            {
+                "name": "Meter",
+                "id": 15,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000014",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 8,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
+                "name": "EQ preset",
+                "id": 16,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000018",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 7,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            }
+        ],
         "messages": []
     }
 }

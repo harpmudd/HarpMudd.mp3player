@@ -50,6 +50,8 @@
 #define R_DT_ADDR   0x80000060u   /* W: datatable word address                  */
 #define R_DT_DATA   0x80000064u   /* R/W: datatable word at that address        */
 #define R_EQ        0x80000068u   /* R/W: EQ preset index, 0 = FLAT (bypass)    */
+#define R_SET_IDX   0x8000006Cu   /* W:   persistent settings word index, 0..7  */
+#define R_SET_DAT   0x80000070u   /* R: value APF wrote  W: value we publish    */
 
 /* Target command selector, written to R_TGT_GO bits [1:0]. */
 #define TGT_READ     0u   /* 0180 */
@@ -136,7 +138,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503312u   /* rev 18: preset EQ (R_EQ)          */
+#define EXPECT_VERSION 0x4D503314u   /* rev 20: interact settings         */
 
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */

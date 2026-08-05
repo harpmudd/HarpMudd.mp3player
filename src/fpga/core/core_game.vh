@@ -101,6 +101,10 @@ wire [7:0]  soc_con_char;
 
 wire        soc_tgt_go;
 wire [1:0]  soc_tgt_cmd_sel;
+wire [2:0]  soc_set_idx;
+wire        soc_set_wr;
+wire [31:0] soc_set_wdata;
+wire [31:0] soc_set_rdata;
 wire [9:0]  soc_dt_addr;
 wire        soc_dt_wren;
 wire [31:0] soc_dt_wdata;
@@ -184,7 +188,11 @@ mp3_soc u_soc (
     .dt_addr  (soc_dt_addr),
     .dt_wren  (soc_dt_wren),
     .dt_wdata (soc_dt_wdata),
-    .dt_q     (datatable_q)
+    .dt_q     (datatable_q),
+    .set_idx  (soc_set_idx),
+    .set_wr   (soc_set_wr),
+    .set_wdata(soc_set_wdata),
+    .set_rdata(soc_set_rdata)
 );
 
 // core_bridge_cmd's datatable, user-side port. core_top declares these wires
@@ -351,3 +359,38 @@ sound_i2s #(.CHANNEL_WIDTH(16), .SIGNED_INPUT(1)) u_sound_i2s (
     .audio_l (soc_audio_l), .audio_r (soc_audio_r),
     .audio_mclk (audio_mclk), .audio_dac (audio_dac), .audio_lrck (audio_lrck)
 );
+
+// -- 8. Persistent settings, via interact.json -----------------------------------
+// Eight words at 0x20000000. interact.json declares one `persist` variable per
+// word; APF reads them back from here EVERY FRAME, lets the user adjust them in
+// the Core Settings menu, writes them back, and saves them to its own
+// /Settings/<core>/Interact/interact_persist.json when the core shuts down.
+//
+// APF does the storing, and it stores to its OWN file. No data slot is involved
+// at any point, which is the whole reason this route was chosen: the two
+// mechanisms tried before -- the 0184 target write and a nonvolatile data slot
+// -- both reached the user's .mp3 files. This cannot.
+//
+// TWO ARRAYS, split by direction, so neither has two writers across clock
+// domains: the bridge (clk_74a) writes set_load, the CPU (clk_sys) writes
+// set_save, and APF reads set_save. Firmware publishes button changes into
+// set_save and watches set_load for changes made in the menu.
+//
+// ramstyle "logic": M10K is at 300/308 and 16 words of 32 bits would otherwise
+// take one of the seven left.
+(* ramstyle = "logic" *) reg [31:0] set_load [0:7];
+(* ramstyle = "logic" *) reg [31:0] set_save [0:7];
+
+wire [2:0] set_widx = bridge_addr[4:2];
+
+always @(posedge clk_74a) begin
+    if (bridge_wr && bridge_addr[31:28] == 4'h2)
+        set_load[set_widx] <= bridge_wr_data;
+end
+
+assign set_bridge_rd_data = set_save[set_widx];
+
+always @(posedge clk_sys) begin
+    if (soc_set_wr) set_save[soc_set_idx] <= soc_set_wdata;
+end
+assign soc_set_rdata = set_load[soc_set_idx];
