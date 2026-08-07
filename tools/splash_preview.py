@@ -72,8 +72,6 @@ UI_TITLE_Y = const("UI_TITLE_Y")
 UI_CARD_H = const("UI_CARD_H")
 V_Y = const("UI_SPL_VER_Y")
 I_Y = const("UI_SPL_INFO_Y")
-UI_PROG_Y = const("UI_PROG_Y")
-UI_PROG_H = const("UI_PROG_H")
 VER = re.search(r'#define\s+APP_VER\s+"([^"]+)"', SRC).group(1)
 
 UI_DIM = 0x94B2
@@ -188,15 +186,10 @@ def after(loading=False):
         lbl = "LOADING PLAYLIST"
         text(im, UI_MARGIN, UI_BOOT_Y, lbl, UI_WHITE, 1)
         dots(im, UI_MARGIN + width(lbl, 1) + 8, UI_BOOT_Y + 4)
-        pct = 15
     else:
         text(im, UI_MARGIN, I_Y, "PLAYLIST", UI_DIM, 1)
         s2 = "10 TRACKS"
         text(im, FB_W - UI_MARGIN - width(s2, 1), I_Y, s2, ACCENT, 1)
-        pct = 80
-    rect(im, UI_MARGIN, UI_PROG_Y, FB_W - 2 * UI_MARGIN, UI_PROG_H, 0x18E3)
-    rect(im, UI_MARGIN, UI_PROG_Y, (FB_W - 2 * UI_MARGIN) * pct // 100,
-         UI_PROG_H, ACCENT)
     return im
 
 
@@ -232,9 +225,8 @@ def main():
                     (x, pad + lab))
     out = ROOT / "docs" / "splash_preview.png"
     sheet.save(out)
-    print("layout read from player.c: card y=%d h=%d, ver y=%d, info y=%d, "
-          "boot y=%d, bar y=%d"
-          % (UI_TITLE_Y - 14, UI_CARD_H, V_Y, I_Y, UI_BOOT_Y, UI_PROG_Y))
+    print("layout read from player.c: card y=%d h=%d, ver y=%d, status y=%d"
+          % (UI_TITLE_Y - 14, UI_CARD_H, V_Y, I_Y))
     print("wrote %s" % out)
 
 

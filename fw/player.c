@@ -1391,24 +1391,10 @@ static void ui_splash_card(uint32_t f, uint32_t den)
                     UI_INNER_W);
 }
 
-/* Boot progress, on the player's own progress bar. Not decoration: until this
- * existed the splash said nothing between "playlist read" and "music", so a
- * slow load and a stuck one looked identical. Stages rather than a true
- * fraction -- the work is a handful of discrete steps of very different
- * lengths, and a smoothly interpolated lie would be worse than four honest
- * jumps. */
-static void ui_splash_progress(uint32_t pct)
-{
-    uint32_t done = (UI_INNER_W * pct) / 100u;
-    fb_rect(UI_MARGIN, UI_PROG_Y, UI_INNER_W, UI_PROG_H, UI_TRACK);
-    if (done) fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
-}
-
 static void ui_splash(void)
 {
     ui_gradient();
     ui_splash_card(1u, 1u);
-    ui_splash_progress(0);
 }
 
 /* Boot animation: a pulse sweeps the meter while the title fades up.
@@ -1429,8 +1415,6 @@ static void ui_splash_anim(void)
     uint32_t ww = ui_wave_w();
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
 
-    /* The bar is part of the frame, not the reveal: drawn once, at zero. */
-    ui_splash_progress(0);
 
     /* Settling noise: the meter starts as chaos and calms to rest.
      *
@@ -3931,7 +3915,6 @@ int main(void)
      * playlist, opening a track, decoding cover art. Previously the first
      * paint came after all of that. */
     ui_splash_anim();
-    ui_splash_progress(15u);
 
     /* Before the track, deliberately: reading the playlist slot makes APF drop
      * its fragment cache for the MP3 slot, so doing it once here costs nothing
@@ -3947,16 +3930,11 @@ int main(void)
      * answered a moment later by the idle screen saying the same thing at
      * length, and saying it twice in two places reads as a fault. */
     if (pl_count) ui_splash_summary(pl_live_count());
-    ui_splash_progress(45u);
 
     /* Try whatever is already in the slot -- a file picked from the Pocket's
      * browser, or one left there by a previous session. If that comes to
      * nothing and a playlist exists, start it; the common case is then launch
      * straight into music with no interaction at all. */
-    /* The last thing drawn before load_track(), which opens the file, reads the
-     * tag and decodes the artwork -- comfortably the longest stage, and the one
-     * where a silent screen previously looked like a hang. */
-    ui_splash_progress(80u);
     if (!load_track()) {
         /* The splash is already up; leave it while the playlist track loads
          * rather than flashing instructions that are about to be replaced. */
