@@ -1325,6 +1325,19 @@ static void ui_draw_chrome(void)
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
     ui_last_prog  = 0xFFFFFFFFu;
+    /* The mode row -- repeat, shuffle, the EQ name, N-of-M. Missing from this
+     * list until now, and the second entry to be forgotten from it after
+     * ui_last_stall. It survived because the flag is statically initialised to
+     * 1, so the FIRST track drew fine and every reload after that came up
+     * blank: the row had been erased and nothing said so. That is why the
+     * indicators only appeared once one of them was pressed.
+     *
+     * The accent-change path knew to set this and ui_draw_chrome did not, which
+     * is the real fault -- two lists of the same thing, and only one of them
+     * correct. The duplicates there are gone now; this is the one place that
+     * knows what a full repaint destroys. */
+    ui_mode_dirty = 1u;
+    ui_icon_next  = cycles();      /* transport arrows, on the next tick   */
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
     ui_prog_sec   = 0xFFFFFFFFu;
     /* track_kbps is NOT cleared here. It describes the STREAM, not the screen,
@@ -1794,15 +1807,14 @@ static void ui_draw_dynamic(void)
          * is the thing to listen for if a colour change ever ticks. */
         ui_grad_set(ui_accent);
         ui_draw_chrome();
-        for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-            wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-        }
-        ui_wave_force = 1;              /* recolour even while paused      */
-        vu_face       = 0;              /* the VU face is cached on screen */
-        ui_last_prog  = 0xFFFFFFFFu;    /* progress fill                   */
-        ui_last_pause = 0xFFFFFFFFu;    /* PLAYING label                   */
-        ui_icon_next  = cycles();       /* arrows, on the next tick        */
-        ui_mode_dirty = 1u;             /* repeat/shuffle icons, N-of-M    */
+        /* No invalidation list here any more. This used to repeat most of
+         * ui_draw_chrome's, and keeping two copies is exactly how the mode row
+         * ended up missing from the one that mattered. ui_draw_chrome repaints
+         * the whole screen and now owns the full list.
+         *
+         * ui_wave_force is NOT invalidation -- it is a behaviour request, to
+         * recolour the meter even while paused, which nothing else would do. */
+        ui_wave_force = 1;
     }
 
     /* Frozen, not decaying, while paused: shifting the history along with a
