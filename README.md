@@ -19,8 +19,8 @@ files into:
 They can live anywhere on the card; keeping them there makes them quick to find
 in the browser.
 
-`mp3player.rom` is the firmware — the core won't start without it. That and
-your music are all that belong there.
+`mp3player.rom` is the firmware — the core won't start without it. That, your
+music and a `playlist.m3u` if you want one are all that belong there.
 
 ## Playing
 
@@ -49,10 +49,12 @@ Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
-Everything is remembered between sessions, and the controls and **Core
-Settings** stay in step. The Pocket keeps them under
-`/Settings/HarpMudd.Mp3Player/` on the card — delete that folder to reset.
-Nothing is written to your music folder.
+Volume, accent color, repeat, shuffle, the meter, the art panel and the EQ
+preset are remembered between sessions, and the controls and **Core Settings**
+stay in step. Playback position is not — every launch starts a track from the
+beginning. The Pocket keeps the settings under `/Settings/HarpMudd.Mp3Player/`
+on the card; delete that folder to reset. Nothing is written to your music
+folder.
 
 ## Equalizer
 
