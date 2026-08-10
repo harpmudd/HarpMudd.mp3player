@@ -236,33 +236,31 @@ Only route worth trying later, on a card that can be reset: a variable that the
 core never writes back, driven from the menu alone. None of the current seven
 qualifies.
 
-## Button labels in input.json killed all input — REVERTED 2026-08-10
+## Button labels in input.json — WORKING, after three wrong combinations
 
-Worth keeping because the symptom points at the wrong subsystem. The core
-booted, drew its UI, and never saw a button, so it sat waiting for A and read as
-"playback is broken" rather than "controls are broken".
+The Analogue controls screen now names all eight buttons. Getting there took
+four attempts because the first three each changed two things at once:
 
-The change added eight `{id,name,key}` mappings so the Analogue controls screen
-would explain the non-obvious bindings, and moved `"type"` from `"gamepad"` to
-`"default"` per Analogue's docs, keeping the `analog_stick` entry in the same
-`mappings` array. The spec covers named mappings, and it covers the stick
-mapping, but not both in one array. On hardware the file stops working.
+| type      | names | analog_stick | result                        |
+|-----------|-------|--------------|-------------------------------|
+| `default` | yes   | yes          | ALL INPUT DEAD                |
+| `gamepad` | yes   | yes          | input fine, Controls blank    |
+| `gamepad` | no    | yes          | input fine, Controls blank    |
+| `default` | yes   | **no**       | **works**                     |
 
-Which of the two did it is NOT isolated — the type change, or the mixed shapes.
-Any retry does one at a time: names with `"gamepad"` kept, or names with the
-stick entry dropped, never both.
+So the fault was never the `"default"` type the spec requires — it was MIXING
+named `{id,name,key}` mappings with the `{type:"analog_stick"}` entry in one
+`mappings` array. The docs describe each separately and never together, and the
+Pocket will not accept both.
 
-**The process failure is the more useful half.** This was flagged at the time as
-the one item in the release needing a boot test, and then shipped in a batch
-with a firmware build, a licence, a README rewrite and a playlist-buffer change.
-Flagging a risk and batching it anyway is the same as not flagging it. An
-unproven DATA file costs one card copy and a boot to test on its own, with no
-rebuild — there is no reason to bundle it.
+The cost is the analog-stick-to-dpad mapping, which is gone. On the dock a
+connected controller's left stick no longer acts as a d-pad; its own d-pad is
+unaffected. Worth it for a player whose bindings are not guessable.
 
-Everything else was eliminated by measurement before the card was touched: the
-A-button path compiles to a plain toggle with DEBUG_DIAG=0, the boot animation
-is disarmed before load_track() so it cannot steal time in the audio refill
-spin, and the heap stood at 45,632 bytes against Helix's ~34 KB.
+Also worth recording: the Controls screen was blank BEFORE any of this, and a
+misdiagnosis blamed the labels for it. It was blank because no core here has
+ever supplied button names — every other core in the workspace ships the same
+minimal input.json and would be equally blank.
 
 ## Background ramp: dithered, and tinted from the accent — HW-confirmed 2026-08-05
 
