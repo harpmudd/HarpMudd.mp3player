@@ -139,7 +139,9 @@ framework bugs that had to be found first — is in
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
 - **JPEG album art only.** PNG covers are skipped rather than shown wrong —
   see [ROADMAP.md](ROADMAP.md).
-- **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
+- **Playlists are capped at 128 tracks**, or 16 KB of `.m3u` text — whichever
+  comes first, which allows about 128 characters per line. A playlist that runs
+  past either says so instead of quietly playing fewer.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
 

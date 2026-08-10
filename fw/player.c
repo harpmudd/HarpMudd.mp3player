@@ -470,10 +470,20 @@ static void vol_apply(void)
  * pl_order and leaves pl_off alone, so "track 4 of 12" always means the same
  * track whether shuffled or not, and turning shuffle off resumes the file
  * order without reloading anything. */
-#define PL_MAX       128u        /* tracks; 128 * 6 bytes of index is cheap */
-#define PL_TEXT_MAX  8192u       /* the .m3u itself, names only after parsing */
+#define PL_MAX       128u        /* tracks; the index costs 4 bytes each */
+/* The .m3u text. 8 KB made PL_MAX unreachable in practice and therefore a lie:
+ * a real playlist here averages 110 bytes a line, so the buffer ran out at ~74
+ * tracks while the documentation promised 128. 16 KB covers 128 lines of up to
+ * 128 bytes, which is longer than any sane "Artist - Title.mp3". Costs 8 KB of
+ * BSS. If this ever needs to grow again, raise PL_MAX with it or the same
+ * mismatch comes back the other way round. */
+#define PL_TEXT_MAX  16384u
 
 static char     pl_text[PL_TEXT_MAX];
+/* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
+ * reached with lines still to read. Without this a clipped playlist is
+ * indistinguishable from a short one: the screen just shows a smaller number. */
+static uint8_t  pl_truncated;
 static uint16_t pl_off[PL_MAX];          /* byte offset of each name in pl_text */
 static uint16_t pl_order[PL_MAX];        /* play order -> file index            */
 static uint16_t pl_count;                /* 0 = no playlist loaded              */
@@ -1638,8 +1648,12 @@ static void ui_splash_summary(uint32_t n)
 
     uint16_t bg = ui_grad_at(UI_SPL_INFO_Y);
     fb_set_color(UI_DIM, bg);
-    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y, "PLAYLIST", TS_1X, TS_1X,
-                    UI_INNER_W);
+    /* A clipped list has to say so here too. The count alone is the one thing
+     * that cannot reveal it -- a playlist cut to 128 looks exactly like a
+     * playlist of 128. */
+    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y,
+                    pl_truncated ? "PLAYLIST CLIPPED" : "PLAYLIST",
+                    TS_1X, TS_1X, UI_INNER_W);
     fb_set_color(ui_accent, bg);
     uint32_t w = fb_text_width(b, TS_1X);
     fb_text_clipped(FB_W - UI_MARGIN - w, UI_SPL_INFO_Y, b, TS_1X, TS_1X, w);

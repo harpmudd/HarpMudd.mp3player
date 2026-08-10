@@ -375,6 +375,7 @@ static uint32_t pl_read_raw(void)
 {
     uint32_t got = 0;
     int any = 0;
+    pl_truncated = 0;
 
     /* Carry the last size that worked into the next chunk instead of restarting
      * the ladder at 4 KB every time. Restarting meant each successive chunk
@@ -383,6 +384,9 @@ static uint32_t pl_read_raw(void)
      * is a cluster-chain walk, which is why the load was visibly slow. */
     uint32_t step = TAG_SIZE;
 
+    /* One byte past the end, to tell "the file is exactly this long" from "the
+     * file is longer and we stopped". Guessing from got == PL_TEXT_MAX would
+     * cry truncation on a playlist that happens to end on the boundary. */
     while (got < PL_TEXT_MAX) {
         uint32_t want = PL_TEXT_MAX - got;
         if (want > step) want = step;
@@ -408,6 +412,17 @@ static uint32_t pl_read_raw(void)
         for (uint32_t k = 0; k < n; k++) pl_text[got + k] = (char)tagbuf[k];
         got += n;
         if (n < want) break;                            /* short read = tail */
+    }
+
+    /* Filled the buffer exactly? Then the file may or may not continue. One
+     * byte past the end settles it, and only in that one case -- inferring it
+     * from got == PL_TEXT_MAX alone would cry truncation at a playlist that
+     * happens to end on the boundary. */
+    if (any && got == PL_TEXT_MAX) {
+        volatile uint8_t *z = (volatile uint8_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+        z[0] = 0u;
+        if (target_read_slot(PL_SLOT_ID, got, TAG_OFF, 1u) && tagbuf[0])
+            pl_truncated = 1u;
     }
 
     if (!any) pl_status = PL_ERR_NOFILE;
@@ -448,6 +463,10 @@ static void pl_parse(uint32_t len)
         if (end > start && pl_text[start] != '#')
             pl_off[pl_count++] = (uint16_t)start;
     }
+
+    /* Ran out of index before running out of file. */
+    while (i < len && (pl_text[i] == '\n' || pl_text[i] == '\r')) i++;
+    if (i < len) pl_truncated = 1u;
 }
 
 /* ---------------------------------------------------------------- ordering */
@@ -689,7 +708,9 @@ static void pl_load(void)
  * rather than just not working. */
 static void pl_report(void)
 {
-    if (pl_count)                         ui_toast_set("PLAYLIST", pl_live_count(),
+    if (pl_count && pl_truncated)         ui_toast_set("CLIPPED AT ", pl_live_count(),
+                                                       " TRACKS");
+    else if (pl_count)                    ui_toast_set("PLAYLIST", pl_live_count(),
                                                        " TRACKS");
     else if (pl_status == PL_ERR_NOFILE)  ui_toast_msg("NO PLAYLIST FILE");
     else                                  ui_toast_msg("PLAYLIST HAS NO TRACKS");
