@@ -59,7 +59,9 @@ before anything plays; restarting the current one is instant.
 Every setting is remembered between sessions: volume, accent color, repeat,
 shuffle, the meter, the art panel and the EQ preset. Change them with the
 controls or from **Core Settings** in the Analogue menu — they stay in step.
-The Pocket stores them itself, so nothing is written to your music folder.
+The Pocket stores them itself under `/Settings/HarpMudd.Mp3Player/` on the card,
+so nothing is written to your music folder. Delete that folder to go back to
+defaults.
 
 ## Equalizer
 

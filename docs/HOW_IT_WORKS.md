@@ -59,6 +59,24 @@ against that model. Presets are loudness-matched rather than peak-matched, so
 switching between them changes tone without changing apparent volume. Design
 notes in [EQ_DESIGN.md](EQ_DESIGN.md).
 
+## Settings that persist without the core writing anything
+
+The core never opens a file to save your settings. Instead it declares them in
+`interact.json` as persist variables — volume, accent, repeat, shuffle, the
+art panel, the meter, the EQ preset — and the Pocket owns the file that holds
+them, writing `/Settings/<core>/Interact/_core/interact_persist.json` on its
+own schedule. The core only reads and updates values through the framework.
+
+Two things fall out of that. The core needs no write access to the card at all,
+so nothing it does can touch your music. And because the Analogue menu's **Core
+Settings** page is backed by those same variables, the on-screen controls and
+the menu are one piece of state rather than two copies that can disagree.
+
+The catch is that the protocol is read-modify-write against a single address per
+frame, not one address per variable. Splitting them across separate addresses
+looks reasonable and produces a UI where every item blinks and refuses to
+change.
+
 ## Playlists
 
 Switching tracks leans on the same file path: the core asks the framework to
