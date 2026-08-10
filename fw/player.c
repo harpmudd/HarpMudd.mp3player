@@ -399,6 +399,11 @@ static uint32_t seek_secs = 5u;
 /* Average byte rate measured from real playback. Converges on the truth for
  * VBR files that carry no Xing header, which the first-frame bitrate cannot. */
 static uint32_t meas_rate;
+/* Where the current measurement window started. meas_rate has to be throughput
+ * ACTUALLY DECODED, and file_pos alone is not that -- a seek moves it without
+ * any time passing. Measuring from a baseline that a seek resets keeps the two
+ * quantities describing the same interval. */
+static uint32_t meas_pos0, meas_sec0;
 
 /* Ring cursors live up here with the UI state: the measured-rate calculation
  * needs them, and C wants them declared before ui_draw_dynamic(). */
@@ -2377,11 +2382,20 @@ static void ui_draw_dynamic(void)
 
     /* Measured average: bytes actually consumed divided by elapsed time. Only
      * after a few seconds, so a partly-filled ring cannot skew it. */
-    if (sec >= 4u && !track_secs) {
+    /* Measured over the window since the last seek, never over the whole file.
+     *
+     * Taking file_pos and sec as absolutes made this self-referential: ui_sec is
+     * computed FROM meas_rate on every seek, and meas_rate was then recomputed
+     * FROM ui_sec. Holding the seek fed that loop four times a second, the rate
+     * inflated, the clock collapsed backwards and never recovered. It only ever
+     * bit files with no Xing header, because track_secs short-circuits this
+     * whole branch -- which is exactly why it failed on some songs and not
+     * others. */
+    if (!track_secs) {
         uint32_t buffered = ring_fill - ring_rd;
-        uint32_t consumed = (file_pos > audio_start + buffered)
-                          ? file_pos - buffered - audio_start : 0u;
-        if (consumed) meas_rate = consumed / sec;
+        uint32_t played   = (file_pos > buffered) ? file_pos - buffered : 0u;
+        if (played > meas_pos0 && sec > meas_sec0 + 3u)
+            meas_rate = (played - meas_pos0) / (sec - meas_sec0);
     }
     if (sec != ui_last_sec) {
         ui_last_sec = sec;
@@ -3860,7 +3874,7 @@ static int read_track_head(void)
     track_frames = 0;
     track_encoder[0] = 0; track_vbr_method = 0;
     track_secs   = 0;
-    meas_rate    = 0;
+    meas_rate    = 0; meas_pos0 = 0; meas_sec0 = 0;
 
     /* Remember what we settled on, so later probes have a reference the load
      * itself cannot corrupt. */
@@ -4432,6 +4446,22 @@ int main(void)
                     if (last < audio_start) last = audio_start;
                     if (want > last) want = last;
                 }
+                /* A forward seek may never end up BEHIND where it started.
+                 *
+                 * slot_size is not a constant: when a refill runs off the end,
+                 * refill_pump() sets slot_size = file_pos to record the file's
+                 * true extent. Seeking near the end makes the prefill do exactly
+                 * that, so slot_size collapses to the current position -- and
+                 * the limit computed from it lands BEHIND file_pos. The clamp
+                 * then produced a backwards target, the movement guard saw a
+                 * genuine change and repositioned, and slot_size shrank again
+                 * on the next prefill. That is the clock walking backwards and
+                 * never recovering, and why it depended on the song: it turns
+                 * on where the reads first start failing.
+                 *
+                 * Clamping to file_pos makes the request a no-op instead, which
+                 * the movement guard below then drops entirely. */
+                if (want < file_pos) want = file_pos;
             } else {
                 want = (file_pos > audio_start + step)
                      ? file_pos - step : audio_start;
@@ -4458,6 +4488,12 @@ int main(void)
                 ui_sec_acc  = 0;
                 ui_last_sec = 0xFFFFFFFFu;
                 ui_prog_sec = 0xFFFFFFFFu;
+
+                /* Start a fresh measurement window: the jump just moved
+                 * file_pos without any time passing, and folding that into the
+                 * average is what made the rate run away. */
+                meas_pos0 = file_pos;
+                meas_sec0 = ui_sec;
 
                 pcm_flush();
                 refill_drain();
