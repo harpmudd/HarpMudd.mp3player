@@ -4400,9 +4400,28 @@ int main(void)
          * the controls did nothing unless audio was running. */
         if (seek_req) {
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
-            if (seek_req == 1u) file_pos += step;
-            else file_pos = (file_pos > audio_start + step)
-                          ? file_pos - step : audio_start;
+            if (seek_req == 1u) {
+                file_pos += step;
+                /* Clamp to just short of the end. Backward seek has always been
+                 * clamped to audio_start; forward never was, so holding seek
+                 * walked file_pos off the end of the file, the refill came back
+                 * empty, and the EOF path advanced to the next track. At a
+                 * fixed 5 s a step that took long enough that nobody hit it;
+                 * accelerating to 30 s gets there in seconds.
+                 *
+                 * Parked a second short rather than exactly at the end, so the
+                 * track still plays out its tail and advances the normal way
+                 * instead of stopping dead on a boundary. */
+                uint32_t rate = ui_byte_rate();
+                if (slot_size > audio_start && rate) {
+                    uint32_t last = slot_size - rate;
+                    if (last < audio_start) last = audio_start;
+                    if (file_pos > last) file_pos = last;
+                }
+            } else {
+                file_pos = (file_pos > audio_start + step)
+                         ? file_pos - step : audio_start;
+            }
             seek_req = 0;
             stopped  = 0;                 /* no longer at 0:00 */
 
