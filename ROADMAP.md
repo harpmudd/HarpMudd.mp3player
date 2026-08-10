@@ -198,6 +198,44 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Core Settings shows numbers, not names — MEASURED, not fixable as designed
+
+The menu renders Color, Repeat, Meter and EQ preset as numeric sliders with a
+value bubble that overlaps its label. `interact.json` has a `list` type that
+would show named options instead, which is plainly what these four want.
+
+It was tried, and it broke settings persistence. The card's own persist file
+records the experiment cleanly, four treatments against three controls:
+
+| variable            | type    | before -> during |
+|---------------------|---------|------------------|
+| Volume              | slider  | 35 -> 40, saved  |
+| Shuffle, Album art  | check   | 1 -> 1, held     |
+| Color               | list    | 3 -> 0, stuck    |
+| Repeat              | list    | 1 -> 0, stuck    |
+| EQ preset           | list    | 2 -> 0, stuck    |
+| Meter               | list    | 0 -> 0, stuck    |
+
+Volume changed AND saved during the same window the four lists sat dead at
+zero. So this is not a formatting mistake in the option values: `slider_u32`
+and `check` accept a value written by the CORE and persist it, and `list` does
+not. APF writes a menu selection to the core but never reads the core's own
+change back.
+
+Every setting here is changeable with buttons, so a list would give a menu whose
+value silently stops matching reality the moment L/R or Y is pressed. That is
+worse than an ugly bubble, so the sliders stay.
+
+It also cost more than a revert. The Pocket had already written `"type":"list"`
+into interact_persist.json, so restoring interact.json was not enough on its
+own -- the persist file had to be deleted before persistence recovered. A data
+file change is not automatically cheap to undo once the OS has stored state
+based on it.
+
+Only route worth trying later, on a card that can be reset: a variable that the
+core never writes back, driven from the menu alone. None of the current seven
+qualifies.
+
 ## Button labels in input.json killed all input — REVERTED 2026-08-10
 
 Worth keeping because the symptom points at the wrong subsystem. The core
