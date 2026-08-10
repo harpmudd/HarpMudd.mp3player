@@ -1,0 +1,17 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 0,
+            "select": false
+        },
+        "data_path": "",
+        "data_slots": [
+            {
+                "id": 1,
+                "filename": "mp3player.rom"
+            }
+        ],
+        "memory_writes": []
+    }
+}

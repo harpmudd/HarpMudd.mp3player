@@ -518,7 +518,6 @@ static uint32_t blank_tick;           /* cycles() deadline for the next second *
 static uint8_t  screen_blank;         /* the screen is currently black         */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
-static uint8_t  boot_hold = 1u;          /* first track loads PAUSED           */
 static uint8_t  stopped;                 /* Start: at 0:00, not merely paused  */
 static uint8_t  hold_paused;             /* stay paused across a track change  */
 static uint32_t stop_req;
@@ -1777,6 +1776,16 @@ static void ui_boot_clear(void)
     fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
 }
 
+/* Disarm WITHOUT repainting the row -- for callers whose next step redraws the
+ * screen anyway.
+ *
+ * load_track() calls ui_draw_chrome() partway through, so by the time it
+ * returns the player is already on screen and ui_boot_clear()'s wipe would
+ * punch a gradient-coloured rectangle straight through the transport row.
+ * Disarming still matters: ui_boot_tick() runs inside every blocking read, so
+ * a note left armed would keep painting dots over the player forever. */
+static void ui_boot_cancel(void) { ui_boot_msg = 0; }
+
 /* What the card turned out to hold, on the row the transport occupies during
  * playback. A labelled pair rather than a bare number: "10 TRACKS" alone in the
  * middle of a screen reads as a caption for nothing, where PLAYLIST on the left
@@ -1905,23 +1914,57 @@ static void dt_dump_boot(void)
     fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
 }
 
+/* One line of the getting-started screen.
+ *
+ * The background comes from ui_grad_at(y), NOT from one colour sampled once:
+ * glyphs paint their own background, so a line drawn low on the screen with a
+ * colour taken from the middle sits in a rectangle of visibly the wrong shade.
+ * The old three-line block spanned 70 px and got away with it; this one spans
+ * nearly 200. Clipped to UI_INNER_W so there is a real right margin -- the
+ * previous FB_W - UI_MARGIN let a long line run to the very edge. */
+static void ui_gs_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
+{
+    fb_set_color(fg, ui_grad_at(y));
+    fb_text_clipped(UI_MARGIN, y, s, ts, ts, UI_INNER_W);
+}
+
+/* Shown when there is nothing to play: no playlist, an empty one, or one whose
+ * every entry is missing. It is the first thing a new user sees, so it is a
+ * getting-started card rather than a bare error -- the three steps are the
+ * whole setup, in the order they have to happen. Widths were measured against
+ * font_metrics.h; the widest line is 310 px of the 360 available. */
 static void ui_idle_screen(const char *reason)
 {
     ui_splash();
 
-    uint16_t bg = ui_grad_at((FB_H / 2u));
-    if (reason) {
-        fb_set_color(UI_RED, bg);
-        fb_text_clipped(UI_MARGIN, 150u, reason, TS_1X, TS_1X, FB_W - UI_MARGIN);
-    }
-    fb_set_color(UI_WHITE, bg);
-    fb_text_clipped(UI_MARGIN, 176u, "Press the Analogue button",
-                    TS_1X, TS_1X, FB_W - UI_MARGIN);
-    fb_set_color(UI_DIM, bg);
-    fb_text_clipped(UI_MARGIN, 198u, "Load MP3       play one track",
-                    TS_1X, TS_1X, FB_W - UI_MARGIN);
-    fb_text_clipped(UI_MARGIN, 218u, "Load Playlist  play an .m3u",
-                    TS_1X, TS_1X, FB_W - UI_MARGIN);
+    /* Sits between the card (ends at 136) and the heading (170), 8 px clear of
+     * each. At 148 it crowded the heading and read as part of it rather than
+     * as a separate alert. */
+    if (reason) ui_gs_line(144u, reason, UI_RED, TS_1X);
+
+    ui_gs_line(170u, "Getting started",                     ui_accent, TS_15X);
+
+    /* 18 px within a step, 26 between them. An even pitch throughout made the
+     * three steps read as one eight-line block -- the grouping has to be
+     * visible or the numbers are doing all the work. */
+    /* Colour carries meaning here, so it follows one rule: prose is white,
+     * literal values and menu names are grey. That is why step 2 stays white
+     * across both its lines -- they are one sentence, and changing colour
+     * halfway through it reads as a mistake -- while the path and the two
+     * menu entries are grey. */
+    ui_gs_line(206u, "1  Copy .mp3 files to your SD card:", UI_WHITE,  TS_1X);
+    ui_gs_line(224u, "   /Assets/mp3player/common/",        UI_DIM,    TS_1X);
+
+    ui_gs_line(250u, "2  For the best experience, list them", UI_WHITE, TS_1X);
+    ui_gs_line(268u, "   in a playlist.m3u in that folder.",  UI_WHITE, TS_1X);
+
+    /* The run of spaces is not eyeballed: the font is proportional, so the
+     * second column only lines up because the padding was computed from
+     * font_adv[] to put both at x = MARGIN + 134. Retyping either label
+     * without recomputing will break the alignment. */
+    ui_gs_line(294u, "3  Press the Analogue button:",       UI_WHITE,  TS_1X);
+    ui_gs_line(312u, "   Load MP3          one track",      UI_DIM,    TS_1X);
+    ui_gs_line(330u, "   Load Playlist   your whole .m3u",  UI_DIM,    TS_1X);
 }
 
 static void ui_load_failed(void)
@@ -4324,26 +4367,35 @@ int main(void)
      * browser, or one left there by a previous session. If that comes to
      * nothing and a playlist exists, start it; the common case is then launch
      * straight into music with no interaction at all. */
-    if (!load_track()) {
-        /* The splash is already up; leave it while the playlist track loads
-         * rather than flashing instructions that are about to be replaced. */
-        if (!(pl_count && pl_play_at(0))) {
-            idle = 1;
-            ui_wave_anim_stop();
-            /* Say WHICH nothing this is. A playlist whose every entry is
-             * mistyped and no playlist at all both land here, and the idle
-             * screen is otherwise indistinguishable from the splash that was
-             * already up -- which is exactly what "the core never leaves the
-             * boot screen" was. */
-            ui_idle_screen(pl_count            ? "No playable tracks in playlist"
-                         : pl_status == PL_ERR_EMPTY ? "Playlist has no tracks"
-                         : (const char *)0);
-        }
-    } else {
+    /* The same indicator the .m3u read gets, for the same reason. Opening a
+     * track blocks on the head read, the prefill and the artwork decode, and
+     * with nothing on this row the splash just sits there looking hung until
+     * the player appears -- which is precisely how it was reported.
+     *
+     * The dots cost nothing to animate: ui_boot_tick() is driven from inside
+     * target_read_slot()'s spin, and it returns immediately unless a note is
+     * armed, so arming one here is the whole change. Cleared before anything
+     * else paints, since PLAYLIST / N TRACKS lands on this same row. */
+    ui_boot_note("LOADING SONG");
+    int from_slot = load_track();
+    /* The splash is already up; leave it while the playlist track loads
+     * rather than flashing instructions that are about to be replaced. */
+    int from_list = (!from_slot && pl_count) ? pl_play_at(0) : 0;
+    ui_boot_cancel();          /* not _clear: see the note on that function */
+
+    if (from_slot) {
         pl_report();
-        paused |= 1u;              /* wait for the user to press play */
-        boot_hold = 0;
-        stopped   = 1u;           /* at 0:00, never started */
+    } else if (!from_list) {
+        idle = 1;
+        ui_wave_anim_stop();
+        /* Say WHICH nothing this is. A playlist whose every entry is
+         * mistyped and no playlist at all both land here, and the idle
+         * screen is otherwise indistinguishable from the splash that was
+         * already up -- which is exactly what "the core never leaves the
+         * boot screen" was. */
+        ui_idle_screen(pl_count            ? "No playable tracks in playlist"
+                     : pl_status == PL_ERR_EMPTY ? "Playlist has no tracks"
+                     : (const char *)0);
     }
 
     for (;;) {
@@ -4361,6 +4413,14 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+
+        /* Keeps the LOADING dots moving through the reload gate. ui_boot_tick()
+         * is otherwise driven only from inside target_read_slot()'s spin, and
+         * the settle/probe wait issues no reads at all -- so without this the
+         * indicator would appear and then sit frozen for over a second, which
+         * looks more broken than no indicator. Returns immediately unless a
+         * note is armed. */
+        ui_boot_tick();
 
         /* A reload is NOT acted on the instant it is announced: 008A fires
          * when the user PICKS a file, not when the slot is readable. The old
@@ -4390,19 +4450,45 @@ int main(void)
             reload_probe_at = cycles();
             reload_settle   = cycles() + CLK_HZ * 3u / 2u;   /* blind fallback */
             reload_at       = cycles() + CLK_HZ * 5u;        /* hard cap       */
+
+            /* Say so NOW, not when the gate below finally opens. That wait is
+             * at least 1.5 s and can reach 5 s, and with the screen unchanged
+             * for that long the pick looks ignored -- which is what "I have to
+             * load it twice" was: no feedback, so the natural response is to
+             * pick again. Same row as LOADING PLAYLIST, via the same helper,
+             * because they are the same status line saying what it is doing.
+             *
+             * Only from the idle screen: UI_BOOT_Y falls between the
+             * getting-started steps, so the splash goes up first to give the
+             * indicator a clean card. With the player already on screen its
+             * own repaint is the feedback. */
+            if (idle) { ui_splash(); ui_boot_note("LOADING SONG"); }
         }
         if (reload_armed) {
             /* ASK APF, do not infer: slot_file_id() hashes the 0190 response,
              * so "has the slot changed?" is answered by the file's identity
              * rather than by its contents. */
+            /* ONE rule for both cases, because the old split had no
+             * confirmation at all when stale_ref_file_id was 0 -- it waited a
+             * blind 1.5 s and then read the slot whether or not APF had
+             * switched it. That is the state every first load of a session is
+             * in (nothing has been opened, so there is no previous identity),
+             * so the very first Load MP3 was the one case that guessed. When
+             * the guess was early the read failed, the idle screen came back,
+             * and the second attempt worked because the slot had caught up by
+             * then: exactly the reported "load it twice".
+             *
+             * A missing previous identity does not mean there is nothing to
+             * confirm. Zero means APF is serving nothing; non-zero means it is
+             * serving a file. So non-zero IS the change when there was no
+             * previous id, and the same comparison covers both cases.
+             *
+             * reload_settle stays as a FLOOR rather than an alternative: if a
+             * previous load failed the slot can still hold the old file, whose
+             * id is non-zero and would satisfy the probe immediately. */
             int ready = 0;
-            if (stale_ref_file_id == 0u) {
-                /* No identity to compare against. Loading immediately here
-                 * skips the gate entirely and reads the slot before it has
-                 * switched, which puts the old file's tag length and frame
-                 * count on the new track. Settle instead of not waiting. */
-                if ((int32_t)(cycles() - reload_settle) >= 0) ready = 1;
-            } else if ((int32_t)(cycles() - reload_probe_at) >= 0) {
+            if ((int32_t)(cycles() - reload_settle)   >= 0 &&
+                (int32_t)(cycles() - reload_probe_at) >= 0) {
                 reload_probe_at = cycles() + CLK_HZ / 10u;
                 uint32_t id = slot_file_id();
                 if (id != 0u && id != stale_ref_file_id) ready = 1;
@@ -4410,7 +4496,20 @@ int main(void)
 
             if (ready || (int32_t)(cycles() - reload_at) >= 0) {
                 reload_armed = 0;
-                if (load_track()) {
+
+                /* The indicator went up when the pick was detected, not here.
+                 * was_idle only decides what to restore if the open fails. */
+                int was_idle = idle;
+                int opened   = load_track();
+                ui_boot_cancel();
+
+                if (!opened && was_idle) {
+                    /* The splash went up to carry the indicator; put the
+                     * instructions back rather than leaving a bare card. */
+                    ui_idle_screen((const char *)0);
+                }
+
+                if (opened) {
                     idle = 0;
                     /* Hand off to the reposition body that is PROVEN clean.
                      *
@@ -4429,11 +4528,11 @@ int main(void)
                      * is the same route. */
                     stop_req = 1u;
                     if (hold_paused) { hold_paused = 0; paused |= 1u; stopped = 1u; }
-                    /* The first track to arrive after launch is queued, not
-                     * played: starting music the moment the core opens is
-                     * startling, and there is nothing to stop it with until
-                     * the UI is up. Every later track change plays normally. */
-                    if (boot_hold) { boot_hold = 0; paused |= 1u; stopped = 1u; }
+                    /* Nothing queues the first track any more. Picking a
+                      * file is an explicit request to hear it, and the old
+                      * behaviour -- the first track after launch loading
+                      * paused, so music never starts the instant the core
+                      * opens -- read as the player being stuck. */
                 } else if (!idle) ui_load_failed();
                 continue;
             }

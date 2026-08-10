@@ -23,13 +23,15 @@ in the browser.
 `mp3player.rom` is the firmware — the core won't start without it. That, your
 music and a `playlist.m3u` if you want one are all that belong there.
 
+The Pocket lists the core as **MP3 Player**; open that to launch it.
+
 ## Playing
 
-If a playlist is on the card, the core loads its first track at launch and waits
-— press **A** to play.
+If a playlist is on the card, the core starts playing its first track at launch.
 
-Otherwise press **Analogue** and choose **Load MP3** or **Load Playlist**. The
-same menu switches either at any time.
+Otherwise you get a short getting-started screen; press **Analogue** and choose
+**Load MP3** or **Load Playlist**. The same menu switches either at any time,
+and whatever you pick starts playing.
 
 | Pocket | Action |
 |---|---|
