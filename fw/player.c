@@ -534,6 +534,10 @@ static uint16_t pl_live_ordinal(uint16_t pos);
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
 
+/* Defined with the rest of the blanking code, below the error paths that have
+ * to wake the screen before drawing to it directly. */
+static void ui_blank_wake(void);
+
 static uint8_t eq_apply;             /* preset changed: tell the RTL */
 
 static uint32_t seek_req;                /* +1 forward, -1 back (as unsigned) */
@@ -1922,6 +1926,17 @@ static void ui_idle_screen(const char *reason)
 
 static void ui_load_failed(void)
 {
+    /* Wake first if the screen is dark. This draws straight to the framebuffer
+     * rather than through ui_draw_dynamic(), so without this it would paint
+     * over a blanked screen while screen_blank stayed set -- lit, but frozen,
+     * with every later update still suppressed and nothing to clear it.
+     *
+     * Waking is also the right call on its own terms. Blanking exists so
+     * routine events -- track changes, meters, toasts -- do not light the panel
+     * while music plays. Playback having STOPPED is not routine, and a silent
+     * player behind a dark screen gives the user nothing to act on. The idle
+     * timer restarts from here, so it blanks again on its own. */
+    ui_blank_wake();
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
     fb_set_color(UI_RED, UI_BG);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_2X, TS_2X, UI_INNER_W);
@@ -4334,6 +4349,19 @@ int main(void)
     for (;;) {
         poll_input();
 
+        /* Ticks the idle counter and blanks when it reaches the timeout.
+         *
+         * MUST be at the top of the loop, not the bottom: paused, stopped and
+         * idle all `continue` before reaching the end, so a pump down there
+         * only ever ran while a track was actively decoding -- which is the one
+         * state that does NOT need burn-in protection, the meters being in
+         * motion anyway. A player parked on a static screen (paused, or stopped
+         * at the end of a non-repeating playlist, which sets `paused` itself)
+         * is the whole reason this feature exists and was exactly the case it
+         * missed. poll_input() resets the counter on a press just above, so the
+         * ordering here is right. */
+        ui_blank_pump();
+
         /* A reload is NOT acted on the instant it is announced: 008A fires
          * when the user PICKS a file, not when the slot is readable. The old
          * track keeps decoding through the wait, so this costs no silence. */
@@ -4862,9 +4890,6 @@ int main(void)
         st0 |= (1u << 3);
         REG(R_STAT0) = st0;
 
-        /* Ticks the idle counter and blanks when it reaches the timeout. Here
-         * rather than in poll_input so it still runs while nothing is pressed. */
-        ui_blank_pump();
         if (!ui_dump_mode) ui_draw_dynamic();
 
 next_outer: ;
