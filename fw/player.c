@@ -513,8 +513,9 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  * this panel is OLED. blank_min is minutes of no button press before the screen
  * goes black; 0 disables it. Playback is untouched -- only drawing stops. */
 static uint32_t blank_min;            /* from Core Settings; 0 = never        */
-static uint32_t blank_at;             /* cycles() deadline, 0 = not armed     */
-static uint8_t  screen_blank;         /* the screen is currently black        */
+static uint32_t blank_sec;            /* whole seconds since the last button   */
+static uint32_t blank_tick;           /* cycles() deadline for the next second */
+static uint8_t  screen_blank;         /* the screen is currently black         */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
 static uint8_t  boot_hold = 1u;          /* first track loads PAUSED           */
@@ -2826,14 +2827,21 @@ static uint32_t ui_dump_mode;            /* dump screen is up; drawing paused  *
 
 /* Arm the idle timer. Called on every button press and whenever the timeout
  * setting changes. */
+/* Counts SECONDS, deliberately. A cycles() deadline cannot express this: the
+ * counter is 32-bit at 60 MHz, so it wraps every 71.6 s and the usual
+ * (int32_t)(cycles() - deadline) >= 0 idiom only spans 35.8 s. One minute is
+ * already past that and two minutes overflows the multiply outright, so the
+ * first version could not have worked at any setting. Every other timeout in
+ * this core is sub-second, which is why nothing had hit the ceiling before.
+ *
+ * A one-second tick is comfortably inside the safe range, and seconds are what
+ * the setting is measured in anyway. */
 static void ui_blank_touch(void)
 {
-    blank_at = blank_min ? (cycles() + CLK_HZ * 60u * blank_min) : 0u;
+    blank_sec  = 0;
+    blank_tick = cycles() + CLK_HZ;
 }
 
-/* Black the whole frame. Only the framebuffer -- there is no way to switch the
- * panel itself off from a core, so "blank" means every pixel black, which is
- * what an OLED needs anyway. */
 static void ui_blank_enter(void)
 {
     if (screen_blank) return;
@@ -2848,6 +2856,21 @@ static void ui_blank_wake(void)
     ui_draw_chrome();          /* everything suppressed while blank, redrawn */
 }
 
+/* One call per main-loop pass. Re-arms from NOW rather than advancing by a
+ * fixed step, so a long stall (a track load) cannot leave a backlog of ticks to
+ * catch up on. Drift does not matter for a screen blanker. */
+static void ui_blank_pump(void)
+{
+    if (screen_blank || !blank_min) return;
+    if ((int32_t)(cycles() - blank_tick) < 0) return;
+    blank_tick = cycles() + CLK_HZ;
+    if (blank_sec < 0xFFFFu) blank_sec++;
+    if (blank_sec >= blank_min * 60u) ui_blank_enter();
+}
+
+/* Black the whole frame. Only the framebuffer -- there is no way to switch the
+ * panel itself off from a core, so "blank" means every pixel black, which is
+ * what an OLED needs anyway. */
 static void poll_input(void)
 {
     static uint32_t prev;
@@ -2866,7 +2889,13 @@ static void poll_input(void)
     if (edge || fall) ui_blank_touch();
     if (screen_blank) {
         if (edge) ui_blank_wake();
-        return;
+        /* Swallow the waking press -- but do NOT return. The tail of this
+         * function handles the OS menu and the reload notification, and
+         * returning early meant "Load MP3" was ignored while the screen was
+         * blank. Clearing keys too, so a button already held cannot trigger a
+         * hold action either; `prev` was assigned above and still carries the
+         * real state, so the next pass sees correct edges. */
+        edge = 0; fall = 0; keys = 0;
     }
 
     /* A plays and pauses. Start only ever STOPS -- pressing it again does
@@ -4833,10 +4862,9 @@ int main(void)
         st0 |= (1u << 3);
         REG(R_STAT0) = st0;
 
-        /* Idle long enough with no button? Go black. Checked here rather than
-         * in poll_input so it still fires while nothing is being pressed. */
-        if (blank_min && blank_at && !screen_blank &&
-            (int32_t)(cycles() - blank_at) >= 0) ui_blank_enter();
+        /* Ticks the idle counter and blanks when it reaches the timeout. Here
+         * rather than in poll_input so it still runs while nothing is pressed. */
+        ui_blank_pump();
         if (!ui_dump_mode) ui_draw_dynamic();
 
 next_outer: ;
