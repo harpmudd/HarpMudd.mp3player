@@ -142,7 +142,6 @@ framework bugs that had to be found first — is in
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
-- **The core never writes to your card** — settings live with the Pocket.
 
 ## Credits
 
