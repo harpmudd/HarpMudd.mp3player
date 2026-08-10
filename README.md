@@ -241,12 +241,6 @@ from that source file's own copyright header.
   its own license, unmodified.
 - **[VexRiscv](https://github.com/SpinalHDL/VexRiscv)** soft CPU — Charles Papon
   ([Dolu1990](https://github.com/Dolu1990)) (MIT).
-- **[PicoRV32](https://github.com/YosysHQ/picorv32)** — Claire Xenia Wolf
-  ([clairexen](https://github.com/clairexen)) (ISC). Used for the early
-  feasibility benchmark; not in the shipped design.
-- **[minimp3](https://github.com/lieff/minimp3)** —
-  [lieff](https://github.com/lieff) (CC0). Benchmarked against Helix and not
-  used, but its test vectors were the measurement input.
 - **[picojpeg](https://github.com/richgel999/picojpeg)** — Rich Geldreich
   ([richgel999](https://github.com/richgel999)) (public domain).
 - **SDRAM controller and i2s audio bridge** — Adam Gastineau
@@ -262,6 +256,18 @@ from that source file's own copyright header.
   draws with is generated from it and is a derivative under the same license.
 - **Core, firmware, UI and integration** —
   [HarpMudd](https://github.com/harpmudd).
+
+Two more shaped the design without ending up in it. Both decided something, which
+is why they are credited at all:
+
+- **[minimp3](https://github.com/lieff/minimp3)** —
+  [lieff](https://github.com/lieff) (CC0). Measured against Helix and rejected —
+  over three times slower, because it is floating point and this CPU has no FPU.
+  Its test vectors were the measurement input either way.
+- **[PicoRV32](https://github.com/YosysHQ/picorv32)** — Claire Xenia Wolf
+  ([clairexen](https://github.com/clairexen)) (ISC). The first CPU tried. It
+  needed 114–351 MHz to decode in real time depending on configuration, which is
+  what sent the design to VexRiscv.
 
 ## License
 
