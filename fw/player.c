@@ -1443,43 +1443,48 @@ static void ui_splash(void)
  * Fixed length rather than "until the track loads": tying it to load time means
  * it is a different animation on every card, and a stutter if the load is
  * quick. ~0.8 s, then the splash stays put until playback is ready. */
-/* Boot meter: a sine travelling left to right through the bars.
+/* Boot meter: bars drifting on their own, the way a meter looks when something
+ * quiet is playing.
  *
- * What was here before ran 46 frames and decayed to silence in 0.83 s, then
- * stopped -- so the animation was over before the playlist had finished
- * loading and the screen sat still for the part that actually takes time. This
- * runs until the player is ready instead, ticked from inside the SD-read spin
- * the same way the loading dots are, so a slow card simply gets more of it.
+ * Two earlier versions were wrong in opposite directions. The first ran 46
+ * frames and decayed to silence in 0.83 s, so it finished before the playlist
+ * had loaded and the screen sat still for the part that actually takes time.
+ * The second replaced it with a travelling sine, which was smooth but read as
+ * a test pattern -- too regular to feel like a meter.
  *
- * Table generated, not hand-written: a hand-written sine for the VU needle
- * produced a 45-degree sweep instead of 100 and cost a hardware round. 32
- * entries of (sin+1)/2 scaled to 0..255, verified symmetric. */
-static const uint8_t wv_sin[32] = {
-    128, 152, 176, 198, 218, 234, 245, 253,
-    255, 253, 245, 234, 218, 198, 176, 152,
-    128, 103,  79,  57,  37,  21,  10,   2,
-      0,   2,  10,  21,  37,  57,  79, 103,
-};
-
-#define WV_FPS    30u
-#define WV_ADV     3u    /* phase units (of 256) per frame: ~2.8 s a cycle */
-#define WV_SPREAD 14u    /* phase per bar: ~1.5 wavelengths across the meter */
-#define WV_FLOOR   3u    /* bars never reach zero -- a dead meter reads broken */
+ * So: the original's randomness, at a sustained level instead of a decay, and
+ * slower. Each bar picks a fresh target every frame from a fixed envelope,
+ * rises to it at once and falls back gradually, which is the asymmetry a real
+ * meter has. Peaks fall under their own gravity so the markers trail behind.
+ * Nothing repeats, and nothing is going anywhere in particular. */
+#define WV_FPS    24u    /* slower than the meter during playback, deliberately */
+#define WV_ENV    55u    /* percent of full height: busy, not frantic */
+#define WV_FALL    5u    /* bar falls this fraction of the gap per frame */
+#define WV_FLOOR   2u    /* a bar at zero reads as broken rather than as quiet */
 
 static uint8_t  wv_on;
-static uint32_t wv_next, wv_phase;
+static uint32_t wv_next, wv_rng;
+static unsigned char wv_h[UI_WAVE_N], wv_pk[UI_WAVE_N];
 
-/* One frame at amplitude num/den, so the same code draws the run and the
- * collapse. */
-static void ui_wave_frame(uint32_t num, uint32_t den)
+/* One frame at env/100 of full height, so the same code draws the run and the
+ * settle at the end. */
+static void ui_wave_frame(uint32_t env_pct)
 {
     uint16_t bed = ui_grad_at(UI_WAVE_Y);
     uint32_t ww  = ui_wave_w();
+    uint32_t env = (UI_WAVE_H * env_pct) / 100u;
+
     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-        uint32_t idx = ((wv_phase + i * WV_SPREAD) >> 3) & 31u;
-        uint32_t amp = ((uint32_t)wv_sin[idx] * (UI_WAVE_H - 2u * WV_FLOOR)) / 255u;
-        uint32_t h   = WV_FLOOR + (amp * num) / den;
-        if (h > UI_WAVE_H) h = UI_WAVE_H;
+        wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
+
+        uint32_t h = env ? (wv_rng % (env + 1u)) : 0u;
+        if (h < WV_FLOOR) h = WV_FLOOR;
+        /* Rise at once, fall gradually. */
+        if (h < wv_h[i]) h = wv_h[i] - (wv_h[i] - h + (WV_FALL - 1u)) / WV_FALL;
+        wv_h[i] = (unsigned char)h;
+
+        if (h >= wv_pk[i]) wv_pk[i] = (unsigned char)h;
+        else if (wv_pk[i] > WV_FLOOR) wv_pk[i]--;
 
         uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
         uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
@@ -1488,12 +1493,15 @@ static void ui_wave_frame(uint32_t num, uint32_t den)
         fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h,
                 ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
         if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+        if (wv_pk[i] > h + 1u)
+            fb_rect(x, UI_WAVE_Y + UI_WAVE_H - wv_pk[i], lit, 1, UI_WHITE);
     }
 }
 
 static void ui_wave_anim_start(void)
 {
-    wv_on = 1u; wv_phase = 0; wv_next = 0;
+    wv_on = 1u; wv_next = 0; wv_rng = cycles() | 1u;
+    for (uint32_t i = 0; i < UI_WAVE_N; i++) { wv_h[i] = 0; wv_pk[i] = 0; }
 }
 
 /* Called from the read spin. A single compare and return unless armed, so
@@ -1502,22 +1510,22 @@ static void ui_wave_anim_tick(void)
 {
     if (!wv_on) return;
     if ((int32_t)(cycles() - wv_next) < 0) return;
-    wv_next  = cycles() + CLK_HZ / WV_FPS;
-    wv_phase += WV_ADV;
-    ui_wave_frame(1u, 1u);
+    wv_next = cycles() + CLK_HZ / WV_FPS;
+    ui_wave_frame(WV_ENV);
 }
 
-/* ~145 ms fall to the floor. Cutting mid-stride would work -- the player
- * repaints everything anyway -- but the meter then vanishes at whatever height
- * it happened to be, which reads as interrupted rather than finished. */
+/* Wind the envelope down over ~0.4 s so the bars settle instead of stopping
+ * mid-air. This is the drain the first version had -- it just happens when the
+ * loading is finished rather than on a timer that expires first. */
 static void ui_wave_anim_stop(void)
 {
     if (!wv_on) return;
     wv_on = 0;
-    for (uint32_t k = 8u; k > 0u; k--) {
-        ui_wave_frame(k - 1u, 8u);
-        uint32_t next = cycles() + CLK_HZ / 55u;
+    for (uint32_t e = WV_ENV; ; e = (e > 5u) ? (e - 5u) : 0u) {
+        ui_wave_frame(e);
+        uint32_t next = cycles() + CLK_HZ / WV_FPS;
         while ((int32_t)(cycles() - next) < 0) { }
+        if (!e) break;
     }
 }
 
@@ -1536,11 +1544,16 @@ static void ui_splash_anim(void)
     ui_wave_anim_start();
     const uint32_t INTRO_MS = 1600u;
     uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
+    /* Redraw the card only when the fade STEP changes -- 33 times, not once per
+     * spin of an unpaced loop. Repainting the title thousands of times a second
+     * is what made it flash: each repaint erases its own cell before writing
+     * the glyph, and scanout catches the gap. */
+    uint32_t last_f = 0xFFFFFFFFu;
     for (;;) {
         uint32_t el = cycles() - t0;
         if (el >= CLK_HZ / 1000u * INTRO_MS) break;
         uint32_t f = (el < fade_end) ? (el * STEP_DEN / fade_end) : STEP_DEN;
-        ui_splash_card(f, STEP_DEN);
+        if (f != last_f) { last_f = f; ui_splash_card(f, STEP_DEN); }
         ui_wave_anim_tick();
     }
     (void)bed; (void)ww;
@@ -3847,10 +3860,6 @@ static int load_track(void)
     art_shown = (uint32_t)(has_art && art_pref);
     art_x     = art_shown ? ART_X : FB_W;
 
-    /* Land the boot meter before the player replaces the screen. No-op once
-     * the animation has already been stopped, so the tag probe calling
-     * ui_draw_chrome() mid-playback costs nothing. */
-    ui_wave_anim_stop();
     ui_draw_chrome();   /* title/artist are populated now -- draw the UI */
 
     if (!prefill()) { REG(R_STAT2) = 0xD0000000u; return 0; }
@@ -4013,6 +4022,11 @@ int main(void)
      * answered a moment later by the idle screen saying the same thing at
      * length, and saying it twice in two places reads as a fault. */
     if (pl_count) ui_splash_summary(pl_live_count());
+    /* Land it HERE. Running on through load_track() was tried and looked wrong:
+     * ART_Y sits inside the meter band, so the artwork panel paints over the
+     * bars while the animation is still redrawing them, and the settle never
+     * gets a clean frame. */
+    ui_wave_anim_stop();
 
     /* Try whatever is already in the slot -- a file picked from the Pocket's
      * browser, or one left there by a previous session. If that comes to
