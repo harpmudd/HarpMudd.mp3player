@@ -2,7 +2,8 @@
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
 decodes and plays it straight off the SD card, with album art, ID3 tags, nine
-switchable meters, an eight-preset equalizer and a progress bar.
+switchable meters, an eight-preset equalizer, a progress bar and settings it
+remembers.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
