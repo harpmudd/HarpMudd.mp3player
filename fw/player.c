@@ -1443,6 +1443,84 @@ static void ui_splash(void)
  * Fixed length rather than "until the track loads": tying it to load time means
  * it is a different animation on every card, and a stutter if the load is
  * quick. ~0.8 s, then the splash stays put until playback is ready. */
+/* Boot meter: a sine travelling left to right through the bars.
+ *
+ * What was here before ran 46 frames and decayed to silence in 0.83 s, then
+ * stopped -- so the animation was over before the playlist had finished
+ * loading and the screen sat still for the part that actually takes time. This
+ * runs until the player is ready instead, ticked from inside the SD-read spin
+ * the same way the loading dots are, so a slow card simply gets more of it.
+ *
+ * Table generated, not hand-written: a hand-written sine for the VU needle
+ * produced a 45-degree sweep instead of 100 and cost a hardware round. 32
+ * entries of (sin+1)/2 scaled to 0..255, verified symmetric. */
+static const uint8_t wv_sin[32] = {
+    128, 152, 176, 198, 218, 234, 245, 253,
+    255, 253, 245, 234, 218, 198, 176, 152,
+    128, 103,  79,  57,  37,  21,  10,   2,
+      0,   2,  10,  21,  37,  57,  79, 103,
+};
+
+#define WV_FPS    30u
+#define WV_ADV     3u    /* phase units (of 256) per frame: ~2.8 s a cycle */
+#define WV_SPREAD 14u    /* phase per bar: ~1.5 wavelengths across the meter */
+#define WV_FLOOR   3u    /* bars never reach zero -- a dead meter reads broken */
+
+static uint8_t  wv_on;
+static uint32_t wv_next, wv_phase;
+
+/* One frame at amplitude num/den, so the same code draws the run and the
+ * collapse. */
+static void ui_wave_frame(uint32_t num, uint32_t den)
+{
+    uint16_t bed = ui_grad_at(UI_WAVE_Y);
+    uint32_t ww  = ui_wave_w();
+    for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+        uint32_t idx = ((wv_phase + i * WV_SPREAD) >> 3) & 31u;
+        uint32_t amp = ((uint32_t)wv_sin[idx] * (UI_WAVE_H - 2u * WV_FLOOR)) / 255u;
+        uint32_t h   = WV_FLOOR + (amp * num) / den;
+        if (h > UI_WAVE_H) h = UI_WAVE_H;
+
+        uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
+        uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
+        uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
+
+        fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h,
+                ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
+        if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+    }
+}
+
+static void ui_wave_anim_start(void)
+{
+    wv_on = 1u; wv_phase = 0; wv_next = 0;
+}
+
+/* Called from the read spin. A single compare and return unless armed, so
+ * every other caller of target_read_slot() is unaffected. */
+static void ui_wave_anim_tick(void)
+{
+    if (!wv_on) return;
+    if ((int32_t)(cycles() - wv_next) < 0) return;
+    wv_next  = cycles() + CLK_HZ / WV_FPS;
+    wv_phase += WV_ADV;
+    ui_wave_frame(1u, 1u);
+}
+
+/* ~145 ms fall to the floor. Cutting mid-stride would work -- the player
+ * repaints everything anyway -- but the meter then vanishes at whatever height
+ * it happened to be, which reads as interrupted rather than finished. */
+static void ui_wave_anim_stop(void)
+{
+    if (!wv_on) return;
+    wv_on = 0;
+    for (uint32_t k = 8u; k > 0u; k--) {
+        ui_wave_frame(k - 1u, 8u);
+        uint32_t next = cycles() + CLK_HZ / 55u;
+        while ((int32_t)(cycles() - next) < 0) { }
+    }
+}
+
 static void ui_splash_anim(void)
 {
     ui_gradient();
@@ -1452,56 +1530,20 @@ static void ui_splash_anim(void)
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
 
 
-    /* Settling noise: the meter starts as chaos and calms to rest.
-     *
-     * Every bar picks a fresh random height each frame, drawn from an envelope
-     * that decays to nothing over the animation -- so it begins looking like a
-     * meter being driven hard and ends at silence, without ever repeating.
-     * Seeded from the cycle counter, so it differs on every boot; a fixed
-     * pattern would stop feeling random the third time it is seen.
-     *
-     * Peaks fall under their own gravity rather than following the envelope,
-     * which is what stops it reading as uniform noise fading out: the markers
-     * trail behind and settle last. */
-    uint32_t rng = cycles() | 1u;
-    unsigned char h_cur[UI_WAVE_N] = { 0 }, h_pk[UI_WAVE_N] = { 0 };
-
-    const uint32_t FRAMES = 46u;
-    for (uint32_t t = 0; t < FRAMES; t++) {
-        uint32_t f = (t * 2u < FRAMES) ? (t * 2u * STEP_DEN / FRAMES) : STEP_DEN;
+    /* Minimum time on screen, then the wave carries on from the read spin for
+     * as long as loading takes. Fixed length here rather than "until loaded"
+     * so a fast card still gets a boot animation instead of a flicker. */
+    ui_wave_anim_start();
+    const uint32_t INTRO_MS = 1600u;
+    uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
+    for (;;) {
+        uint32_t el = cycles() - t0;
+        if (el >= CLK_HZ / 1000u * INTRO_MS) break;
+        uint32_t f = (el < fade_end) ? (el * STEP_DEN / fade_end) : STEP_DEN;
         ui_splash_card(f, STEP_DEN);
-
-        /* Envelope: full early, nothing by the end. Squared so it holds up
-         * before collapsing, rather than sagging from the first frame. */
-        uint32_t left = FRAMES - t;
-        uint32_t env  = (UI_WAVE_H * left * left) / (FRAMES * FRAMES);
-
-        for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-
-            uint32_t h = env ? (rng % (env + 1u)) : 0u;
-            if (h < 2u) h = 2u;
-            /* Rise instantly, fall gradually -- the shape of a real meter. */
-            if (h < h_cur[i]) h = h_cur[i] - (h_cur[i] - h + 3u) / 4u;
-            h_cur[i] = (unsigned char)h;
-
-            if (h >= h_pk[i]) h_pk[i] = (unsigned char)h;
-            else if (h_pk[i] > 2u) h_pk[i] -= 2u;
-
-            uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
-            uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
-            uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
-
-            uint16_t c = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-            fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h, c);
-            if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
-            if (h_pk[i] > h + 1u)
-                fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h_pk[i], lit, 1, UI_WHITE);
-        }
-
-        uint32_t next = cycles() + CLK_HZ / 55u;      /* ~18 ms a frame */
-        while ((int32_t)(cycles() - next) < 0) { }
+        ui_wave_anim_tick();
     }
+    (void)bed; (void)ww;
 
     /* Leave the meter at its floor so the transition into playback is a rise
      * from rest, not a jump from wherever the pulse happened to stop. */
@@ -2938,7 +2980,7 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
      * actually goes during a playlist read. ui_boot_tick() is a single compare
      * and return unless a note is armed, which it only is around pl_load(), so
      * every other caller of this function is unaffected. */
-    while (!target_read_poll()) { ui_boot_tick(); }
+    while (!target_read_poll()) { ui_boot_tick(); ui_wave_anim_tick(); }
     rd_pending = 0;
     return rd_ok;
 }
@@ -3805,6 +3847,10 @@ static int load_track(void)
     art_shown = (uint32_t)(has_art && art_pref);
     art_x     = art_shown ? ART_X : FB_W;
 
+    /* Land the boot meter before the player replaces the screen. No-op once
+     * the animation has already been stopped, so the tag probe calling
+     * ui_draw_chrome() mid-playback costs nothing. */
+    ui_wave_anim_stop();
     ui_draw_chrome();   /* title/artist are populated now -- draw the UI */
 
     if (!prefill()) { REG(R_STAT2) = 0xD0000000u; return 0; }
@@ -3977,6 +4023,7 @@ int main(void)
          * rather than flashing instructions that are about to be replaced. */
         if (!(pl_count && pl_play_at(0))) {
             idle = 1;
+            ui_wave_anim_stop();
             /* Say WHICH nothing this is. A playlist whose every entry is
              * mistyped and no playlist at all both land here, and the idle
              * screen is otherwise indistinguishable from the splash that was
