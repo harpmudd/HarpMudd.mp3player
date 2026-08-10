@@ -2852,6 +2852,35 @@ static void poll_input(void)
     }
     if (edge & KEY_START) {
 #if DEBUG_DIAG
+        /* Select+Start, second page: the seek state, live. Everything the last
+         * four attempts at the hold-to-seek fault were guessing at.
+         *   P = file_pos/1k   L = the computed limit/1k   Z = slot_size/1k
+         *   S = ui_sec        R = ui_byte_rate            X = has Xing
+         * Read these WHILE holding the seek: whichever one moves when it should
+         * not is the fault, and no simulation has managed to say which. */
+        if ((keys & KEY_SELECT) && (keys & KEY_L1)) {
+            sel_used = 1;
+            char b[24]; uint32_t i = 0;
+            uint32_t rate = ui_seek_rate();
+            uint32_t lim  = (slot_size > audio_start && rate)
+                          ? slot_size - 3u * rate : 0u;
+            const uint32_t v[5] = { file_pos >> 10, lim >> 10, slot_size >> 10,
+                                    ui_sec, ui_byte_rate() };
+            const char *lbl = "PLZSR";
+            for (uint32_t k = 0; k < 5u && i + 7u < sizeof(b); k++) {
+                b[i++] = lbl[k];
+                uint32_t n = v[k], div = 10000u; int lead = 0;
+                while (div) {
+                    uint32_t d = n / div % 10u;
+                    if (d || lead || div == 1u) { b[i++] = (char)('0' + d); lead = 1; }
+                    div /= 10u;
+                }
+                if (k < 4u) b[i++] = ' ';
+            }
+            b[i] = 0;
+            ui_toast_set(b, 0xFFFFFFFFu, 0);
+            return;
+        }
         if (keys & KEY_SELECT) {
             /* Load-phase breakdown for the track just loaded, in ms: Head read,
              * Size probe, Art decode, Prefill, Total. Measured all along but
