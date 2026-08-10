@@ -1443,49 +1443,71 @@ static void ui_splash(void)
  * Fixed length rather than "until the track loads": tying it to load time means
  * it is a different animation on every card, and a stutter if the load is
  * quick. ~0.8 s, then the splash stays put until playback is ready. */
-/* Boot meter: bars drifting on their own, the way a meter looks when something
- * quiet is playing.
+/* Boot meter: the playback bar meter, running on nothing.
  *
- * Two earlier versions were wrong in opposite directions. The first ran 46
- * frames and decayed to silence in 0.83 s, so it finished before the playlist
- * had loaded and the screen sat still for the part that actually takes time.
- * The second replaced it with a travelling sine, which was smooth but read as
- * a test pattern -- too regular to feel like a meter.
+ * Two earlier attempts missed for opposite reasons. The first decayed to
+ * silence in 0.83 s, finishing before the playlist had loaded. The second was a
+ * travelling sine -- smooth, but too regular to read as a meter.
  *
- * So: the original's randomness, at a sustained level instead of a decay, and
- * slower. Each bar picks a fresh target every frame from a fixed envelope,
- * rises to it at once and falls back gradually, which is the asymmetry a real
- * meter has. Peaks fall under their own gravity so the markers trail behind.
- * Nothing repeats, and nothing is going anywhere in particular. */
-#define WV_FPS    24u    /* slower than the meter during playback, deliberately */
-#define WV_ENV    55u    /* percent of full height: busy, not frantic */
-#define WV_FALL    5u    /* bar falls this fraction of the gap per frame */
+ * This one is the SAME MOTION as VIZ_BARS during playback: the history scrolls
+ * one bar left per frame and a new sample enters at the right, so the boot
+ * screen moves the way the player does. Mirroring it was the point; a boot
+ * animation that moves differently from the thing it boots into is a second
+ * visual language again.
+ *
+ * The incoming level is a random WALK rather than a fresh random number. White
+ * noise scrolling sideways looks like static; a walk wanders, holds a level for
+ * a while and then moves off it, which is what a loudness history actually
+ * looks like.
+ *
+ * The walk is MEAN-REVERTING. A plain one clamped at both ends drifts into a
+ * corner and sits there -- simulated, it spent most of its time near the floor
+ * and the meter read flat and low. Biasing it upward instead just pinned it to
+ * the ceiling. Pulling it gently back toward a centre gives a mean around half
+ * height with excursions either way, which held across several seeds. */
+#define WV_FPS    15u    /* 36 bars at 15 fps: ~2.4 s for one to cross */
+#define WV_ENV    85u    /* percent of full height the level may reach */
+#define WV_CTR    55u    /* percent of THAT it is pulled back toward */
+#define WV_PULL    5u    /* the pull is (level - centre) / this, per sample */
+#define WV_DRIFT   6u    /* most the level may move between samples */
 #define WV_FLOOR   2u    /* a bar at zero reads as broken rather than as quiet */
 
-static uint8_t  wv_on;
+static uint8_t  wv_on, wv_level;
 static uint32_t wv_next, wv_rng;
 static unsigned char wv_h[UI_WAVE_N], wv_pk[UI_WAVE_N];
 
-/* One frame at env/100 of full height, so the same code draws the run and the
- * settle at the end. */
+/* One frame at env/100 of full height. The same code draws the run and the
+ * settle: winding env down pulls the whole meter with it. */
 static void ui_wave_frame(uint32_t env_pct)
 {
     uint16_t bed = ui_grad_at(UI_WAVE_Y);
     uint32_t ww  = ui_wave_w();
     uint32_t env = (UI_WAVE_H * env_pct) / 100u;
 
+    /* Scroll left and insert at the right -- the playback meter's own shift. */
+    for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) {
+        wv_h[i]  = wv_h[i + 1u];
+        wv_pk[i] = wv_pk[i + 1u];
+    }
+
+    wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
+    int32_t ctr = (int32_t)((env * WV_CTR) / 100u);
+    int32_t lv  = (int32_t)wv_level
+                + (int32_t)(wv_rng % (2u * WV_DRIFT + 1u)) - (int32_t)WV_DRIFT
+                - ((int32_t)wv_level - ctr) / (int32_t)WV_PULL;
+    if (lv < (int32_t)WV_FLOOR) lv = (int32_t)WV_FLOOR;
+    if (lv > (int32_t)env)      lv = (int32_t)env;
+    wv_level = (uint8_t)lv;
+    wv_h[UI_WAVE_N - 1u]  = wv_level;
+    wv_pk[UI_WAVE_N - 1u] = wv_level;
+
     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-        wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
+        /* Only bites while env is winding down, and then it drains the bars
+         * already on screen instead of waiting for them to scroll off. */
+        if (wv_h[i] > env) wv_h[i] = (unsigned char)env;
+        if (wv_pk[i] > wv_h[i]) wv_pk[i]--;
 
-        uint32_t h = env ? (wv_rng % (env + 1u)) : 0u;
-        if (h < WV_FLOOR) h = WV_FLOOR;
-        /* Rise at once, fall gradually. */
-        if (h < wv_h[i]) h = wv_h[i] - (wv_h[i] - h + (WV_FALL - 1u)) / WV_FALL;
-        wv_h[i] = (unsigned char)h;
-
-        if (h >= wv_pk[i]) wv_pk[i] = (unsigned char)h;
-        else if (wv_pk[i] > WV_FLOOR) wv_pk[i]--;
-
+        uint32_t h   = wv_h[i];
         uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
         uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
         uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
@@ -1501,6 +1523,7 @@ static void ui_wave_frame(uint32_t env_pct)
 static void ui_wave_anim_start(void)
 {
     wv_on = 1u; wv_next = 0; wv_rng = cycles() | 1u;
+    wv_level = (uint8_t)((UI_WAVE_H * WV_ENV * WV_CTR) / 10000u);  /* at centre */
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wv_h[i] = 0; wv_pk[i] = 0; }
 }
 
@@ -1514,14 +1537,13 @@ static void ui_wave_anim_tick(void)
     ui_wave_frame(WV_ENV);
 }
 
-/* Wind the envelope down over ~0.4 s so the bars settle instead of stopping
- * mid-air. This is the drain the first version had -- it just happens when the
- * loading is finished rather than on a timer that expires first. */
+/* Wind the envelope to nothing over ~0.5 s so the meter drains rather than
+ * stopping mid-scroll. */
 static void ui_wave_anim_stop(void)
 {
     if (!wv_on) return;
     wv_on = 0;
-    for (uint32_t e = WV_ENV; ; e = (e > 5u) ? (e - 5u) : 0u) {
+    for (uint32_t e = WV_ENV; ; e = (e > 8u) ? (e - 8u) : 0u) {
         ui_wave_frame(e);
         uint32_t next = cycles() + CLK_HZ / WV_FPS;
         while ((int32_t)(cycles() - next) < 0) { }
