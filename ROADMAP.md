@@ -198,6 +198,34 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Button labels in input.json killed all input — REVERTED 2026-08-10
+
+Worth keeping because the symptom points at the wrong subsystem. The core
+booted, drew its UI, and never saw a button, so it sat waiting for A and read as
+"playback is broken" rather than "controls are broken".
+
+The change added eight `{id,name,key}` mappings so the Analogue controls screen
+would explain the non-obvious bindings, and moved `"type"` from `"gamepad"` to
+`"default"` per Analogue's docs, keeping the `analog_stick` entry in the same
+`mappings` array. The spec covers named mappings, and it covers the stick
+mapping, but not both in one array. On hardware the file stops working.
+
+Which of the two did it is NOT isolated — the type change, or the mixed shapes.
+Any retry does one at a time: names with `"gamepad"` kept, or names with the
+stick entry dropped, never both.
+
+**The process failure is the more useful half.** This was flagged at the time as
+the one item in the release needing a boot test, and then shipped in a batch
+with a firmware build, a licence, a README rewrite and a playlist-buffer change.
+Flagging a risk and batching it anyway is the same as not flagging it. An
+unproven DATA file costs one card copy and a boot to test on its own, with no
+rebuild — there is no reason to bundle it.
+
+Everything else was eliminated by measurement before the card was touched: the
+A-button path compiles to a plain toggle with DEBUG_DIAG=0, the boot animation
+is disarmed before load_track() so it cannot steal time in the audio refill
+spin, and the heap stood at 45,632 bytes against Helix's ~34 KB.
+
 ## Background ramp: dithered, and tinted from the accent — HW-confirmed 2026-08-05
 
 User asked for a smoother gradient and for it to pick up the accent colour.
