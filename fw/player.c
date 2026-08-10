@@ -1465,11 +1465,14 @@ static void ui_splash(void)
  * and the meter read flat and low. Biasing it upward instead just pinned it to
  * the ceiling. Pulling it gently back toward a centre gives a mean around half
  * height with excursions either way, which held across several seeds. */
-#define WV_FPS    15u    /* 36 bars at 15 fps: ~2.4 s for one to cross */
-#define WV_ENV    85u    /* percent of full height the level may reach */
-#define WV_CTR    68u    /* percent of THAT it is pulled back toward: ~58% of
-                          * full height on average, which is roughly where a
-                          * real track sits on this meter */
+#define WV_FPS    18u    /* 36 bars at 18 fps: ~2.0 s for one to cross */
+#define WV_ENV   100u    /* percent of full height the level may reach */
+/* Centre as a percentage of the ceiling. With the ceiling at full height this
+ * puts the average around 73% and the range at roughly 39..69 of 72 -- simulated
+ * over 600 frames, and chosen because it NEVER clips: settings that hit the same
+ * average with a lower ceiling spent their time pinned against it, which flattens
+ * the tops and stops looking like a meter. */
+#define WV_CTR    72u
 #define WV_PULL    5u    /* the pull is (level - centre) / this, per sample */
 #define WV_DRIFT   6u    /* most the level may move between samples */
 #define WV_FLOOR   2u    /* a bar at zero reads as broken rather than as quiet */

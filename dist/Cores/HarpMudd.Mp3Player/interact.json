@@ -21,34 +21,84 @@
             {
                 "name": "Accent",
                 "id": 11,
-                "type": "slider_u32",
+                "type": "list",
                 "enabled": true,
                 "persist": true,
                 "address": "0x20000004",
                 "defaultval": 0,
-                "graphical": {
-                    "signed": false,
-                    "min": 0,
-                    "max": 11,
-                    "adjust_small": 1,
-                    "adjust_large": 1
-                }
+                "options": [
+                    {
+                        "value": "0x0000",
+                        "name": "Amber"
+                    },
+                    {
+                        "value": "0x0001",
+                        "name": "Lime"
+                    },
+                    {
+                        "value": "0x0002",
+                        "name": "Mint"
+                    },
+                    {
+                        "value": "0x0003",
+                        "name": "Seafoam"
+                    },
+                    {
+                        "value": "0x0004",
+                        "name": "Sky"
+                    },
+                    {
+                        "value": "0x0005",
+                        "name": "Indigo"
+                    },
+                    {
+                        "value": "0x0006",
+                        "name": "Lilac"
+                    },
+                    {
+                        "value": "0x0007",
+                        "name": "Blush"
+                    },
+                    {
+                        "value": "0x0008",
+                        "name": "Coral"
+                    },
+                    {
+                        "value": "0x0009",
+                        "name": "Crimson"
+                    },
+                    {
+                        "value": "0x000A",
+                        "name": "Gold"
+                    },
+                    {
+                        "value": "0x000B",
+                        "name": "Cream"
+                    }
+                ]
             },
             {
                 "name": "Repeat",
                 "id": 12,
-                "type": "slider_u32",
+                "type": "list",
                 "enabled": true,
                 "persist": true,
                 "address": "0x20000008",
                 "defaultval": 0,
-                "graphical": {
-                    "signed": false,
-                    "min": 0,
-                    "max": 2,
-                    "adjust_small": 1,
-                    "adjust_large": 1
-                }
+                "options": [
+                    {
+                        "value": "0x0000",
+                        "name": "Off"
+                    },
+                    {
+                        "value": "0x0001",
+                        "name": "All"
+                    },
+                    {
+                        "value": "0x0002",
+                        "name": "One"
+                    }
+                ]
             },
             {
                 "name": "Shuffle",
@@ -73,34 +123,92 @@
             {
                 "name": "Meter",
                 "id": 15,
-                "type": "slider_u32",
+                "type": "list",
                 "enabled": true,
                 "persist": true,
                 "address": "0x20000014",
                 "defaultval": 0,
-                "graphical": {
-                    "signed": false,
-                    "min": 0,
-                    "max": 8,
-                    "adjust_small": 1,
-                    "adjust_large": 1
-                }
+                "options": [
+                    {
+                        "value": "0x0000",
+                        "name": "Bars"
+                    },
+                    {
+                        "value": "0x0001",
+                        "name": "Waterfall"
+                    },
+                    {
+                        "value": "0x0002",
+                        "name": "L/R levels"
+                    },
+                    {
+                        "value": "0x0003",
+                        "name": "Phase scope"
+                    },
+                    {
+                        "value": "0x0004",
+                        "name": "Oscilloscope"
+                    },
+                    {
+                        "value": "0x0005",
+                        "name": "Vu"
+                    },
+                    {
+                        "value": "0x0006",
+                        "name": "Waveform"
+                    },
+                    {
+                        "value": "0x0007",
+                        "name": "Mirrored bars"
+                    },
+                    {
+                        "value": "0x0008",
+                        "name": "Peak dots"
+                    }
+                ]
             },
             {
                 "name": "EQ preset",
                 "id": 16,
-                "type": "slider_u32",
+                "type": "list",
                 "enabled": true,
                 "persist": true,
                 "address": "0x20000018",
                 "defaultval": 0,
-                "graphical": {
-                    "signed": false,
-                    "min": 0,
-                    "max": 7,
-                    "adjust_small": 1,
-                    "adjust_large": 1
-                }
+                "options": [
+                    {
+                        "value": "0x0000",
+                        "name": "Flat"
+                    },
+                    {
+                        "value": "0x0001",
+                        "name": "Bass"
+                    },
+                    {
+                        "value": "0x0002",
+                        "name": "Rock"
+                    },
+                    {
+                        "value": "0x0003",
+                        "name": "Pop"
+                    },
+                    {
+                        "value": "0x0004",
+                        "name": "Jazz"
+                    },
+                    {
+                        "value": "0x0005",
+                        "name": "Classical"
+                    },
+                    {
+                        "value": "0x0006",
+                        "name": "Vocal"
+                    },
+                    {
+                        "value": "0x0007",
+                        "name": "Treble"
+                    }
+                ]
             }
         ],
         "messages": []
