@@ -1467,28 +1467,27 @@ static void ui_splash(void)
  * height with excursions either way, which held across several seeds. */
 #define WV_FPS    15u    /* 36 bars at 15 fps: ~2.4 s for one to cross */
 #define WV_ENV    85u    /* percent of full height the level may reach */
-#define WV_CTR    55u    /* percent of THAT it is pulled back toward */
+#define WV_CTR    68u    /* percent of THAT it is pulled back toward: ~58% of
+                          * full height on average, which is roughly where a
+                          * real track sits on this meter */
 #define WV_PULL    5u    /* the pull is (level - centre) / this, per sample */
 #define WV_DRIFT   6u    /* most the level may move between samples */
 #define WV_FLOOR   2u    /* a bar at zero reads as broken rather than as quiet */
 
 static uint8_t  wv_on, wv_level;
 static uint32_t wv_next, wv_rng;
-static unsigned char wv_h[UI_WAVE_N], wv_pk[UI_WAVE_N];
+static unsigned char wv_h[UI_WAVE_N];
 
 /* One frame at env/100 of full height. The same code draws the run and the
  * settle: winding env down pulls the whole meter with it. */
-static void ui_wave_frame(uint32_t env_pct)
+static void ui_wave_frame(void)
 {
     uint16_t bed = ui_grad_at(UI_WAVE_Y);
     uint32_t ww  = ui_wave_w();
-    uint32_t env = (UI_WAVE_H * env_pct) / 100u;
+    uint32_t env = (UI_WAVE_H * WV_ENV) / 100u;
 
     /* Scroll left and insert at the right -- the playback meter's own shift. */
-    for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) {
-        wv_h[i]  = wv_h[i + 1u];
-        wv_pk[i] = wv_pk[i + 1u];
-    }
+    for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) wv_h[i] = wv_h[i + 1u];
 
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
     int32_t ctr = (int32_t)((env * WV_CTR) / 100u);
@@ -1498,15 +1497,9 @@ static void ui_wave_frame(uint32_t env_pct)
     if (lv < (int32_t)WV_FLOOR) lv = (int32_t)WV_FLOOR;
     if (lv > (int32_t)env)      lv = (int32_t)env;
     wv_level = (uint8_t)lv;
-    wv_h[UI_WAVE_N - 1u]  = wv_level;
-    wv_pk[UI_WAVE_N - 1u] = wv_level;
+    wv_h[UI_WAVE_N - 1u] = wv_level;
 
     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-        /* Only bites while env is winding down, and then it drains the bars
-         * already on screen instead of waiting for them to scroll off. */
-        if (wv_h[i] > env) wv_h[i] = (unsigned char)env;
-        if (wv_pk[i] > wv_h[i]) wv_pk[i]--;
-
         uint32_t h   = wv_h[i];
         uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
         uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
@@ -1515,8 +1508,6 @@ static void ui_wave_frame(uint32_t env_pct)
         fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h,
                 ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
         if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
-        if (wv_pk[i] > h + 1u)
-            fb_rect(x, UI_WAVE_Y + UI_WAVE_H - wv_pk[i], lit, 1, UI_WHITE);
     }
 }
 
@@ -1524,7 +1515,7 @@ static void ui_wave_anim_start(void)
 {
     wv_on = 1u; wv_next = 0; wv_rng = cycles() | 1u;
     wv_level = (uint8_t)((UI_WAVE_H * WV_ENV * WV_CTR) / 10000u);  /* at centre */
-    for (uint32_t i = 0; i < UI_WAVE_N; i++) { wv_h[i] = 0; wv_pk[i] = 0; }
+    for (uint32_t i = 0; i < UI_WAVE_N; i++) wv_h[i] = 0;
 }
 
 /* Called from the read spin. A single compare and return unless armed, so
@@ -1534,21 +1525,16 @@ static void ui_wave_anim_tick(void)
     if (!wv_on) return;
     if ((int32_t)(cycles() - wv_next) < 0) return;
     wv_next = cycles() + CLK_HZ / WV_FPS;
-    ui_wave_frame(WV_ENV);
+    ui_wave_frame();
 }
 
-/* Wind the envelope to nothing over ~0.5 s so the meter drains rather than
- * stopping mid-scroll. */
+/* Just stop. A ~0.5 s drain was tried and removed: it is half a second added to
+ * every launch to watch bars fall, and the player repaints the whole screen a
+ * moment later anyway. Stopping dead costs nothing and nobody sees the frozen
+ * frame for long. */
 static void ui_wave_anim_stop(void)
 {
-    if (!wv_on) return;
     wv_on = 0;
-    for (uint32_t e = WV_ENV; ; e = (e > 8u) ? (e - 8u) : 0u) {
-        ui_wave_frame(e);
-        uint32_t next = cycles() + CLK_HZ / WV_FPS;
-        while ((int32_t)(cycles() - next) < 0) { }
-        if (!e) break;
-    }
 }
 
 static void ui_splash_anim(void)
