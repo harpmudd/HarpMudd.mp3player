@@ -291,11 +291,22 @@ static uint16_t pl_live_count(void)
 /* Where `pos` sits among the LIVE entries, 1-based, so the position and the
  * total are counted the same way. Showing "4 / 4" while standing on the third
  * playable track would be worse than showing the raw numbers. */
+/* Which entry of the PLAYLIST is playing -- "4" in "4 / 12".
+ *
+ * `pos` indexes pl_order[], the play sequence, and it is the FILE index behind
+ * it that the number names. Counting along the sequence instead would just
+ * count 1, 2, 3... under shuffle and identify nothing; the two only agree
+ * because pl_order[i] == i when shuffle is off, which is why walking the wrong
+ * one looked correct.
+ *
+ * Dead entries -- ones that failed to open -- are skipped so the total from
+ * pl_live_count() and this ordinal are counting the same set. */
 static uint16_t pl_live_ordinal(uint16_t pos)
 {
+    uint16_t f = (pos < pl_count) ? pl_order[pos] : 0u;
     uint16_t n = 0;
-    for (uint16_t i = 0; i <= pos && i < pl_count; i++)
-        if (!pl_is_dead(pl_order[i])) n++;
+    for (uint16_t i = 0; i <= f && i < pl_count; i++)
+        if (!pl_is_dead(i)) n++;
     return n ? n : 1u;
 }
 static void pl_dead_clear(void)
