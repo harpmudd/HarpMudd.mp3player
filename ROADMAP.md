@@ -145,7 +145,7 @@ could use.
 Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
 risk), then FLAC (one measurement decides it), then AAC.
 
-## The persisted-settings register file is FULL — blocks both items below
+## The persisted-settings register file is FULL
 
 `mp3_soc.v` takes the settings index as `set_idx <= dDAT_MOSI[2:0]`. Three bits,
 eight slots, and all eight are spoken for: volume, accent, repeat, shuffle, art,
@@ -156,6 +156,10 @@ iteration model: everything since rev 20 has been firmware-only, rebuilt in
 seconds, and this drops back to a full Quartus compile, a `CORE_VERSION` bump
 and a timing-closure round. So widen it ONCE, to 16 slots, and land anything
 that needs a slot in the same pass rather than paying that twice.
+
+Currently blocks resume-position below. **Variable speed deliberately avoids it
+by not persisting** — see that entry; deciding a setting does not need to be
+remembered is the cheapest way past this.
 
 ## Resume where you left off (requested 2026-08-10)
 
@@ -215,9 +219,34 @@ Pitch preservation would need WSOLA or a phase vocoder on top of that, adding
 DSP to the budget that is already the binding constraint — and it would eat the
 same headroom the speed-up needs. Not viable as the design stands.
 
-**If this is built anyway, build it for spoken word and say so**: 1.2x/1.5x
-only, pitch-shifted, and leave 2x off the list rather than shipping something
-that stutters. A speed that is remembered also needs a slot; see above.
+**If this is built, build it for spoken word and say so**: 1.2x/1.5x only,
+pitch-shifted, and leave 2x off the list rather than shipping something that
+stutters.
+
+### Agreed design (2026-08-10): hold A, no persistence
+
+Hold **A** for 1.2x, hold again for normal. Deliberately NOT a Core Setting and
+deliberately not remembered — which is what makes this cheap. No persist slot
+means no register-file widen, so no Quartus compile, no `CORE_VERSION` bump and
+no timing-closure round: **firmware only, rebuilt in seconds.** Resetting to
+normal speed on every launch is also the right default for something you engage
+per-listen rather than per-library.
+
+A currently fires on the EDGE (press), because it is the one control with no
+hold action. Adding one means moving it to resolve on RELEASE, which is already
+the house convention -- see the comment above `poll_input()`: Left/Right and
+Select "both resolve on RELEASE, so the tap action cannot fire and then be
+followed by the hold action for the same press." Reuse that discriminator
+(`PL_HOLD_MS`, 400 ms) rather than inventing a second one, or a long press will
+pause AND change speed.
+
+Two things to get right: the toast has to say which speed is now active, since
+an unlabelled 1.2x just sounds like a bad file; and the seek arithmetic reads
+`ui_byte_rate()`, so confirm a speed change does not make the elapsed clock or
+the seek distance wrong -- that feedback loop is what the FIXED entry on seek
+below is about.
+
+Roughly 2 hours, one hardware test.
 
 ## Gapless playback
 
