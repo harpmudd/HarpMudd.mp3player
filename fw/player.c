@@ -2852,12 +2852,16 @@ static void poll_input(void)
     }
     if (edge & KEY_START) {
 #if DEBUG_DIAG
-        /* Select+Start, second page: the seek state, live. Everything the last
-         * four attempts at the hold-to-seek fault were guessing at.
-         *   P = file_pos/1k   L = the computed limit/1k   Z = slot_size/1k
-         *   S = ui_sec        R = ui_byte_rate            X = has Xing
-         * Read these WHILE holding the seek: whichever one moves when it should
-         * not is the fault, and no simulation has managed to say which. */
+        /* Seek state, live. Kept after the hold-to-seek fault: that took five
+         * attempts and four of them were guesses, so the next question about
+         * this subsystem should start from numbers.
+         *
+         * COMBO: hold Select AND L, then press START. Not "Select+L", which is
+         * the repeat toggle -- the first write-up of this said that and the
+         * readout duly never appeared.
+         *
+         *   P = file_pos/1k   L = computed limit/1k   Z = slot_size/1k
+         *   S = ui_sec        R = ui_byte_rate */
         if ((keys & KEY_SELECT) && (keys & KEY_L1)) {
             sel_used = 1;
             char b[24]; uint32_t i = 0;

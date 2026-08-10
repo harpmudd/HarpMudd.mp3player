@@ -198,6 +198,47 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Holding seek walked the clock backwards — FIXED, HW-confirmed 2026-08-10
+
+Reported after seek acceleration went in: hold the seek and eventually the
+position sticks, the clock counts DOWN, it cannot be recovered, and the track
+then jumps to the next one. Only on some songs.
+
+The cause was a feedback loop. `ui_sec` is computed FROM `meas_rate` on every
+seek, and `meas_rate` was recomputed FROM `ui_sec`:
+
+    meas_rate = (file_pos - buffered - audio_start) / sec
+
+Taking both as absolutes made each seek feed the other. Held down at four
+repeats a second the pair diverged, the rate inflated, and the clock derived
+from it collapsed. `track_secs` short-circuits that branch entirely, which is
+why files WITH a Xing header were fine and files without were not -- the "only
+some songs" was the whole diagnosis, and it took too long to act on.
+
+`meas_rate` now measures bytes and seconds across the SAME interval, with the
+baseline reset whenever a seek moves the position. It is observed throughput
+again rather than a number defined in terms of its own output.
+
+### The process failure is the more useful record
+
+Five attempts. Four were wrong, and each was shipped:
+
+1. clamp the forward seek — real gap, not the fault
+2. guard against no-op repositions — real waste, not the fault
+3. derive the limit from a rate that cannot move — real hazard, not the fault
+4. window the rate measurement — THE FIX, and shipped labelled "not claimed as
+   the fix" because the model had not reproduced it
+5. stop, and build a diagnostic readout
+
+Every one of the first four was defensible in isolation, which is exactly what
+made it easy to keep going. The simulations were the problem: each was seeded
+with the true byte rate, and a feedback loop seeded at its own fixed point is
+stable. The models kept agreeing with themselves and were read as evidence of
+absence. A model that cannot fail is not a test.
+
+The fix was already on the card, unrecognised, inside the diagnostic build --
+found only because the user tested that build and reported the fault gone.
+
 ## Core Settings shows numbers, not names — MEASURED, not fixable as designed
 
 The menu renders Color, Repeat, Meter and EQ preset as numeric sliders with a
