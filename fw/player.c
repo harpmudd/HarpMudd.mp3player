@@ -4400,42 +4400,54 @@ int main(void)
          * the controls did nothing unless audio was running. */
         if (seek_req) {
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
+            uint32_t want;
+
             if (seek_req == 1u) {
-                file_pos += step;
-                /* Clamp to just short of the end. Backward seek has always been
-                 * clamped to audio_start; forward never was, so holding seek
-                 * walked file_pos off the end of the file, the refill came back
-                 * empty, and the EOF path advanced to the next track. At a
-                 * fixed 5 s a step that took long enough that nobody hit it;
-                 * accelerating to 30 s gets there in seconds.
-                 *
-                 * Parked a second short rather than exactly at the end, so the
-                 * track still plays out its tail and advances the normal way
-                 * instead of stopping dead on a boundary. */
+                /* Forward stops short of the end. Backward has always clamped
+                 * to audio_start; forward never did, so holding it walked
+                 * file_pos past the end of the file, the refill came back empty
+                 * and the EOF path advanced the track. Three seconds of tail is
+                 * left so the end is audible and the track finishes normally. */
+                want = file_pos + step;
                 uint32_t rate = ui_byte_rate();
                 if (slot_size > audio_start && rate) {
-                    uint32_t last = slot_size - rate;
+                    uint32_t last = slot_size - 3u * rate;
                     if (last < audio_start) last = audio_start;
-                    if (file_pos > last) file_pos = last;
+                    if (want > last) want = last;
                 }
             } else {
-                file_pos = (file_pos > audio_start + step)
-                         ? file_pos - step : audio_start;
+                want = (file_pos > audio_start + step)
+                     ? file_pos - step : audio_start;
             }
+
             seek_req = 0;
-            stopped  = 0;                 /* no longer at 0:00 */
 
-            uint32_t rate = ui_byte_rate();
-            ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
-            ui_sec_acc  = 0;
-            ui_last_sec = 0xFFFFFFFFu;
-            ui_prog_sec = 0xFFFFFFFFu;
+            /* A seek that does not MOVE must do nothing at all.
+             *
+             * Clamping alone was not enough: once parked at the limit, every
+             * repeat still ran the whole reposition below -- pcm_flush(),
+             * refill_drain(), ring_fill = 0, prefill() -- at the same offset,
+             * four times a second. Playback advanced the clock between repeats
+             * and each reposition snapped it back to the parked position, which
+             * is the clock walking backwards; the constant re-prefill at the
+             * boundary is what then fell into EOF. Holding at either limit is
+             * now genuinely inert. */
+            if (want != file_pos) {
+                file_pos = want;
+                stopped  = 0;                 /* no longer at 0:00 */
 
-            pcm_flush();
-            refill_drain();
-            ring_fill = 0; ring_rd = 0;
-                    if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
-            if (paused) { ui_draw_dynamic(); continue; }
+                uint32_t rate = ui_byte_rate();
+                ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
+                ui_sec_acc  = 0;
+                ui_last_sec = 0xFFFFFFFFu;
+                ui_prog_sec = 0xFFFFFFFFu;
+
+                pcm_flush();
+                refill_drain();
+                ring_fill = 0; ring_rd = 0;
+                if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+                if (paused) { ui_draw_dynamic(); continue; }
+            }
         }
 
         /* Nothing to decode. poll_input() and the reload handling above still
