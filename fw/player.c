@@ -508,6 +508,13 @@ enum { REP_OFF = 0, REP_ALL, REP_ONE };
 static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
 static uint8_t  shuffle_on;
 static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
+
+/* Screen blanking. An always-on player left running is the burn-in case, and
+ * this panel is OLED. blank_min is minutes of no button press before the screen
+ * goes black; 0 disables it. Playback is untouched -- only drawing stops. */
+static uint32_t blank_min;            /* from Core Settings; 0 = never        */
+static uint32_t blank_at;             /* cycles() deadline, 0 = not armed     */
+static uint8_t  screen_blank;         /* the screen is currently black        */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
 static uint8_t  boot_hold = 1u;          /* first track loads PAUSED           */
@@ -1265,6 +1272,10 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 
 static void ui_draw_chrome(void)
 {
+    /* Draw nothing at all while blanked -- a track change must not light the
+     * screen back up. ui_blank_wake() calls this again on the way out, so the
+     * skipped work is simply deferred rather than lost. */
+    if (screen_blank) return;
     ui_gradient();
 
     /* When there's no usable title, say WHICH failure it was and show the
@@ -1945,6 +1956,7 @@ static void ui_load_failed(void)
  * rewritten mid-scanout (the framebuffer is single-buffered). */
 static void ui_draw_dynamic(void)
 {
+    if (screen_blank) return;
     /* Shift a new sample in and repaint the band. Every bar moves each update,
      * so there is nothing to gain from change-detection here -- instead it is
      * throttled, and each bar is two rects (lit + unlit), which the engine
@@ -2812,6 +2824,30 @@ static uint32_t pl_dump_req;             /* Select+B: show the 0190 struct     *
 static uint32_t dt_dump_req;             /* Select+A: show the boot datatable  */
 static uint32_t ui_dump_mode;            /* dump screen is up; drawing paused  */
 
+/* Arm the idle timer. Called on every button press and whenever the timeout
+ * setting changes. */
+static void ui_blank_touch(void)
+{
+    blank_at = blank_min ? (cycles() + CLK_HZ * 60u * blank_min) : 0u;
+}
+
+/* Black the whole frame. Only the framebuffer -- there is no way to switch the
+ * panel itself off from a core, so "blank" means every pixel black, which is
+ * what an OLED needs anyway. */
+static void ui_blank_enter(void)
+{
+    if (screen_blank) return;
+    screen_blank = 1u;
+    fb_rect(0, 0, FB_W, FB_H, 0x0000u);
+}
+
+static void ui_blank_wake(void)
+{
+    if (!screen_blank) return;
+    screen_blank = 0;
+    ui_draw_chrome();          /* everything suppressed while blank, redrawn */
+}
+
 static void poll_input(void)
 {
     static uint32_t prev;
@@ -2823,6 +2859,15 @@ static void poll_input(void)
     uint32_t edge = keys & ~prev;        /* rising edges only  */
     uint32_t fall = prev & ~keys;        /* falling edges      */
     prev = keys;
+
+    /* Any press is activity. If the screen is blank the press ONLY wakes it and
+     * is then swallowed -- reaching for a sleeping player to see what is on
+     * should not pause it or skip the track. */
+    if (edge || fall) ui_blank_touch();
+    if (screen_blank) {
+        if (edge) ui_blank_wake();
+        return;
+    }
 
     /* A plays and pauses. Start only ever STOPS -- pressing it again does
      * nothing, which is what separates it from pause: stop is a state you
@@ -4788,6 +4833,10 @@ int main(void)
         st0 |= (1u << 3);
         REG(R_STAT0) = st0;
 
+        /* Idle long enough with no button? Go black. Checked here rather than
+         * in poll_input so it still fires while nothing is being pressed. */
+        if (blank_min && blank_at && !screen_blank &&
+            (int32_t)(cycles() - blank_at) >= 0) ui_blank_enter();
         if (!ui_dump_mode) ui_draw_dynamic();
 
 next_outer: ;

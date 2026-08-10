@@ -56,7 +56,8 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
  * word APF hands back differs from that, the user moved it in the Core Settings
  * menu and we adopt it. Otherwise ours stands.
  */
-enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_ART, SW_VIZ, SW_EQ, SW_N };
+enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_ART, SW_VIZ, SW_EQ,
+       SW_BLANK, SW_N };
 
 /* What we last published. Initialised to a value APF can never write for
  * these ranges, so the FIRST poll always counts as a change and adopts
@@ -64,7 +65,7 @@ enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_ART, SW_VIZ, SW_EQ, SW_N };
  * would overwrite the persisted values on the way past. */
 static uint32_t set_pub[SW_N] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                  0xFFFFFFFFu };
+                                  0xFFFFFFFFu, 0xFFFFFFFFu };
 
 static uint32_t set_rd(uint32_t w) { REG(R_SET_IDX) = w; return REG(R_SET_DAT); }
 static void     set_wr(uint32_t w, uint32_t v)
@@ -85,6 +86,7 @@ static int settings_store(void)
     set_wr(SW_ART,  art_pref ? 1u : 0u);
     set_wr(SW_VIZ,  viz_mode);
     set_wr(SW_EQ,   eq_idx);
+    set_wr(SW_BLANK, blank_min);
     return 1;
 }
 
@@ -113,6 +115,10 @@ static int settings_load(void)
     v = set_rd(SW_VIZ);   if (v < VIZ_COUNT)       viz_mode = (uint8_t)v;
     v = set_rd(SW_EQ);    if (v < EQ_COUNT)      { eq_idx = (uint8_t)v;
                                                    REG(R_EQ) = eq_idx; }
+    /* Minutes. Range-checked like the rest: a value off a file on the card must
+     * not be able to blank the screen instantly or never. */
+    v = set_rd(SW_BLANK); if (v <= 30u)          { blank_min = v;
+                                                   ui_blank_touch(); }
     return 1;
 }
 

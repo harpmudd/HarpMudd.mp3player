@@ -54,8 +54,8 @@ Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
-Volume, accent color, repeat, shuffle, the meter, the art panel and the EQ
-preset are remembered between sessions, and the controls and **Core Settings**
+Volume, accent color, repeat, shuffle, the meter, the art panel, the EQ preset
+and the screen-blank timeout are remembered between sessions, and the controls and **Core Settings**
 stay in step. Playback position is not — every launch starts a track from the
 beginning. The Pocket keeps the settings under `/Settings/HarpMudd.Mp3Player/`
 on the card; delete that folder to reset. Nothing is written to your music
@@ -81,6 +81,14 @@ It works while paused; there is just nothing to hear until you press play.
 
 Presets are loudness-matched, so switching changes the tone without changing how
 loud the music seems.
+
+### Screen blanking
+
+**Screen blank (min)** in **Core Settings** blacks the screen after that many
+minutes with no button pressed. Any button wakes it, and that press does nothing
+else — reaching for a sleeping player to see what's on shouldn't pause it.
+
+Playback carries on while the screen is black. Set it to 0 to disable.
 
 ## Playlists
 
