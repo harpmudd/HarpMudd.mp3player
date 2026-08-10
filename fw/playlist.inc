@@ -701,6 +701,19 @@ static void pl_load(void)
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
     pl_parse(len);
     if (!pl_count) { pl_status = PL_ERR_EMPTY; return; }
+
+    /* Seed HERE, not only when shuffle is switched on.
+     *
+     * pl_rng is a static 1 and the toggle handler was the only thing that ever
+     * seeded it from cycles(). Shuffle persists across sessions, so a user who
+     * leaves it on and never presses Select+R got pl_reorder() running on seed
+     * 1 at every boot -- a real Fisher-Yates shuffle producing the identical
+     * permutation forever.
+     *
+     * This point has genuine entropy: the playlist reads above walk the card's
+     * cluster chain, whose timing varies run to run, so the cycle counter here
+     * is not the fixed value it would be earlier in a deterministic boot. */
+    pl_rng = cycles() | 1u;
     pl_reorder();
 }
 

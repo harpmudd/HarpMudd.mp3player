@@ -198,6 +198,32 @@ not a bulk tidy.
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
 
+## Shuffle produced the same order every boot — FIXED 2026-08-10
+
+Asked as a question -- "is shuffle actually shuffling?" -- and the answer was
+yes and no. pl_reorder() is a correct Fisher-Yates, so every permutation is
+equally likely. But `pl_rng` is a static 1, and the ONLY thing that ever seeded
+it from cycles() was the Select+R toggle handler.
+
+Shuffle persists across sessions. So a user who turns it on once and then simply
+leaves it on gets pl_load() -> pl_reorder() running on seed 1 at every launch,
+and the identical permutation forever. Verified by running the same shuffle
+three times from seed 1: byte-for-byte the same order.
+
+pl_rng is now seeded in pl_load() as well, immediately before pl_reorder(). That
+point has real entropy -- the playlist reads just above walk the card's cluster
+chain and their timing varies run to run, so the cycle counter there is not the
+fixed value it would be earlier in an otherwise deterministic boot.
+
+All three pl_reorder() call sites are covered: the toggle seeds itself, pl_load
+now seeds, and the wrap-around reshuffle in pl_advance_auto inherits a state
+already advanced by every pl_rand() since.
+
+Worth noting what made it invisible: it is not a shuffle that fails to shuffle,
+which anyone would spot. It is a shuffle that works perfectly and produces one
+answer, and the only way to see it is to notice the SAME wrong-feeling order
+twice across power cycles.
+
 ## Holding seek walked the clock backwards — FIXED, HW-confirmed 2026-08-10
 
 Reported after seek acceleration went in: hold the seek and eventually the
