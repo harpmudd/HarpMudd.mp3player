@@ -1486,7 +1486,12 @@ static unsigned char wv_h[UI_WAVE_N];
 static void ui_wave_frame(void)
 {
     uint16_t bed = ui_grad_at(UI_WAVE_Y);
-    uint32_t ww  = ui_wave_w();
+    /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
+     * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
+     * was leaving a gap for an album-art panel that does not exist yet and
+     * cannot, since no track has been opened. The panel appears when the first
+     * track turns out to have artwork, and the player narrows the meter then. */
+    uint32_t ww  = UI_INNER_W;
     uint32_t env = (UI_WAVE_H * WV_ENV) / 100u;
 
     /* Scroll left and insert at the right -- the playback meter's own shift. */
@@ -1544,10 +1549,7 @@ static void ui_splash_anim(void)
 {
     ui_gradient();
 
-    uint16_t bed = ui_grad_at(UI_WAVE_Y);
-    uint32_t ww = ui_wave_w();
     const uint32_t STEP_DEN = 32u;   /* title fade resolution */
-
 
     /* Minimum time on screen, then the wave carries on from the read spin for
      * as long as loading takes. Fixed length here rather than "until loaded"
@@ -1567,18 +1569,11 @@ static void ui_splash_anim(void)
         if (f != last_f) { last_f = f; ui_splash_card(f, STEP_DEN); }
         ui_wave_anim_tick();
     }
-    (void)bed; (void)ww;
 
-    /* Leave the meter at its floor so the transition into playback is a rise
-     * from rest, not a jump from wherever the pulse happened to stop. */
-    for (uint32_t i = 0; i < UI_WAVE_N; i++) {
-        uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
-        uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
-        uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
-        fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - 2u, bed);
-        fb_rect(x, UI_WAVE_Y + UI_WAVE_H - 2u, lit, 2u,
-                ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
-    }
+    /* Nothing flattens the meter here any more. That belonged to the original
+     * one-shot animation, which had finished by this point; now the meter keeps
+     * running from the read spin until loading is done, and flattening it would
+     * blank one frame and then be immediately overdrawn. */
 }
 
 /* `reason` explains why there is nothing playing, or is NULL when the answer is
