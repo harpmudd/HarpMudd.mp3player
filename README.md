@@ -56,8 +56,9 @@ restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter, the art panel, the EQ preset
 and the screen-blank timeout are remembered between sessions, and the controls
-and **Core Settings** stay in step. Playback position is not — every launch starts a track from the
-beginning. The Pocket keeps the settings under `/Settings/HarpMudd.Mp3Player/`
+and **Core Settings** stay in step. Playback position is not — every launch
+starts a track from the beginning. The Pocket keeps the settings under
+`/Settings/HarpMudd.Mp3Player/`
 on the card; delete that folder to reset. Nothing is written to your music
 folder.
 
