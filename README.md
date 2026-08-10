@@ -46,6 +46,9 @@ same menu switches either at any time.
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
 
+The Pocket's own **Controls** screen names every button too, so you don't have
+to keep this table to hand.
+
 Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
