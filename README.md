@@ -94,8 +94,9 @@ Lines starting with `#` are ignored, so exported playlists work as-is.
 `playlist.m3u` loads at boot; any other name loads from **Load Playlist**.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
-*one* repeats the current track. **Shuffle** plays everything once before
-repeating.
+*one* repeats the current track. **Shuffle** plays in a random order and never
+repeats a track until the rest have played; with **Repeat all**, each pass round
+the list is freshly shuffled.
 
 A misspelled or missing filename costs that one track — the core steps over it
 and says how many it skipped. The count on screen is what will actually play,
