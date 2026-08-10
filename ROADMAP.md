@@ -145,6 +145,80 @@ could use.
 Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
 risk), then FLAC (one measurement decides it), then AAC.
 
+## The persisted-settings register file is FULL — blocks both items below
+
+`mp3_soc.v` takes the settings index as `set_idx <= dDAT_MOSI[2:0]`. Three bits,
+eight slots, and all eight are spoken for: volume, accent, repeat, shuffle, art,
+meter, EQ, blank. **Any new remembered setting needs that widened to 4 bits.**
+
+The edit itself is one line plus the `set_reg` array bound. What it costs is the
+iteration model: everything since rev 20 has been firmware-only, rebuilt in
+seconds, and this drops back to a full Quartus compile, a `CORE_VERSION` bump
+and a timing-closure round. So widen it ONCE, to 16 slots, and land anything
+that needs a slot in the same pass rather than paying that twice.
+
+## Resume where you left off (requested 2026-08-10)
+
+Restore the playlist position, and optionally the offset within the track, on
+next launch. The better of the two requests from that day: it works exactly as
+asked and fits the architecture.
+
+Persistence goes through the `interact.json` vars APF stores in its own file —
+the one mechanism here that has never touched the user's music, unlike the two
+that did. A position update is two MMIO writes and no SD access, so ticking it
+once a second is free. Restoring is `load_track()` plus a seek, and both the
+seek and the frame resync already exist.
+
+Needs two slots (track index, byte offset) and probably a third for an on/off
+switch, since resuming mid-track surprises people who did not ask for it. See
+the register-file item above.
+
+Three things to design around:
+
+- **The `.m3u` may have changed.** Store a hash of the track's filename beside
+  the index and fall back to track 1 when it does not match, or the saved index
+  silently points at a different song.
+- **APF may not flush its persist file on a hard power-off**, so the last few
+  seconds of position can be lost. Acceptable; do not build a mechanism to
+  defeat it.
+- Resuming into the middle of a file must go through the same start path every
+  other route uses — see the reload handler's note about that being the whole
+  reason track changes stopped clicking.
+
+Roughly 5-8 hours plus the compile: two hardware sessions.
+
+## Variable playback speed — 1.2x is reachable, 2x is NOT (requested 2026-08-10)
+
+The mechanism already exists. `R_PCM_RATE` sets the FIFO drain rate and the
+firmware already computes it per file, so scaling it is one line. That buys
+speed WITH pitch shift — the chipmunk effect — which is tolerable for spoken
+word and unacceptable for music.
+
+**The decoder is the ceiling, and it rules out the speeds people actually ask
+for.** Playing at N x means decoding N x as many frames per second, against the
+Stage 0 measurements of what decode costs of the 60 MHz budget:
+
+| speed | typical (128k/44.1) | worst case (320k/48) |
+|-------|---------------------|----------------------|
+| 1x    | 33.9 MHz            | 45.7 MHz             |
+| 1.2x  | 40.7                | 54.8 — tight         |
+| 1.5x  | 50.9                | 68.6 — OVER          |
+| 2x    | 67.8 — OVER         | 91.4                 |
+| 3x    | 102                 | 137                  |
+
+So 1.2x works, 1.5x works on ordinary files and breaks on 320 kbps, and 2x/3x
+cannot work at all. There is no clocking out of it either: clk_sys is 60 MHz
+because the worst slack observed across fits implied fmax around 66, which is
+why 70 was judged a coin flip (see the rev 13 entry).
+
+Pitch preservation would need WSOLA or a phase vocoder on top of that, adding
+DSP to the budget that is already the binding constraint — and it would eat the
+same headroom the speed-up needs. Not viable as the design stands.
+
+**If this is built anyway, build it for spoken word and say so**: 1.2x/1.5x
+only, pitch-shifted, and leave 2x off the list rather than shipping something
+that stutters. A speed that is remembered also needs a slot; see above.
+
 ## Gapless playback
 
 Track changes currently have a short silence — the new file has to be opened,
