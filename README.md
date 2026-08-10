@@ -174,7 +174,8 @@ from that source file's own copyright header.
 - **[VexRiscv](https://github.com/SpinalHDL/VexRiscv)** soft CPU — Charles Papon
   ([Dolu1990](https://github.com/Dolu1990)) (MIT).
 - **[picojpeg](https://github.com/richgel999/picojpeg)** — Rich Geldreich
-  ([richgel999](https://github.com/richgel999)) (public domain).
+  ([richgel999](https://github.com/richgel999)), with changes from Chris
+  Phoenix (public domain).
 - **SDRAM controller and i2s audio bridge** — Adam Gastineau
   ([agg23](https://github.com/agg23)) (MIT).
 - **[Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/)** — Robert
