@@ -36,7 +36,8 @@ same menu switches either at any time.
 | **A** | Play / pause |
 | **Start** | Stop — returns to 0:00 |
 | **Left** / **Right** | *Tap* — previous / next track |
-| **Left** / **Right** | *Hold* — seek back / forward |
+| **Left** / **Right** | *Hold* — seek, faster the longer you hold |
+| **Select** + **Left** / **Right** | Seek one second |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (nine styles) |
@@ -110,7 +111,8 @@ not how many lines the file has.
 
 <img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
-- **Title and artist** from the ID3v2 tag.
+- **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
+  files that carry nothing else.
 - **Album art** from the tag's embedded image — JPEG only; tracks without it
   don't show the panel.
 - **Nine meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,

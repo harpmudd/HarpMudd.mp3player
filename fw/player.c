@@ -392,6 +392,10 @@ static uint8_t  ui_ld_shown;
  * frame's bitrate is not the file's average, which is why both the total time
  * and the progress bar were off. */
 static uint32_t track_frames, track_secs;
+/* How far the pending seek moves, in seconds. Was a hardcoded 5 at the point of
+ * use, which made both a fine seek and an accelerating scrub impossible to
+ * express -- the request said which way but never how far. */
+static uint32_t seek_secs = 5u;
 /* Average byte rate measured from real playback. Converges on the truth for
  * VBR files that carry no Xing header, which the first-frame bitrate cannot. */
 static uint32_t meas_rate;
@@ -2857,17 +2861,36 @@ static void poll_input(void)
      * then scrubs: the seek REPEATS while the button is down, which is what
      * makes holding useful rather than just a slower single jump. */
     {
+        static uint8_t lr_reps[2];        /* consecutive scrub repeats, per side */
         const uint32_t kmask[2] = { KEY_LEFT, KEY_RIGHT };
         const uint32_t hold_cy  = CLK_HZ / 1000u * PL_HOLD_MS;
         const uint32_t rep_cy   = CLK_HZ / 1000u * 250u;   /* scrub rate */
         for (int i = 0; i < 2; i++) {
-            if (edge & kmask[i]) { lr_t0[i] = cycles(); lr_fired[i] = 0; }
+            if (edge & kmask[i]) { lr_t0[i] = cycles(); lr_fired[i] = 0; lr_reps[i] = 0; }
+
+            /* Select + Left/Right: one second a press, for landing on a spot
+             * rather than sweeping past it. The shoulder buttons already carry
+             * Select+L and Select+R, so the D-pad pair was free. */
+            if ((edge & kmask[i]) && (keys & KEY_SELECT)) {
+                sel_used    = 1;
+                lr_fired[i] = 1;              /* release must not skip track */
+                seek_secs   = 1u;
+                seek_req    = i ? 1u : (uint32_t)-1;
+                ui_toast_msg(i ? "SEEK +1s" : "SEEK -1s");
+                continue;
+            }
+            if (keys & KEY_SELECT) continue;  /* no scrub while modifying */
 
             if ((keys & kmask[i]) &&
                 (int32_t)(cycles() - lr_t0[i]) >= (int32_t)hold_cy) {
                 lr_fired[i] = 1;                  /* release must not skip */
-                seek_req = i ? 1u : (uint32_t)-1;
-                ui_toast_msg(i ? "SEEK +5s" : "SEEK -5s");
+                /* Accelerate: a fixed step means crossing a long track is a
+                 * lot of repeats, and a big step means you cannot land near
+                 * anything. Start small and grow the longer it is held. */
+                if (lr_reps[i] < 255u) lr_reps[i]++;
+                seek_secs = (lr_reps[i] > 8u) ? 30u : (lr_reps[i] > 3u) ? 10u : 5u;
+                seek_req  = i ? 1u : (uint32_t)-1;
+                ui_toast_set(i ? "SEEK +" : "SEEK -", seek_secs, "s");
                 lr_t0[i] = cycles() + rep_cy - hold_cy;   /* next repeat */
             }
 
@@ -3411,6 +3434,61 @@ static int id3_find_text(const uint8_t *ring, uint32_t avail,
  * affordable where an earlier frame-by-frame walk was not -- that one ran on
  * every track; this runs only where the cheap path already failed, which is the
  * handful of tracks that would otherwise show nothing. */
+/* ID3v1: a fixed 128-byte block at the very END of the file, starting "TAG".
+ *
+ * Predates ID3v2 and is still the only tag a lot of older files carry, so
+ * without this they display nothing at all. Fields are fixed width and padded
+ * with spaces or NULs rather than terminated, so each one has to be trimmed
+ * from the right.
+ *
+ * Only ever called after the v2 paths have found nothing, so a file carrying
+ * both keeps its v2 values -- those are longer, and not limited to 30
+ * characters or to Latin-1. */
+static void id3v1_read(void)
+{
+    if (slot_size < 128u) return;
+    if (!target_read_slot(MP3_SLOT_ID, slot_size - 128u, TAG_OFF, 128u)) return;
+    if (tagbuf[0] != 'T' || tagbuf[1] != 'A' || tagbuf[2] != 'G') return;
+
+    static const struct { uint8_t off, len; } f[3] = {
+        {   3u, 30u },      /* title  */
+        {  33u, 30u },      /* artist */
+        {  63u, 30u },      /* album  */
+    };
+    char *const dst[3] = { track_title, track_artist, track_album };
+    const uint32_t cap[3] = { sizeof(track_title), sizeof(track_artist),
+                              sizeof(track_album) };
+
+    for (uint32_t k = 0; k < 3u; k++) {
+        if (dst[k][0]) continue;                  /* v2 already supplied it */
+        uint32_t n = f[k].len;
+        while (n && (tagbuf[f[k].off + n - 1u] == ' ' ||
+                     tagbuf[f[k].off + n - 1u] == 0)) n--;
+        if (n > cap[k] - 1u) n = cap[k] - 1u;
+        for (uint32_t i = 0; i < n; i++) dst[k][i] = (char)tagbuf[f[k].off + i];
+        dst[k][n] = 0;
+    }
+
+    if (!track_year[0]) {
+        uint32_t n = 0;
+        while (n < 4u && tagbuf[93u + n] >= '0' && tagbuf[93u + n] <= '9') {
+            track_year[n] = (char)tagbuf[93u + n]; n++;
+        }
+        track_year[n] = 0;
+    }
+
+    /* ID3v1.1 puts a track number in the last two bytes of the comment: a NUL
+     * followed by the number. A plain v1 comment runs through both, so the NUL
+     * is what distinguishes them. */
+    if (!track_trk[0] && tagbuf[125] == 0 && tagbuf[126]) {
+        uint32_t t = tagbuf[126], i = 0;
+        if (t >= 100u) track_trk[i++] = (char)('0' + t / 100u % 10u);
+        if (t >= 10u)  track_trk[i++] = (char)('0' + t / 10u % 10u);
+        track_trk[i++] = (char)('0' + t % 10u);
+        track_trk[i] = 0;
+    }
+}
+
 static void id3_walk_collect(uint32_t tag_len)
 {
     /* TPE2 (band/album artist) is preferred, but plenty of files carry only
@@ -3724,6 +3802,11 @@ static int read_track_head(void)
          * never gets here. */
         if (title_status != ID3_OK) {
             id3_walk_collect(skip);
+            if (track_title[0]) title_status = ID3_OK;
+        }
+        /* Still nothing: the file may carry only an ID3v1 block at the end. */
+        if (title_status != ID3_OK) {
+            id3v1_read();
             if (track_title[0]) title_status = ID3_OK;
         }
         for (uint32_t i = 0; i < sizeof(track_trk); i++)
@@ -4316,7 +4399,7 @@ int main(void)
          * ABOVE the paused check for that reason; it used to be below it, so
          * the controls did nothing unless audio was running. */
         if (seek_req) {
-            uint32_t step = ui_byte_rate() * 5u;
+            uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
             if (seek_req == 1u) file_pos += step;
             else file_pos = (file_pos > audio_start + step)
                           ? file_pos - step : audio_start;
