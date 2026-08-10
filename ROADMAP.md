@@ -223,6 +223,36 @@ same headroom the speed-up needs. Not viable as the design stands.
 pitch-shifted, and leave 2x off the list rather than shipping something that
 stutters.
 
+### BUILT AND PARKED on branch `speed-1.2x` (2026-08-10)
+
+Implemented, HW-tested, **not merged**. User verdict: "works, but is a little
+rough." Two open defects, and the first is the reason it is parked.
+
+**1. Seek/elapsed goes wrong at 1.2x on SOME files.** Same signature as the
+hold-to-seek bug fixed the same day: wrong on some mp3s and not others. Last
+time that meant files with **no Xing header**, because `track_secs`
+short-circuits the whole `meas_rate` branch. Strong lead, NOT a diagnosis.
+
+**Do not fix this by reasoning about it.** That approach cost four wrong
+attempts on the identical-looking bug. Put `meas_rate`, `ui_sec`, `file_pos`,
+`track_secs` and `ring_fill - ring_rd` on screen and watch them at 1.2x on a
+file that fails. The instrumented build took ten minutes last time and named
+the fault immediately.
+
+**2. Occasional distortion when engaging 1.2x.** Consistent with the budget
+table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of 60, so a
+dense passage can miss and underrun the FIFO. May be inherent.
+
+**A method note worth more than either defect.** Before the hardware test I
+asserted that speed could not disturb the elapsed clock, having grepped
+`ui_sec *=` and found only two resets and the seek path — all file-domain.
+But the steady-state update is `ui_sec++` at line 2497, driven by decoded
+frames, and an assignment search cannot find an increment. The check was
+structurally incapable of contradicting the conclusion it was run to test,
+which is the same failure as seeding a simulation at its own fixed point.
+**When a search comes back clean, ask what shape of code it could not have
+matched.**
+
 ### Agreed design (2026-08-10): hold A, no persistence
 
 Hold **A** for 1.2x, hold again for normal. Deliberately NOT a Core Setting and
