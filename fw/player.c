@@ -366,6 +366,12 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
 static HMP3Decoder dec;
 static uint32_t frames, errs, rate_set, min_level;
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
+/* Samples per frame, taken from the decoder rather than assumed. MPEG-1 Layer
+ * III is 1152; MPEG-2 and 2.5 are 576. Hardcoding 1152 ran the elapsed clock at
+ * double speed on any low-sample-rate file -- which is the only thing that ever
+ * made this core MPEG-1-only. Helix decodes all three, and everything else here
+ * already derives from what it reports. */
+static uint32_t samp_per_frame = 1152u;
 /* Up here with the other UI-visible state: the progress bar needs both, and C
  * needs them declared before ui_draw_dynamic(). */
 static uint32_t audio_start;             /* first byte after any ID3 tag */
@@ -2343,7 +2349,7 @@ static void ui_draw_dynamic(void)
      * FIFO fed. Adds and compares give the identical answer. */
     if (samprate && frames != ui_last_frames) {
         ui_last_frames = frames;
-        ui_sec_acc += 1152u;
+        ui_sec_acc += samp_per_frame;
         while (ui_sec_acc >= samprate) { ui_sec_acc -= samprate; ui_sec++; }
     }
     uint32_t sec = ui_sec;
@@ -3812,7 +3818,7 @@ static int load_track(void)
     pcm_flush();
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
-    track_kbps = 0; track_hz = 0;
+    track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
     bytes_per_sec = 16000u;
     paused = 0;
     seek_req = 0; soft_restart_req = 0;
@@ -3966,6 +3972,9 @@ static int load_track(void)
                         if (wfi.bitrate) bytes_per_sec = wfi.bitrate / 8u;
                         samprate   = wfi.samprate;
                         track_hz   = wfi.samprate;
+                        if (wfi.nChans && wfi.outputSamps)
+                            samp_per_frame = (uint32_t)wfi.outputSamps
+                                           / (uint32_t)wfi.nChans;
                         track_kbps = wfi.bitrate / 1000u;
                         if (track_frames && wfi.nChans) {
                             uint32_t spf = (uint32_t)wfi.outputSamps / (uint32_t)wfi.nChans;
