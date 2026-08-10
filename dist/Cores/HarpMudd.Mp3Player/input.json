@@ -5,51 +5,7 @@
             {
                 "type": "gamepad",
                 "mappings": [
-                    {
-                        "id": 0,
-                        "name": "Play / Pause",
-                        "key": "pad_btn_a"
-                    },
-                    {
-                        "id": 1,
-                        "name": "Restart track",
-                        "key": "pad_btn_b"
-                    },
-                    {
-                        "id": 2,
-                        "name": "Meter style",
-                        "key": "pad_btn_x"
-                    },
-                    {
-                        "id": 3,
-                        "name": "EQ preset",
-                        "key": "pad_btn_y"
-                    },
-                    {
-                        "id": 4,
-                        "name": "Accent color -",
-                        "key": "pad_trig_l"
-                    },
-                    {
-                        "id": 5,
-                        "name": "Accent color +",
-                        "key": "pad_trig_r"
-                    },
-                    {
-                        "id": 6,
-                        "name": "Art / modifier",
-                        "key": "pad_btn_select"
-                    },
-                    {
-                        "id": 7,
-                        "name": "Stop",
-                        "key": "pad_btn_start"
-                    },
-                    {
-                        "type": "analog_stick",
-                        "axis": "left",
-                        "target": "dpad"
-                    }
+                    { "type": "analog_stick", "axis": "left", "target": "dpad" }
                 ]
             }
         ]
