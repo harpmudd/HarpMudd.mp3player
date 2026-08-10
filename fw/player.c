@@ -377,6 +377,38 @@ static uint32_t samp_per_frame = 1152u;
 static uint32_t audio_start;             /* first byte after any ID3 tag */
 static uint32_t bytes_per_sec = 16000u;  /* refined once decoding */
 static uint32_t track_kbps, track_hz;
+
+/* Playback speed. 1.2x is the whole range: playing at N x needs N x the decode
+ * throughput, and against the Stage 0 figures 1.5x already breaks on 320 kbps
+ * while 2x cannot work at any bitrate. 6/5 rather than a float -- there is no
+ * FPU, and this lands in the same expression as a 64-bit shift.
+ *
+ * Deliberately NOT persisted, so it costs no settings slot (all eight are used
+ * and a ninth would mean an RTL change). Resetting to normal each launch is
+ * also the right default for something engaged per-listen. See ROADMAP. */
+#define SPEED_NUM 6u
+#define SPEED_DEN 5u
+static uint8_t speed_fast;               /* 0 = normal, 1 = 1.2x */
+
+/* Drain the PCM FIFO at the file's sample rate, scaled by the current speed;
+ * sound_i2s zero-order-holds up to its fixed 48 kHz. Pitch rises with speed --
+ * there is no room in the decode budget for time-stretching on top.
+ *
+ * ONE place computes this. It was duplicated at the two points that learn the
+ * sample rate, and a speed toggle has to reproduce it exactly or the pitch goes
+ * wrong on the next track only.
+ *
+ * Nothing else needs adjusting for speed: ui_sec, the duration and the seek
+ * distances are all derived from FILE POSITION, not wall clock, so they stay
+ * correct by construction. The FIFO drain is the only wall-clock-domain thing
+ * here. */
+static void pcm_rate_apply(uint32_t hz)
+{
+    if (!hz) return;
+    uint64_t inc = ((uint64_t)hz << 32) / CLK_HZ;
+    if (speed_fast) inc = inc * SPEED_NUM / SPEED_DEN;
+    REG(R_PCM_RATE) = (uint32_t)inc;
+}
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
 static uint8_t  size_suspect;     /* directory disagrees with the file itself   */
 static uint8_t  ui_size_warned;
@@ -2959,16 +2991,41 @@ static void poll_input(void)
     /* A plays and pauses. Start only ever STOPS -- pressing it again does
      * nothing, which is what separates it from pause: stop is a state you
      * leave with play, not a toggle. Stopping also returns to 0:00. */
-    if (edge & KEY_A) {
-        /* Select+A shows the boot datatable snapshot, mirroring Select+B for
-         * the 0190 struct. Plain A still plays/pauses. */
+    /* A: TAP plays/pauses, HOLD toggles 1.2x speed.
+     *
+     * Resolves on RELEASE, the same discipline Left/Right and Select already
+     * use. Firing the tap action on the press instead would mean a long press
+     * pauses AND changes speed -- it is on the way into every hold. Same
+     * PL_HOLD_MS the Left/Right scrub uses, rather than a second threshold to
+     * learn. */
+    {
+        static uint32_t a_t0;
+        static uint8_t  a_fired;      /* the hold action already ran this press */
+        const uint32_t  a_hold_cy = CLK_HZ / 1000u * PL_HOLD_MS;
+
+        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
+
+        if ((keys & KEY_A) && !a_fired &&
+            (int32_t)(cycles() - a_t0) >= (int32_t)a_hold_cy) {
+            a_fired = 1;
+            speed_fast ^= 1u;
+            pcm_rate_apply(track_hz);
+            /* Name the speed. An unlabelled 1.2x just sounds like a bad rip,
+             * and the only other clue is the elapsed clock running fast. */
+            ui_toast_msg(speed_fast ? "SPEED 1.2x" : "SPEED NORMAL");
+        }
+
+        if ((fall & KEY_A) && !a_fired) {
+            /* Select+A shows the boot datatable snapshot, mirroring Select+B
+             * for the 0190 struct. Plain A still plays/pauses. */
 #if DEBUG_DIAG
-        if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
-        else
+            if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
+            else
 #endif
-        {
-            paused ^= 1u;
-            if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
+            {
+                paused ^= 1u;
+                if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
+            }
         }
     }
     if (edge & KEY_X) {
@@ -4262,8 +4319,7 @@ static int load_track(void)
                     MP3FrameInfo wfi;
                     MP3GetLastFrameInfo(dec, &wfi);
                     if (wfi.samprate) {
-                        uint64_t inc = ((uint64_t)wfi.samprate << 32) / CLK_HZ;
-                        REG(R_PCM_RATE) = (uint32_t)inc;
+                        pcm_rate_apply(wfi.samprate);
                         if (wfi.bitrate) bytes_per_sec = wfi.bitrate / 8u;
                         samprate   = wfi.samprate;
                         track_hz   = wfi.samprate;
@@ -4848,10 +4904,7 @@ int main(void)
         MP3GetLastFrameInfo(dec, &fi);
 
         if (!rate_set && fi.samprate) {
-            /* Drain at the file's true rate so pitch is right; sound_i2s
-             * zero-order-holds up to its fixed 48 kHz. */
-            uint64_t inc = ((uint64_t)fi.samprate << 32) / CLK_HZ;
-            REG(R_PCM_RATE) = (uint32_t)inc;
+            pcm_rate_apply(fi.samprate);
             if (fi.bitrate) bytes_per_sec = fi.bitrate / 8u;
             samprate   = fi.samprate;
             track_hz   = fi.samprate;

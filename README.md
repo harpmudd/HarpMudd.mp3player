@@ -35,7 +35,8 @@ and whatever you pick starts playing.
 
 | Pocket | Action |
 |---|---|
-| **A** | Play / pause |
+| **A** | *Tap* — play / pause |
+| **A** | *Hold* — 1.2× speed; hold again for normal |
 | **Start** | Stop — returns to 0:00 |
 | **Left** / **Right** | *Tap* — previous / next track |
 | **Left** / **Right** | *Hold* — seek, faster the longer you hold |
