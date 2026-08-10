@@ -1322,8 +1322,17 @@ static void ui_draw_chrome(void)
      * as a glitch rather than as a layout rule. The marquee already exists for
      * text that will not fit; shrinking was being tried first and never leaving
      * it anything to do. One step of size variation, then it scrolls. */
-    uint32_t ts = fb_text_fit(title, ui_text_w, TS_2X);
-    if (ts < TS_15X) ts = TS_15X;
+    /* Fixed at 2x. Auto-fitting meant the title changed size with its LENGTH:
+     * measured across a real library, nine of eleven fitted at 2x and the two
+     * longest dropped to 1.5x, so those two looked wrong rather than looking
+     * fitted -- and one of them missed by eight pixels. The text column is a
+     * constant 352 px (it deliberately does not narrow when the art panel
+     * slides in), so which side of the line a title falls on is pure chance.
+     *
+     * One size for every track, and ui_marq_init below turns the scroll on for
+     * anything that overflows -- which is what the marquee was already for, and
+     * why it almost never ran. */
+    uint32_t ts = TS_2X;
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts, ui_text_w);
