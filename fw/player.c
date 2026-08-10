@@ -1316,7 +1316,14 @@ static void ui_draw_chrome(void)
     /* Capped at 2x rather than 3x: with album and format lines below it, a 48px
      * title cannot fit inside the card without colliding with the art row. A
      * predictable layout is worth more than the largest possible type. */
+    /* Never below 1.5x. Auto-fit alone could drop a long title to 1x, which is
+     * a two-step fall while every other track sits at 1.5x or 2x -- measured on
+     * a real library, only the two longest titles ever got there, so they read
+     * as a glitch rather than as a layout rule. The marquee already exists for
+     * text that will not fit; shrinking was being tried first and never leaving
+     * it anything to do. One step of size variation, then it scrolls. */
     uint32_t ts = fb_text_fit(title, ui_text_w, TS_2X);
+    if (ts < TS_15X) ts = TS_15X;
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts, ui_text_w);
