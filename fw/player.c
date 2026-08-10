@@ -1008,6 +1008,23 @@ static uint32_t ui_byte_rate(void)
     return bytes_per_sec;
 }
 
+/* Byte rate for the SEEK LIMIT specifically. Deliberately not ui_byte_rate():
+ * that falls back to meas_rate, which converges all through playback, so a limit
+ * derived from it drifts a little on every repeat. The parked position then
+ * never equals the newly computed one, the movement guard never fires, and the
+ * flush-and-reprefill loop comes straight back -- but only on files with no
+ * Xing header, since those are the ones that reach the meas_rate branch. That
+ * is exactly "works on some songs and not others".
+ *
+ * Both inputs here are fixed at load, so this figure never moves. Same reasoning
+ * as ui_total_secs() below, which was corrected for the same fault earlier. */
+static uint32_t ui_seek_rate(void)
+{
+    if (track_secs && slot_size > audio_start)
+        return (slot_size - audio_start) / track_secs;
+    return bytes_per_sec;
+}
+
 static uint32_t ui_total_secs(void)
 {
     if (track_secs) return track_secs;          /* Xing/VBRI: exact */
@@ -4409,7 +4426,7 @@ int main(void)
                  * and the EOF path advanced the track. Three seconds of tail is
                  * left so the end is audible and the track finishes normally. */
                 want = file_pos + step;
-                uint32_t rate = ui_byte_rate();
+                uint32_t rate = ui_seek_rate();
                 if (slot_size > audio_start && rate) {
                     uint32_t last = slot_size - 3u * rate;
                     if (last < audio_start) last = audio_start;
