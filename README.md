@@ -263,6 +263,26 @@ from that source file's own copyright header.
 - **Core, firmware, UI and integration** —
   [HarpMudd](https://github.com/harpmudd).
 
+## License
+
+The code written for this project — the firmware, the RTL, the tools and the
+docs — is [MIT licensed](LICENSE).
+
+Everything under `third_party/` keeps its own license, and those are the ones
+that carry obligations:
+
+- **Helix** is under the [RPSL 1.0](third_party/libhelix-mp3/docs/RPSL.txt), a
+  per-file source-disclosure license. The compiled firmware contains Helix code,
+  so that source has to stay available — it is included here in full and
+  unmodified, with its own license text alongside it.
+- **Inter** is under the [SIL OFL 1.1](third_party/font/OFL.txt). The font ROM
+  the core draws with is generated from the typeface and is a derivative under
+  the same license.
+- The rest — VexRiscv, picojpeg, agg23's SDRAM and i2s modules — are MIT, ISC or
+  public domain. See [Credits](#credits).
+
+MIT on this project's own code does not relicense any of that.
+
 ## About / Support
 
 I'm into retro games and the Analogue Pocket, always cooking up something new.
