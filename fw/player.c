@@ -143,7 +143,20 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "0.1.0"
+#define APP_VER "1.0.0"
+
+/* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
+ * Select+A (APF slot table, boot vs live), Select+B (the framework's file
+ * descriptor) and Select+Start (load-phase timings in ms).
+ *
+ * These earned their place -- the slot table is what proved the fix for the
+ * bug that was corrupting .mp3 files, and the load timings are how the next
+ * question about a slow load gets answered with a measurement instead of a
+ * guess. They are compiled out rather than deleted so that turning them back
+ * on is a one-line change, not an archaeology exercise. */
+#ifndef DEBUG_DIAG
+#define DEBUG_DIAG 0
+#endif
 
 /* Framebuffer: 400x360 RGB565, one word/pixel, 512-word (page-aligned) stride.
  * See mp3_fb.sv for the full rationale. */
@@ -2660,20 +2673,20 @@ static void poll_input(void)
     if (edge & KEY_A) {
         /* Select+A shows the boot datatable snapshot, mirroring Select+B for
          * the 0190 struct. Plain A still plays/pauses. */
+#if DEBUG_DIAG
         if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
-        else {
+        else
+#endif
+        {
             paused ^= 1u;
             if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
         }
     }
     if (edge & KEY_X) {
-        /* Select+X steps BACK. Nine modes on one button is a lot of taps to
-         * reach the one before the current; a reverse is four lines. */
-        if (keys & KEY_SELECT) {
-            sel_used = 1;
-            viz_mode = (uint8_t)((viz_mode + VIZ_COUNT - 1u) % VIZ_COUNT);
-        } else
-            viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        /* Forward only. A reverse on Select+X existed and was dropped: nine
+         * modes wrap in nine taps, and every Select combo the user has to
+         * remember costs more than it saves. */
+        viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
         ui_wave_clear();                 /* modes do not share a screen layout */
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
@@ -2692,23 +2705,17 @@ static void poll_input(void)
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
-        /* Mirrors X / Select+X for the meters, so the gesture is already
-         * learned. Y was completely unused before this -- not even #defined. */
-        if (keys & KEY_SELECT) {
-            sel_used = 1;
-            eq_idx = (uint8_t)((eq_idx + EQ_COUNT - 1u) % EQ_COUNT);
-        } else
-            eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
+        /* Forward only, matching X. Y was completely unused before the EQ. */
+        eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
         eq_apply = 1u;
     }
     if (edge & KEY_START) {
+#if DEBUG_DIAG
         if (keys & KEY_SELECT) {
             /* Load-phase breakdown for the track just loaded, in ms: Head read,
-             * Size probe, Art decode, Prefill, Total. These have been measured
-             * all along but never surfaced, so every question about why a load
-             * feels slow was answered by estimating. Head/Art are the two that
-             * move; if Art dominates it is the JPEG, if Head does it is the tag
-             * walk. Costs nothing when not asked for. */
+             * Size probe, Art decode, Prefill, Total. Measured all along but
+             * never surfaced, so every question about a slow load used to be
+             * answered by estimating. */
             sel_used = 1;
             char b[24];
             uint32_t i = 0;
@@ -2725,14 +2732,18 @@ static void poll_input(void)
             }
             b[i] = 0;
             ui_toast_set(b, 0xFFFFFFFFu, 0);
-        } else if (!stopped) {
+        } else
+#endif
+        if (!stopped) {
             stopped = 1u; paused |= 1u; stop_req = 1u;
         }
     }
     if (edge & KEY_B) {
+#if DEBUG_DIAG
         if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
-        else                     stop_req = 1u;    /* restart = reposition,
-                                                    * NOT a cold reload */
+        else
+#endif
+        stop_req = 1u;              /* restart = reposition, NOT a cold reload */
     }
 
     /* ---- Left/Right: tap changes track, hold seeks ----

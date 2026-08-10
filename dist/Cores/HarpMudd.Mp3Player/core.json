@@ -2,13 +2,15 @@
     "core": {
         "magic": "APF_VER_1",
         "metadata": {
-            "platform_ids": ["mp3player"],
+            "platform_ids": [
+                "mp3player"
+            ],
             "shortname": "Mp3Player",
             "description": "MP3 Player",
             "author": "HarpMudd",
-            "url": "",
-            "version": "0.1.0",
-            "date_release": "2026-07-30"
+            "url": "https://github.com/harpmudd/HarpMudd.mp3player",
+            "version": "1.0.0",
+            "date_release": "2026-08-07"
         },
         "framework": {
             "target_product": "Analogue Pocket",

@@ -7,9 +7,9 @@ switchable meters, an eight-preset equalizer and a progress bar.
 The decoding is done in software, by a RISC-V CPU built into the Pocket's FPGA
 running this project's own firmware.
 
-> **Status: in development (0.1.0).** Playback, seeking, playlists, shuffle and
-> repeat, tags, album art, nine meters, the equalizer, the transport and saved
-> settings all work on real hardware. Not released yet.
+> **Version 1.0.0.** Playback, seeking, playlists, shuffle and repeat, tags,
+> album art, nine meters, the equalizer, the transport and saved settings are
+> all confirmed working on real hardware.
 
 ## Installing
 
@@ -46,9 +46,7 @@ playlists at any time.
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (nine styles) |
-| **Select** + **X** | Cycle the meter backwards |
 | **Y** | Cycle the EQ preset (eight) |
-| **Select** + **Y** | Cycle the EQ preset backwards |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
@@ -79,7 +77,7 @@ has some brings it back.
 
 ## Equalizer
 
-**Y** cycles eight presets; **Select**+**Y** goes back. The current one is named
+**Y** cycles eight presets. The current one is named
 in the mode row, dimmed on `FLAT`.
 
 | | |
@@ -134,13 +132,13 @@ on screen counts what will actually play, not how many lines are in the file.
 
 ## What it shows
 
-<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a STOPPED label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
+<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
 - **Title and artist** from the ID3v2 tag, in a real proportional typeface with
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **Nine meters**, cycled with **X** (**Select**+**X** goes back) and remembered
+- **Nine meters**, cycled with **X** and remembered
   between sessions:
   - **Bars** — scrolling loudness history with peak-hold markers.
   - **Waterfall** — a strip scrolling left, color tracking loudness, building a
@@ -193,10 +191,10 @@ It also meant finding that the framework keeps its record of every data slot's
 size in the same small memory a core uses to talk to it, at the very start. This
 core had been writing its own scratch there, so the first track change destroyed
 that record — which is what corrupted `.mp3` files whenever settings were saved.
-The scratch now lives above it. **Select**+**A** shows that table as the core
-saw it at boot against its live value, with a plain intact/clobbered verdict —
-a diagnostic, but the one that proves the fix rather than assuming it.
-**Select**+**B** dumps the framework's file descriptor for the same reason.
+The scratch now lives above it. The core carries diagnostics that prove this
+rather than assume it — the slot table as it stood at boot against its live
+value, and the framework's own file descriptor — but they are compiled out of a
+release build and are not on any button here.
 
 The equalizer is FPGA logic rather than software, sitting between the audio
 queue and the DAC. Five biquads per channel share one multiplier, taking 116 of
@@ -259,8 +257,9 @@ from that source file's own copyright header.
 - **[openFPGA framework](https://www.analogue.co/developer)** —
   [Analogue](https://www.analogue.co).
 - **[Inter typeface](https://rsms.me/inter/)** — Rasmus Andersson
-  ([rsms](https://github.com/rsms))
-  ([SIL Open Font License 1.1](https://github.com/rsms/inter/blob/master/LICENSE.txt)).
+  ([rsms](https://github.com/rsms)) — SIL Open Font License 1.1, bundled at
+  [`third_party/font/OFL.txt`](third_party/font/OFL.txt). The font ROM the core
+  draws with is generated from it and is a derivative under the same license.
 - **Core, firmware, UI and integration** —
   [HarpMudd](https://github.com/harpmudd).
 

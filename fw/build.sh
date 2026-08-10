@@ -24,7 +24,9 @@ mkdir -p "$OUT"
 
 # -mno-relax: no real __global_pointer$ in this bare-metal build, so gp-relative
 # relaxation would emit stores through an uninitialised gp.
-CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles"
+# EXTRA_CFLAGS lets a build turn on things that are off by default without
+# editing source, e.g.:  EXTRA_CFLAGS=-DDEBUG_DIAG=1 bash fw/build.sh
+CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles ${EXTRA_CFLAGS:-}"
 ROM="mp3player.rom"
 
 case "$TARGET" in
