@@ -52,33 +52,19 @@ playlists at any time.
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
 
-Track changes and seeking both work while paused or stopped, so you can move
-around a playlist without playing anything.
+Track changes and seeking work while paused or stopped. Changing track takes a
+moment — the new file has to be opened, its tag read and its artwork decoded
+before anything plays; restarting the current one is instant.
 
-Changing track ends the current one straight away and there is a short silence
-before the next begins — the core has to open the new file, read its tag and
-decode its artwork before it can play a note. Restarting a track, by contrast,
-is immediate, because nothing needs opening.
-
-Left and Right do one thing tapped and another held, and both resolve on
-release, so a tap can never also trigger the hold. Select works the same way: a
-Select used as a modifier doesn't toggle the art panel.
-
-Volume, accent color, repeat, shuffle, the meter, the art panel and the EQ
-preset are all remembered between sessions. Change them with the controls, or
-from **Core Settings** in the Analogue menu — either way they persist, and the
-two stay in step.
-
+Every setting is remembered between sessions: volume, accent color, repeat,
+shuffle, the meter, the art panel and the EQ preset. Change them with the
+controls or from **Core Settings** in the Analogue menu — they stay in step.
 The Pocket stores them itself, so nothing is written to your music folder.
-
-Hiding the album art is a preference, not a per-track state: a track with no
-artwork hides the panel without forgetting you want it, so the next track that
-has some brings it back.
 
 ## Equalizer
 
-**Y** cycles eight presets. The current one is named
-in the mode row, dimmed on `FLAT`.
+**Y** cycles eight presets. The current one is named in the mode row, dimmed
+on `FLAT`.
 
 | | |
 |---|---|
@@ -90,11 +76,6 @@ in the mode row, dimmed on `FLAT`.
 | **CLASSICAL** | gentle warmth, honest mids, eased upper mids, air |
 | **VOCAL** | mid forward, lows trimmed |
 | **TREBLE** | high shelf lift |
-
-It runs in the FPGA, not on the CPU: five cascaded biquads per channel on one
-time-multiplexed multiplier, using 116 of the 1,250 clocks available between
-output samples — under 10%. The decoder never knows it is there, so changing
-preset is seamless: no gap, no reload, and no interruption to playback.
 
 It works while paused too — the preset changes and the name updates, there is
 just nothing to hear until you press play.
@@ -138,24 +119,11 @@ on screen counts what will actually play, not how many lines are in the file.
   anti-aliased text.
 - **Album art** decoded from the tag's embedded image — JPEG only. Tracks with
   no embedded art simply don't show the panel.
-- **Nine meters**, cycled with **X** and remembered
-  between sessions:
-  - **Bars** — scrolling loudness history with peak-hold markers.
-  - **Waterfall** — a strip scrolling left, color tracking loudness, building a
-    picture of the track's dynamics.
-  - **L/R levels** — horizontal bars per channel.
-  - **Phase scope** — a goniometer with fading trails. Vertical is mono, wide is
-    a wide mix, horizontal is out of phase.
-  - **Oscilloscope** — the waveform itself, from a short window triggered on a
-    zero crossing so the trace holds still.
-  - **VU** — twin analogue needles with real ballistics, a 100° sweep, and a
-    fall to rest when you pause.
-  - **Waveform** — a scrolling envelope mirrored about a center line, like a
-    DAW's overview of a track.
-  - **Mirrored bars** — the bar history grown up and down from the center.
-  - **Peak dots** — only the peak markers, tracing the loudness contour.
-  None of them is a spectrum: the decoder doesn't expose frequency bins, so
-  these show loudness, waveform and stereo rather than frequency content.
+- **Nine meters**, cycled with **X** and remembered between sessions: bars,
+  waterfall, L/R levels, phase scope, oscilloscope, twin analogue VU
+  needles, scrolling waveform, mirrored bars and peak dots. None is a
+  spectrum — the decoder doesn't expose frequency bins, so these show
+  loudness, waveform and stereo instead.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the track position in the playlist when one is loaded.
@@ -170,42 +138,13 @@ rate, mono or stereo.<br clear="right">
 
 ## How it works
 
-There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a
-RISC-V CPU running at 60 MHz and the decoder runs on it as software. Simulation
-put the real-time floor around 46 MHz before any hardware was built, which is
-where the headroom comes from.
+There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a RISC-V
+CPU and the decoder runs on it as software, with the audio queue and the
+equalizer built as hardware around it.
 
-Decoded audio goes into a hardware queue that drains at the file's own sample
-rate, so the CPU can spend ~20 ms on a frame without the sound breaking up. The
-display works the same way: the CPU sends drawing commands to a framebuffer
-engine rather than writing pixels itself, keeping the interface out of the
-decoder's way.
-
-Reading files uses Analogue framework commands no core had driven before, for
-random reads and for opening a file by name. Making them work meant fixing a
-handshake bug — the "command finished" signal stays asserted until the *next*
-command starts, so a naive reader sees the previous command's completion and
-every read after the first returns nothing.
-
-It also meant finding that the framework keeps its record of every data slot's
-size in the same small memory a core uses to talk to it, at the very start. This
-core had been writing its own scratch there, so the first track change destroyed
-that record — which is what corrupted `.mp3` files whenever settings were saved.
-The scratch now lives above it. The core carries diagnostics that prove this
-rather than assume it — the slot table as it stood at boot against its live
-value, and the framework's own file descriptor — but they are compiled out of a
-release build and are not on any button here.
-
-The equalizer is FPGA logic rather than software, sitting between the audio
-queue and the DAC. Five biquads per channel share one multiplier, taking 116 of
-the 1,250 clocks between output samples, so it costs the decoder nothing.
-Its coefficients are generated and checked against a bit-exact model before
-anything is compiled, and the hardware is verified sample-for-sample against
-that model.
-
-Switching tracks in a playlist leans on the same path: the core asks the
-framework to describe the file already in the slot, then hands that description
-back with one path component changed. Nothing about the layout is assumed.
+If that sounds interesting, the longer version — including the two Analogue
+framework bugs that had to be found first — is in
+[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Known limitations
 
@@ -221,13 +160,9 @@ back with one path component changed. Nothing about the layout is assumed.
 - **Playlists are capped at 128 tracks**, and the file itself at 8 KB.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
-- **The core never writes to your card.** Not a limitation so much as a
-  deliberate property, and worth stating plainly: settings are stored by the
-  Pocket itself, and nothing this core does touches your music folder. An
-  earlier version saved settings by writing a file, and that write damaged
-  `.mp3` files three times before the cause was found — the core was
-  overwriting the framework's own record of every file's size. Both are fixed,
-  and the write is gone entirely rather than repaired.
+- **The core never writes to your card.** A deliberate property rather than a
+  limitation: settings live with the Pocket, and nothing here touches your music
+  folder.
 
 ## Credits
 
@@ -274,20 +209,13 @@ is why they are credited at all:
 The code written for this project — the firmware, the RTL, the tools and the
 docs — is [MIT licensed](LICENSE).
 
-Everything under `third_party/` keeps its own license, and those are the ones
-that carry obligations:
-
-- **Helix** is under the [RPSL 1.0](third_party/libhelix-mp3/docs/RPSL.txt), a
-  per-file source-disclosure license. The compiled firmware contains Helix code,
-  so that source has to stay available — it is included here in full and
-  unmodified, with its own license text alongside it.
-- **Inter** is under the [SIL OFL 1.1](third_party/font/OFL.txt). The font ROM
-  the core draws with is generated from the typeface and is a derivative under
-  the same license.
-- The rest — VexRiscv, picojpeg, agg23's SDRAM and i2s modules — are MIT, ISC or
-  public domain. See [Credits](#credits).
-
-MIT on this project's own code does not relicense any of that.
+Everything under `third_party/` keeps its own, and MIT here relicenses none of
+it. Two carry real obligations:
+[Helix](third_party/libhelix-mp3/docs/RPSL.txt) is RPSL 1.0, a per-file
+source-disclosure license, so it is vendored in full and unmodified;
+[Inter](third_party/font/OFL.txt) is SIL OFL 1.1, and the font ROM generated
+from it is a derivative under the same terms. The rest are MIT, ISC or public
+domain — see [Credits](#credits).
 
 ## About / Support
 
