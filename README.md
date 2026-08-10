@@ -88,7 +88,9 @@ loud the music seems.
 minutes with no button pressed. Any button wakes it, and that press does nothing
 else — reaching for a sleeping player to see what's on shouldn't pause it.
 
-Playback carries on while the screen is black. Set it to 0 to disable.
+Playback carries on while the screen is black, and nothing else brings it
+back — track changes, meters and toasts all stay dark until you press
+something. Set it to 0 to disable.
 
 ## Playlists
 
