@@ -19,7 +19,7 @@
                 }
             },
             {
-                "name": "Accent",
+                "name": "Color",
                 "id": 11,
                 "type": "slider_u32",
                 "enabled": true,
