@@ -278,6 +278,56 @@ below is about.
 
 Roughly 2 hours, one hardware test.
 
+## Scrobble log (.scrobbler.log) — requested by a user 2026-08-11
+
+"Could the core write played tracks to a log file like Rockbox does, so I can
+feed it to a last.fm scrobbler?" Rockbox writes `.scrobbler.log`: a header plus
+one tab-separated line per track (artist, album, title, track number, length, a
+listened/skipped flag, and a Unix timestamp). Check the format against
+Rockbox's own docs before writing any of it — do not reconstruct it from
+memory.
+
+**The timestamp problem is already solved, which was the surprise.** The Pocket
+exposes a real-time clock and the frozen shell already carries it:
+`rtc_epoch_seconds`, `rtc_date_bcd`, `rtc_time_bcd` and `rtc_valid` are wires in
+`core_top.v`, connected to `apf_top` and used by nothing here. A Unix epoch
+second is exactly what the format wants. Routing it to the SoC is one more MMIO
+register — an RTL change, so it should ride along with the settings-register
+widen rather than pay for its own compile.
+
+Everything else about the feature is easy. **The write is not.**
+
+### The blocker is 0184, and it is a POLICY decision, not an engineering one
+
+There is exactly one way for a Pocket core to write a file: the `0184` dataslot
+write. **That is the mechanism that destroyed the user's music library three
+times**, and it is off permanently by their decision. Read the forensics under
+Fixed before going near this.
+
+The root cause WAS found and fixed — this core was writing its 0190 response
+struct over APF's dataslot ID/size table at word 0, so APF read a garbage size
+and applied it to whatever file occupied the MP3 slot. So the path is not
+inherently unsafe any more. But "we understand why it broke last time" is not
+the same as "it is safe to point at the user's library again", and that call
+belongs to the user, not to whoever picks this ticket up.
+
+If it is ever attempted:
+
+- **APF cannot CREATE a file.** A placeholder `scrobbler.log` has to ship in
+  `Assets/mp3player/common/` and be declared as its own slot. Design for that;
+  do not assume create-on-first-write.
+- **Never point the write at the MP3 slot.** A separate slot, and assert the
+  slot id at the call site rather than trusting a variable.
+- **A write drops APF's fragment cache** for the MP3 slot, so the next refill
+  re-walks the cluster chain — an audible tic. Defer writes to paused, stopped
+  or menu-open, exactly as the settings code learned to.
+- **Test against a throwaway card with copied music**, never the real library.
+
+A safer half-measure worth considering first: keep the log in RAM and show it on
+screen, so the feature can be proven end to end — timestamps, track identity,
+the listened/skipped rule — with nothing written to the card at all. Only the
+final step needs 0184.
+
 ## Gapless playback
 
 Track changes currently have a short silence — the new file has to be opened,
