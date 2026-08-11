@@ -486,6 +486,38 @@ Only route worth trying later, on a card that can be reset: a variable that the
 core never writes back, driven from the menu alone. None of the current seven
 qualifies.
 
+## Hiding a Core Settings entry — MEASURED, not possible
+
+`interact.json` has an `enabled` field, and `"enabled": false` looked like the
+way to keep a variable persisted without showing it in the menu. The saved
+resume position wants exactly that: it is storage, not a setting, and as a
+draggable slider full of a huge number it is noise among real options.
+
+Tested alone on 2026-08-11, against a working resume so the result could not be
+confused with anything else. **It disables rather than hides.** The entry stays
+in the menu, greyed out, AND the value stops working -- the persist file held
+352321669 before the test and exactly 352321669 after a play session, when it
+should have tracked the position every second.
+
+So APF stops reading a disabled variable back from the core. That is the SAME
+failure as the `list` type above: two different fields, one underlying rule --
+
+  **A variable APF will not read back cannot be persisted from the core.**
+  Only `slider_u32` and `check`, enabled and visible, accept a core-written
+  value. There is no way to have persistence without a menu entry.
+
+Better than the `list` attempt in one respect: the persist file was not
+poisoned. Value and type survived intact, so reverting `enabled` to true was
+enough and the file did not have to be deleted.
+
+**What this closes.** The menu cannot be tidied by hiding. Color, Repeat, Meter
+and EQ preset are enumerations rendered as meaningless numeric sliders and
+would all read better gone, but the only way to remove an entry is to remove
+the variable -- which costs its persistence, exactly as it did for album art
+and screen blank. That is a real trade per setting, not a free cleanup, and
+each one has a button with a named toast already. Worth considering
+deliberately, one at a time; not worth doing wholesale.
+
 ## Button labels in input.json — WORKING, after three wrong combinations
 
 The Analogue controls screen now names all eight buttons. Getting there took

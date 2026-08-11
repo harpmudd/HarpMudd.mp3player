@@ -64,7 +64,7 @@
                 "name": "Saved position",
                 "id": 18,
                 "type": "slider_u32",
-                "enabled": false,
+                "enabled": true,
                 "persist": true,
                 "address": "0x20000010",
                 "defaultval": 0,
