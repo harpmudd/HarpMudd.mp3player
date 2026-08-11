@@ -605,6 +605,7 @@ static uint32_t resume_deadline;  /* stop waiting for a rate/size after this   *
  *  10 target past the end of the file
  *  11 gave up waiting for a reload/stop to finish */
 static uint8_t  resume_dbg;
+static uint16_t resume_saves;     /* times resume_pump has published a point  */
 
 static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
@@ -791,7 +792,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-#define UI_SHOW_SPEED_DIAG 0
+#define UI_SHOW_SPEED_DIAG 1
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -2991,14 +2992,22 @@ static void ui_draw_dynamic(void)
          * what only the running core knows: S the saved seconds, D which
          * branch the restore took, Z the file size and Y the byte offset the
          * resume wants, the last two being what D9 and D10 turn on. */
+        /* Both halves of the feature on one row, because the last failure was
+         * the SAVE and the row only described the restore:
+         *   S  seconds in the word the core currently holds
+         *   D  which branch the boot-time restore took
+         *   O  resume_on, as adopted from Core Settings
+         *   A  settings_adopted -- 0 means nothing may publish at all
+         *   V  how many times resume_pump has actually published a point
+         * V staying at 0 while music plays IS the save being dead. */
         char r[64], *rq = r;
         const char *rl = "RES S";
         while (*rl) *rq++ = *rl++;
         rq = ui_dec(rq, RS_SECS(resume_word));
         *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
-        *rq++ = ' '; *rq++ = 'Z'; rq = ui_dec(rq, slot_size >> 10);
-        *rq++ = ' '; *rq++ = 'Y';
-        rq = ui_dec(rq, (audio_start + ui_byte_rate() * RS_SECS(resume_word)) >> 10);
+        *rq++ = ' '; *rq++ = 'O'; rq = ui_dec(rq, resume_on);
+        *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, settings_adopted);
+        *rq++ = ' '; *rq++ = 'V'; rq = ui_dec(rq, resume_saves);
         *rq = 0;
         uint16_t rbg = ui_grad_at((FB_H - 42u));
         fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
@@ -3149,7 +3158,7 @@ static void resume_pump(void)
 
     uint16_t f = (pl_count && pl_pos < pl_count) ? pl_order[pl_pos] : 0u;
     uint32_t w = RS_PACK(f, ui_sec, track_name_id());
-    if (w != resume_word) { resume_word = w; settings_mark_dirty(); }
+    if (w != resume_word) { resume_word = w; resume_saves++; settings_mark_dirty(); }
 }
 
 static void ui_blank_pump(void)
