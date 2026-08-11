@@ -562,7 +562,8 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  *
  *   bits  0..6   track index   0-127, matching PL_MAX
  *   bits  7..23  seconds       0-131071, about 36 hours -- audiobook country
- *   bits 24..30  file tag      seven bits of cur_file_id
+ *   bit  24      FROM PLAYLIST -- is the track index above meaningful at all
+ *   bits 25..30  reserved, always zero
  *   bit  31      ALWAYS ZERO
  *
  * Bit 31 is reserved unset, and the tag is seven bits rather than eight, for a
@@ -584,11 +585,17 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  * room for the guard, and seconds survive a re-encode of the same track. */
 #define RS_TRACK(w)   ((w) & 0x7Fu)
 #define RS_SECS(w)    (((w) >> 7) & 0x1FFFFu)
-#define RS_TAG(w)     (((w) >> 24) & 0x7Fu)
-#define RS_PACK(t, s, g) (((uint32_t)((t) & 0x7Fu)) \
-                        | ((uint32_t)((s) & 0x1FFFFu) << 7) \
-                        | ((uint32_t)((g) & 0x7Fu) << 24))
+#define RS_PL(w)      (((w) >> 24) & 1u)
 
+/* Set when the playlist started the playing track, cleared when the user
+ * picked a file themselves. Without it resume_pump() stamped pl_pos onto every
+ * save merely because a playlist EXISTED, so a standalone mp3 was stored as
+ * "playlist track 5" and came back as Phish at 128 seconds. */
+#define RS_PACK(t, s, p) (((uint32_t)((t) & 0x7Fu)) \
+                        | ((uint32_t)((s) & 0x1FFFFu) << 7) \
+                        | ((uint32_t)((p) ? 1u : 0u) << 24))
+
+static uint8_t  track_from_pl;    /* playlist started this track, not the user */
 static uint32_t resume_word;      /* the packed point, as published to APF   */
 static uint8_t  resume_on;        /* Core Settings check; default OFF, opt in */
 static uint8_t  resume_armed;     /* a saved point is waiting to be applied  */
@@ -690,15 +697,9 @@ static char     track_file[64];        /* filename APF reports for the slot  */
  * The filename is a property of the FILE, so it is the same on every boot.
  * slot_filename() extracts it as the longest printable-ASCII run rather than
  * trusting an offset, which is also why it is the sturdier thing to hash. */
-static uint32_t track_name_id(void)
-{
-    uint32_t h = 2166136261u;                       /* FNV-1a */
-    for (uint32_t i = 0; i < sizeof(track_file) && track_file[i]; i++) {
-        h ^= (uint8_t)track_file[i];
-        h *= 16777619u;
-    }
-    return h;
-}
+/* (track_name_id() lived here: a filename hash tried as a cross-boot file
+ * identity, measured unstable, and its gate removed. Deleted, not left to
+ * rot.) */
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
@@ -3156,8 +3157,9 @@ static void resume_pump(void)
     if (ui_sec == last_sec) return;
     last_sec = ui_sec;
 
-    uint16_t f = (pl_count && pl_pos < pl_count) ? pl_order[pl_pos] : 0u;
-    uint32_t w = RS_PACK(f, ui_sec, track_name_id());
+    uint16_t f = (track_from_pl && pl_count && pl_pos < pl_count)
+               ? pl_order[pl_pos] : 0u;
+    uint32_t w = RS_PACK(f, ui_sec, track_from_pl);
     if (w != resume_word) { resume_word = w; resume_saves++; settings_mark_dirty(); }
 }
 
@@ -4682,7 +4684,11 @@ int main(void)
     int from_list = 0;
     if (!from_slot && pl_count) {
         uint16_t want = 0;
-        if (resume_on && resume_word) {
+        /* Only when the saved point CAME from the playlist. A standalone
+         * mp3's position carries no meaningful track index, and treating one
+         * as an index is what started a playlist track instead of the file
+         * the user had been listening to. */
+        if (resume_on && resume_word && RS_PL(resume_word)) {
             uint16_t f = RS_TRACK(resume_word);
             if (f < pl_count) { pl_resync(f); want = pl_pos; }
         }
@@ -4804,6 +4810,7 @@ int main(void)
              * reload_pending -- so resume's own playlist load cannot cancel
              * itself here. */
             resume_seek_req = 0;
+            track_from_pl  = 0u;            /* the user chose this one */
 
             REG(R_RELOAD)  = 1;             /* ack */
             reload_pending = 0;

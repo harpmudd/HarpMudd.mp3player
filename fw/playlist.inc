@@ -617,6 +617,7 @@ static int pl_play_span(uint16_t pos, int dir, uint16_t span)
             nmiss++;
         } else {
             pl_pos = at;
+            track_from_pl = 1u;      /* the playlist started this track */
             if (pl_open_name(&pl_text[pl_off[file_idx]])) {
                 pl_arm_load(leaving_id);
                 /* ONE line about the whole walk, not one per bad entry: a list
