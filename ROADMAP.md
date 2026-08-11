@@ -228,20 +228,16 @@ stutters.
 Implemented, HW-tested, **not merged**. User verdict: "works, but is a little
 rough." Two open defects, and the first is the reason it is parked.
 
-**1. Seek/elapsed goes wrong at 1.2x on SOME files.** Same signature as the
-hold-to-seek bug fixed the same day: wrong on some mp3s and not others. Last
-time that meant files with **no Xing header**, because `track_secs`
-short-circuits the whole `meas_rate` branch. Strong lead, NOT a diagnosis.
+**1. Seek/elapsed wrong at 1.2x on some files — FIXED 2026-08-11**, and it was
+not a speed bug at all. See the Fixed entry below; the short version is that
+three files were CBR with no Xing header, so the exact rate was available and
+being discarded in favour of a measurement. HW-confirmed at 1.2x and 1.0x.
 
-**Do not fix this by reasoning about it.** That approach cost four wrong
-attempts on the identical-looking bug. Put `meas_rate`, `ui_sec`, `file_pos`,
-`track_secs` and `ring_fill - ring_rd` on screen and watch them at 1.2x on a
-file that fails. The instrumented build took ten minutes last time and named
-the fault immediately.
-
-**2. Occasional distortion when engaging 1.2x.** Consistent with the budget
-table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of 60, so a
-dense passage can miss and underrun the FIFO. May be inherent.
+**2. Occasional distortion when engaging 1.2x — STILL OPEN.** Consistent with
+the budget table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of
+60, so a dense passage can miss and underrun the FIFO. Likely inherent, and a
+disclosable limitation rather than a fault -- which is what makes the
+experimental label below honest rather than a hedge for something broken.
 
 **A method note worth more than either defect.** Before the hardware test I
 asserted that speed could not disturb the elapsed clock, having grepped
@@ -519,6 +515,39 @@ based on it.
 Only route worth trying later, on a card that can be reset: a variable that the
 core never writes back, driven from the menu alone. None of the current seven
 qualifies.
+
+## Seek wrong at 1.2x on three files — FIXED 2026-08-11, and it was never about speed
+
+The failures were exactly three of eleven files, and `tools/xing_check.py`
+named the shape they share: **no Xing/Info/VBRI header, and CBR**. Stockholm
+Syndrome (256), Stone Temple Pilots (128), Widespread Panic (160). Every file
+WITH a frame count was fine at any speed.
+
+That is the one combination the rate logic handled worst. `ui_byte_rate()` read
+
+    track_secs ? exact : meas_rate ? meas_rate : bytes_per_sec
+
+so a headerless file fell to `meas_rate`, a throughput ESTIMATE -- while for CBR
+the first frame's bitrate is the byte rate, exactly. A 5 s seek on the 128 kbps
+file is precisely 80000 bytes. meas_rate had to converge on that number, and
+1.2x perturbed the convergence.
+
+`vbr_seen` is now set the moment a decoded frame disagrees with the first
+frame's bitrate. Until then the exact value is used, and `meas_rate` serves only
+what it was ever for: a headerless VBR file, where no constant exists to read.
+
+**Two things worth keeping.**
+
+The hold-to-seek bug fixed on 2026-08-10 lived in this same branch, and
+windowing the measurement made it *survivable* rather than removing the need to
+measure at all. 1.2x did not introduce a defect; it exposed one that had always
+been there, latent, on those same three files at normal speed.
+
+And the diagnosis cost one round because the prediction was made falsifiable
+first: "the failures are exactly these three files and no others." A file with a
+header failing would have killed the theory outright. Compare the four wrong
+fixes on 2026-08-10, each shipped on a plausible story with nothing that could
+have contradicted it.
 
 ## Hiding a Core Settings entry — MEASURED, not possible
 
