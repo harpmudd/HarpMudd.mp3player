@@ -602,7 +602,8 @@ static uint32_t resume_deadline;  /* stop waiting for a rate/size after this   *
  *   0 not reached      1 armed            2 position past a known duration
  *   3 disabled/nothing  4 nothing opened    6 repositioned
  *   7 idle at the seek  8 no byte rate      9 no file size
- *  10 target past the end of the file */
+ *  10 target past the end of the file
+ *  11 gave up waiting for a reload/stop to finish */
 static uint8_t  resume_dbg;
 
 static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
@@ -4711,7 +4712,9 @@ int main(void)
             resume_at = 0; resume_dbg = 2u;
         } else if (resume_at > 2u) {
             resume_seek_req = 1u; resume_dbg = 1u;
-            resume_deadline = cycles() + CLK_HZ * 5u;
+            /* Longer than the reload gate's own hard cap of 5 s, or this
+             * expires while the load it is waiting for is still settling. */
+            resume_deadline = cycles() + CLK_HZ * 12u;
         } else {
             resume_dbg = 3u;
         }
@@ -5019,7 +5022,19 @@ int main(void)
              * loop to wait for them would wait forever. Bounded at five
              * seconds, after which the reason is recorded and the track just
              * plays from the start. */
-            if (!idle && rate && slot_size && want < slot_size) {
+            /* NOTHING may be reloading. pl_play_at() does not load the track
+             * itself -- pl_arm_load() sets slot_size = 0, force_size_probe and
+             * reload_armed, and the real load_track() runs later in the reload
+             * handler, which finishes with stop_req and a reposition to 0:00.
+             *
+             * That is what D6-but-no-resume was: the seek genuinely ran, and
+             * then the pending load wiped it. It also explains the earlier D9,
+             * since pl_arm_load() is what zeroed slot_size in the first place.
+             *
+             * stop_req is included for the same reason -- it is queued
+             * repositioning that would land after this one. */
+            if (!idle && rate && slot_size && want < slot_size
+                && !reload_pending && !reload_armed && !stop_req) {
                 pcm_flush();
                 refill_drain();
                 file_pos  = want;
@@ -5040,7 +5055,9 @@ int main(void)
             }
             if ((int32_t)(cycles() - resume_deadline) >= 0) {
                 resume_seek_req = 0;             /* give up, and say why */
-                if      (idle)               resume_dbg = 7u;
+                if      (reload_pending || reload_armed || stop_req)
+                                             resume_dbg = 11u;
+                else if (idle)               resume_dbg = 7u;
                 else if (!rate)              resume_dbg = 8u;
                 else if (!slot_size)         resume_dbg = 9u;
                 else                         resume_dbg = 10u;
