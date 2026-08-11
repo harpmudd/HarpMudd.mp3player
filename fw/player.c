@@ -541,10 +541,52 @@ static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
 static uint8_t  shuffle_on;
 static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
 
-/* Screen blanking. An always-on player left running is the burn-in case, and
- * this panel is OLED. blank_min is minutes of no button press before the screen
- * goes black; 0 disables it. Playback is untouched -- only drawing stops. */
-static uint32_t blank_min;            /* from Core Settings; 0 = never        */
+/* Screen blanking. blank_min is minutes with no button press before the screen
+ * goes black; 0 disables it. Playback is untouched -- only drawing stops.
+ *
+ * Be honest about what this buys, because an earlier version of this comment
+ * was not. The Pocket is a 1600x1440 LTPS LCD, NOT an OLED, so there is no
+ * burn-in to protect against -- an LCD gets temporary image persistence at
+ * worst. Nor is it a power saving: a core cannot reach the backlight (the APF
+ * interface carries pixel data and sync and nothing else), so the panel stays
+ * lit and the draw calls saved are a rounding error next to it.
+ *
+ * What it actually gives you is a dark screen in a dark room. That is a real
+ * want, and it is the whole of the case for this feature.
+ *
+ * Set by Select+Down, not persisted -- it costs a settings slot that resume
+ * needs more. */
+/* ---------------------------------------------------------------- RESUME
+ * Where playback was when the core was last closed, in ONE 32-bit word,
+ * because one settings slot is all there was to spare:
+ *
+ *   bits  0..6   track index   0-127, matching PL_MAX
+ *   bits  7..23  seconds       0-131071, about 36 hours -- audiobook country
+ *   bits 24..31  file tag      low byte of cur_file_id
+ *
+ * The tag is the guard. A saved index means nothing if the .m3u has been
+ * edited since, so the byte is compared against the file that actually opens
+ * and the position is discarded when it disagrees. Eight bits is a 1-in-256
+ * chance of agreeing by accident, and the cost of that is resuming at the
+ * wrong timestamp in a real track -- recoverable with B, and bounded because
+ * the offset is range-checked against the file anyway.
+ *
+ * Seconds, not bytes: bytes would need 22 bits for a long file and leave no
+ * room for the guard, and seconds survive a re-encode of the same track. */
+#define RS_TRACK(w)   ((w) & 0x7Fu)
+#define RS_SECS(w)    (((w) >> 7) & 0x1FFFFu)
+#define RS_TAG(w)     (((w) >> 24) & 0xFFu)
+#define RS_PACK(t, s, g) (((uint32_t)((t) & 0x7Fu)) \
+                        | ((uint32_t)((s) & 0x1FFFFu) << 7) \
+                        | ((uint32_t)((g) & 0xFFu) << 24))
+
+static uint32_t resume_word;      /* the packed point, as published to APF   */
+static uint8_t  resume_on = 1u;   /* Core Settings check; default on         */
+static uint8_t  resume_armed;     /* a saved point is waiting to be applied  */
+static uint32_t resume_at;        /* seconds to seek to once the track opens */
+static uint8_t  resume_seek_req;  /* apply resume_at at the next safe point   */
+
+static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
 static uint8_t  screen_blank;         /* the screen is currently black         */
@@ -3002,6 +3044,27 @@ static void ui_blank_wake(void)
 /* One call per main-loop pass. Re-arms from NOW rather than advancing by a
  * fixed step, so a long stall (a track load) cannot leave a backlog of ticks to
  * catch up on. Drift does not matter for a screen blanker. */
+/* Record where we are, once a second. Two MMIO writes and no SD access, so the
+ * cost is nothing -- the settings register file is read back by APF each frame
+ * and APF does the storing, into its own file.
+ *
+ * Only while PLAYING. Saving while paused or idle would overwrite a good point
+ * with 0:00 on the way out of a track, which is precisely the moment the value
+ * matters. The FILE index is saved, not pl_pos: pl_pos indexes the play order,
+ * which a reshuffle rewrites, and the same song would then come back as a
+ * different entry. */
+static void resume_pump(void)
+{
+    static uint32_t last_sec = 0xFFFFFFFFu;
+    if (!resume_on || idle || (paused & 1u) || !cur_file_id) return;
+    if (ui_sec == last_sec) return;
+    last_sec = ui_sec;
+
+    uint16_t f = (pl_count && pl_pos < pl_count) ? pl_order[pl_pos] : 0u;
+    uint32_t w = RS_PACK(f, ui_sec, cur_file_id);
+    if (w != resume_word) { resume_word = w; settings_mark_dirty(); }
+}
+
 static void ui_blank_pump(void)
 {
     if (screen_blank || !blank_min) return;
@@ -3012,8 +3075,8 @@ static void ui_blank_pump(void)
 }
 
 /* Black the whole frame. Only the framebuffer -- there is no way to switch the
- * panel itself off from a core, so "blank" means every pixel black, which is
- * what an OLED needs anyway. */
+ * panel itself off from a core, so "blank" means every pixel black. The
+ * backlight stays on regardless; see the note on blank_min. */
 static void poll_input(void)
 {
     static uint32_t prev;
@@ -3226,13 +3289,36 @@ static void poll_input(void)
         }
     }
 
-    if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
-                                  ? VOL_MAX : volume + VOL_STEP;
-                           vol_apply(); ui_toast_set("VOLUME", volume, "%");
-                           settings_mark_dirty(); }
-    if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
-                           vol_apply(); ui_toast_set("VOLUME", volume, "%");
-                           settings_mark_dirty(); }
+    /* Up/Down are now guarded by Select, which they were not before: plain
+     * Select+Up used to change the volume AND toggle the art panel on release,
+     * because nothing claimed the combo. Select+Down needs it properly. */
+    if (!(keys & KEY_SELECT)) {
+        if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
+                                      ? VOL_MAX : volume + VOL_STEP;
+                               vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                               settings_mark_dirty(); }
+        if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
+                               vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                               settings_mark_dirty(); }
+    }
+
+    /* Select+Down cycles the blank timeout. It is the ONLY way to reach this
+     * now -- the Core Settings entry was given up so resume could have the
+     * slot -- so the cycle has to cover the useful values, not just on/off.
+     * Sits beside Select+L (repeat) and Select+R (shuffle), which is where a
+     * user already looks for settings-ish combos. Not persisted: it is back to
+     * OFF every launch, which is the honest cost of the trade. */
+    else if (edge & KEY_DOWN) {
+        static const uint8_t bl[] = { 0u, 1u, 5u, 10u, 30u };
+        uint32_t i = 0;
+        while (i < sizeof(bl) / sizeof(bl[0]) && bl[i] != blank_min) i++;
+        i = (i + 1u) % (sizeof(bl) / sizeof(bl[0]));
+        blank_min = bl[i];
+        sel_used  = 1;
+        ui_blank_touch();               /* restart the countdown from now */
+        if (blank_min) ui_toast_set("SCREEN BLANK", blank_min, " MIN");
+        else           ui_toast_msg("SCREEN BLANK OFF");
+    }
 
     /* ---- Select as a modifier for L/R ---- */
     if (edge & KEY_SELECT) sel_used = 0;
@@ -4488,9 +4574,31 @@ int main(void)
     ui_boot_note("LOADING SONG");
     int from_slot = load_track();
     /* The splash is already up; leave it while the playlist track loads
-     * rather than flashing instructions that are about to be replaced. */
-    int from_list = (!from_slot && pl_count) ? pl_play_at(0) : 0;
+     * rather than flashing instructions that are about to be replaced.
+     *
+     * Start at the SAVED track when there is one. pl_resync() finds the file
+     * index in whatever order this boot produced, so a resumed track is right
+     * even when shuffle has just reshuffled the list. */
+    int from_list = 0;
+    if (!from_slot && pl_count) {
+        uint16_t want = 0;
+        if (resume_on && resume_word) {
+            uint16_t f = RS_TRACK(resume_word);
+            if (f < pl_count) { pl_resync(f); want = pl_pos; }
+        }
+        from_list = pl_play_at(want);
+    }
     ui_boot_cancel();          /* not _clear: see the note on that function */
+
+    /* Arm the position seek only if the file that ACTUALLY opened is the one
+     * the point was saved against. A .m3u edited since would otherwise apply
+     * one track's timestamp to another. Under two seconds is not worth a
+     * reposition -- it is just the start of the track. */
+    if (resume_on && resume_word && (from_slot || from_list)
+        && (cur_file_id & 0xFFu) == RS_TAG(resume_word)) {
+        resume_at = RS_SECS(resume_word);
+        if (resume_at > 2u) resume_seek_req = 1u;
+    }
 
     if (from_slot) {
         pl_report();
@@ -4522,6 +4630,7 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+        resume_pump();
 
         /* Keeps the LOADING dots moving through the reload gate. ui_boot_tick()
          * is otherwise driven only from inside target_read_slot()'s spin, and
@@ -4768,6 +4877,38 @@ int main(void)
          * restart now IS this body. The cold reload was a relic of the
          * stale-tag era; for the SAME file there is nothing to re-resolve.
          * Track CHANGES still load cold, as they must. */
+        /* Absolute reposition for a resumed track. Deliberately the same body
+         * as stop_req below, differing only in the target: that path is the
+         * one proven not to click, and every route into playback going through
+         * the same code is why track changes stopped clicking at all.
+         *
+         * Runs once, after the track is open and its rate is known. If the
+         * rate is not known yet or the target lands past the end of the file,
+         * the resume is simply dropped and the track plays from the start --
+         * a wrong seek is worse than none. */
+        if (resume_seek_req) {
+            resume_seek_req = 0;
+            uint32_t rate = ui_byte_rate();
+            uint32_t want = audio_start + rate * resume_at;
+            if (!idle && rate && slot_size && want < slot_size) {
+                pcm_flush();
+                refill_drain();
+                file_pos  = want;
+                ring_fill = 0; ring_rd = 0;
+                frames = 0; min_level = 0xFFFFFFFFu;
+                ui_sec = resume_at; ui_sec_acc = 0;
+                ui_last_sec = 0xFFFFFFFFu; ui_prog_sec = 0xFFFFFFFFu;
+                ui_last_pause = 0xFFFFFFFFu;
+                /* Restart the measurement window here, exactly as a manual
+                 * seek does -- carrying it across a reposition is what made
+                 * meas_rate self-referential once before. */
+                meas_pos0 = file_pos; meas_sec0 = ui_sec;
+                if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+                ui_draw_dynamic();
+            }
+            continue;
+        }
+
         if (stop_req) {
             stop_req = 0;
             if (idle) continue;             /* nothing loaded to reposition */

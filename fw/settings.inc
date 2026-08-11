@@ -56,8 +56,15 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
  * word APF hands back differs from that, the user moved it in the Core Settings
  * menu and we adopt it. Otherwise ours stands.
  */
-enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_ART, SW_VIZ, SW_EQ,
-       SW_BLANK, SW_N };
+/* Slot 4 was the album-art panel and slot 7 the screen-blank timeout. Both are
+ * now button-only and unpersisted, freeing the two slots resume needs -- the
+ * index is 3 bits wide (`set_idx <= dDAT_MOSI[2:0]`), so eight is all there is
+ * and a ninth would silently alias onto Volume.
+ *
+ * The ADDRESSES of the six survivors are unchanged, deliberately: renumbering
+ * would have scrambled every already-saved setting on every card. */
+enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_RESUME, SW_VIZ, SW_EQ,
+       SW_RESUMEON, SW_N };
 
 /* What we last published. Initialised to a value APF can never write for
  * these ranges, so the FIRST poll always counts as a change and adopts
@@ -83,10 +90,10 @@ static int settings_store(void)
     set_wr(SW_PAL,  ui_pal_idx);
     set_wr(SW_REP,  rep_mode);
     set_wr(SW_SHUF, shuffle_on ? 1u : 0u);
-    set_wr(SW_ART,  art_pref ? 1u : 0u);
+    set_wr(SW_RESUME, resume_word);
     set_wr(SW_VIZ,  viz_mode);
     set_wr(SW_EQ,   eq_idx);
-    set_wr(SW_BLANK, blank_min);
+    set_wr(SW_RESUMEON, resume_on ? 1u : 0u);
     return 1;
 }
 
@@ -111,14 +118,14 @@ static int settings_load(void)
                                                    ui_accent = ui_palette[v]; }
     v = set_rd(SW_REP);   if (v <= REP_ONE)        rep_mode = (uint8_t)v;
     v = set_rd(SW_SHUF);  shuffle_on = v ? 1u : 0u;
-    v = set_rd(SW_ART);   art_pref   = v ? 1u : 0u;
+    /* Not range-checked as a whole -- it is three packed fields and each is
+     * validated where it is used, against the playlist length and the file
+     * actually open. A garbage word can only fail to resume. */
+    resume_word = set_rd(SW_RESUME);
     v = set_rd(SW_VIZ);   if (v < VIZ_COUNT)       viz_mode = (uint8_t)v;
     v = set_rd(SW_EQ);    if (v < EQ_COUNT)      { eq_idx = (uint8_t)v;
                                                    REG(R_EQ) = eq_idx; }
-    /* Minutes. Range-checked like the rest: a value off a file on the card must
-     * not be able to blank the screen instantly or never. */
-    v = set_rd(SW_BLANK); if (v <= 30u)          { blank_min = v;
-                                                   ui_blank_touch(); }
+    v = set_rd(SW_RESUMEON); resume_on = v ? 1u : 0u;
     return 1;
 }
 
