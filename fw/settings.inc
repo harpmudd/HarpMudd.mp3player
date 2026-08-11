@@ -33,6 +33,7 @@ static uint32_t set_poll_at;
 
 static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
 
+
 /* ---------------------------------------------------------------------------
  * PERSISTENCE, third mechanism and the first that cannot touch a data slot.
  *
@@ -126,6 +127,7 @@ static int settings_load(void)
     v = set_rd(SW_EQ);    if (v < EQ_COUNT)      { eq_idx = (uint8_t)v;
                                                    REG(R_EQ) = eq_idx; }
     v = set_rd(SW_RESUMEON); resume_on = v ? 1u : 0u;
+    settings_adopted = 1u;
     return 1;
 }
 

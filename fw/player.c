@@ -595,6 +595,13 @@ static uint8_t  resume_armed;     /* a saved point is waiting to be applied  */
 static uint32_t resume_at;        /* seconds to seek to once the track opens */
 static uint8_t  resume_seek_req;  /* apply resume_at at the next safe point   */
 
+/* Which branch the boot-time restore took. Latched, so the answer survives on
+ * screen instead of having to be inferred from whether music started in the
+ * right place:
+ *   0 not reached   1 armed      2 tag mismatch    3 disabled or nothing saved
+ *   4 nothing opened  5 seek dropped (no rate / past end of file)   6 done */
+static uint8_t  resume_dbg;
+
 static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
@@ -615,6 +622,11 @@ static uint16_t pl_live_count(void);
 static uint16_t pl_live_ordinal(uint16_t pos);
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
+/* Set by settings_load() once APF's stored values have been taken. Nothing may
+ * publish before that: settings_store() writes all eight words, so an earlier
+ * write would push firmware defaults over what the user had saved. Declared
+ * here rather than in settings.inc, which is included further down. */
+static uint8_t settings_adopted;
 
 /* Defined with the rest of the blanking code, below the error paths that have
  * to wake the screen before drawing to it directly. */
@@ -2939,6 +2951,28 @@ static void ui_draw_dynamic(void)
      * HOW TO USE IT: play a file that misbehaves, note T. Watch M and R at
      * 1.0x for ten seconds, hold A, watch them again. Compare, do not infer. */
 #if UI_SHOW_SPEED_DIAG
+    /* Resume row, above the speed row. W is the packed word as loaded, T its
+     * tag, C the tag of the file that actually opened -- if those two differ
+     * the guard rejected the point, and the two numbers say so directly. D is
+     * the latched branch code documented at resume_dbg. */
+    if (ui_sec != ui_last_spd) {
+        char r[64], *rq = r;
+        const char *rl = "RES W";
+        while (*rl) *rq++ = *rl++;
+        for (int i = 28; i >= 0; i -= 4) {
+            uint32_t n = (resume_word >> i) & 0xFu;
+            *rq++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
+        }
+        *rq++ = ' '; *rq++ = 'T'; rq = ui_dec(rq, RS_TAG(resume_word));
+        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, cur_file_id & 0x7Fu);
+        *rq++ = ' '; *rq++ = 'S'; rq = ui_dec(rq, RS_SECS(resume_word));
+        *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
+        *rq = 0;
+        uint16_t rbg = ui_grad_at((FB_H - 42u));
+        fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
+        fb_set_color(UI_RED, rbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 42u, r, TS_1X, TS_1X, UI_INNER_W);
+    }
     if (ui_sec != ui_last_spd) {
         ui_last_spd = ui_sec;
         char b[64], *q = b;
@@ -3065,6 +3099,12 @@ static void ui_blank_wake(void)
 static void resume_pump(void)
 {
     static uint32_t last_sec = 0xFFFFFFFFu;
+    /* Nothing may mark the settings dirty until settings_load() has adopted
+     * APF's stored values. settings_store() publishes ALL eight words, so a
+     * dirty flag raised first would write firmware DEFAULTS over the user's
+     * saved volume, meter and the rest -- which is exactly what reset two of
+     * them on the last build. */
+    if (!settings_adopted) return;
     if (!resume_on || idle || (paused & 1u) || !cur_file_id) return;
     if (ui_sec == last_sec) return;
     last_sec = ui_sec;
@@ -4603,10 +4643,13 @@ int main(void)
      * the point was saved against. A .m3u edited since would otherwise apply
      * one track's timestamp to another. Under two seconds is not worth a
      * reposition -- it is just the start of the track. */
-    if (resume_on && resume_word && (from_slot || from_list)
-        && (cur_file_id & 0x7Fu) == RS_TAG(resume_word)) {
+    if (!resume_on || !resume_word)            resume_dbg = 3u;
+    else if (!(from_slot || from_list))        resume_dbg = 4u;
+    else if ((cur_file_id & 0x7Fu) != RS_TAG(resume_word)) resume_dbg = 2u;
+    else {
         resume_at = RS_SECS(resume_word);
-        if (resume_at > 2u) resume_seek_req = 1u;
+        if (resume_at > 2u) { resume_seek_req = 1u; resume_dbg = 1u; }
+        else                 resume_dbg = 3u;
     }
 
     if (from_slot) {
@@ -4914,6 +4957,9 @@ int main(void)
                 meas_pos0 = file_pos; meas_sec0 = ui_sec;
                 if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
                 ui_draw_dynamic();
+                resume_dbg = 6u;                 /* actually repositioned */
+            } else {
+                resume_dbg = 5u;                 /* dropped: no rate, or past EOF */
             }
             continue;
         }
