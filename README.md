@@ -60,9 +60,14 @@ restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset are
 remembered between sessions, and the controls and **Core Settings** stay in
-step. **Where you were is remembered too** — the track and your position in it,
-so a long listen picks up where it stopped. Turn that off with **Resume
-playback** in Core Settings.
+step. **Where you were in a playlist is remembered too** — the track and your
+position in it, so a long listen picks up where it stopped. Turn that off with
+**Resume playback** in Core Settings.
+
+That applies to playlist playback only. A file opened with **Load MP3** plays
+without recording a position, which also means a quick listen to something else
+won't cost you your place. For an audiobook, put it in a playlist — a one-line
+`.m3u` is enough.
 
 The album art panel and the screen-blank timeout are *not* remembered; both
 reset each launch and are set with buttons.
