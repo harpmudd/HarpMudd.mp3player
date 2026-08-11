@@ -4643,7 +4643,11 @@ int main(void)
      * target_read_slot()'s spin, and it returns immediately unless a note is
      * armed, so arming one here is the whole change. Cleared before anything
      * else paints, since PLAYLIST / N TRACKS lands on this same row. */
-    ui_boot_note("LOADING SONG");
+    /* Say which of the two is happening. A resume takes the same visible
+     * moment as an ordinary load, and "RESUMING" is the only clue the user
+     * gets that the position was remembered before the player appears. */
+    ui_boot_note((resume_on && resume_word && RS_SECS(resume_word) > 2u)
+                 ? "RESUMING SONG" : "LOADING SONG");
     int from_slot = load_track();
     /* The splash is already up; leave it while the playlist track loads
      * rather than flashing instructions that are about to be replaced.
@@ -4666,13 +4670,39 @@ int main(void)
      * the point was saved against. A .m3u edited since would otherwise apply
      * one track's timestamp to another. Under two seconds is not worth a
      * reposition -- it is just the start of the track. */
+    /* NO LONGER GATED ON FILE IDENTITY.
+     *
+     * Two attempts at an identity that survives a power cycle both failed.
+     * cur_file_id hashes the 0190 response, which moves between boots.
+     * Hashing the filename should have been stable and was not either -- the
+     * name is recovered as the longest printable-ASCII run out of a shared
+     * datatable, so which run wins can differ depending on what else has been
+     * through that buffer. Every saved point was rejected, and the feature has
+     * never once worked because of a check meant to protect it.
+     *
+     * So ask a question that can actually be answered. Instead of "is this the
+     * same file", ask "is this position sensible for the file I have" -- which
+     * needs no identity, only the file itself:
+     *
+     *   - the target must land inside the file (checked at the seek)
+     *   - it must not be past a known duration (checked here)
+     *
+     * If a playlist has been edited underneath us the worst case is starting a
+     * track 56 seconds in, which B undoes. That is a far smaller cost than a
+     * guard that rejects everything, and unlike the guard it cannot fail
+     * silently -- a wrong resume is audible immediately. */
     if (!resume_on || !resume_word)            resume_dbg = 3u;
     else if (!(from_slot || from_list))        resume_dbg = 4u;
-    else if ((track_name_id() & 0x7Fu) != RS_TAG(resume_word)) resume_dbg = 2u;
     else {
         resume_at = RS_SECS(resume_word);
-        if (resume_at > 2u) { resume_seek_req = 1u; resume_dbg = 1u; }
-        else                 resume_dbg = 3u;
+        /* Past the end of a track whose length we know: not this file. */
+        if (track_secs && resume_at + 2u >= track_secs) {
+            resume_at = 0; resume_dbg = 2u;
+        } else if (resume_at > 2u) {
+            resume_seek_req = 1u; resume_dbg = 1u;
+        } else {
+            resume_dbg = 3u;
+        }
     }
 
     if (from_slot) {
