@@ -639,6 +639,7 @@ static uint8_t set_flush_now;
  * write would push firmware defaults over what the user had saved. Declared
  * here rather than in settings.inc, which is included further down. */
 static uint8_t settings_adopted;
+static uint8_t settings_load_ok;   /* what the BOOT settings_load() returned */
 
 /* Defined with the rest of the blanking code, below the error paths that have
  * to wake the screen before drawing to it directly. */
@@ -793,7 +794,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-#define UI_SHOW_SPEED_DIAG 0
+#define UI_SHOW_SPEED_DIAG 1
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -3009,6 +3010,15 @@ static void ui_draw_dynamic(void)
         *rq++ = ' '; *rq++ = 'O'; rq = ui_dec(rq, resume_on);
         *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, settings_adopted);
         *rq++ = ' '; *rq++ = 'V'; rq = ui_dec(rq, resume_saves);
+        /* P: was the saved point from the playlist. L: what settings_load()
+         * actually returned at boot -- 0 means it took the all-zero early exit
+         * and every setting is a firmware default regardless of what the card
+         * holds, which is the "everything reset" report. C: the accent index
+         * as adopted, a setting whose stored value is 3, so C3 proves the
+         * adopt worked and C0 proves it did not. */
+        *rq++ = ' '; *rq++ = 'P'; rq = ui_dec(rq, RS_PL(resume_word));
+        *rq++ = ' '; *rq++ = 'L'; rq = ui_dec(rq, settings_load_ok);
+        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, ui_pal_idx);
         *rq = 0;
         uint16_t rbg = ui_grad_at((FB_H - 42u));
         fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
@@ -4622,7 +4632,7 @@ int main(void)
      * chose. It only reads a slot -- nothing on screen depends on it -- and
      * painting before it meant the very first thing shown was always the
      * default orange regardless of what had been saved. */
-    settings_load();
+    settings_load_ok = (uint8_t)settings_load();
 
     /* Derive the background tint ONCE, here, where ui_accent has reached its
      * final value whether it was restored or left at the default. Doing it
