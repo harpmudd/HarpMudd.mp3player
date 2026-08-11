@@ -598,8 +598,10 @@ static uint8_t  resume_seek_req;  /* apply resume_at at the next safe point   */
 /* Which branch the boot-time restore took. Latched, so the answer survives on
  * screen instead of having to be inferred from whether music started in the
  * right place:
- *   0 not reached   1 armed      2 tag mismatch    3 disabled or nothing saved
- *   4 nothing opened  5 seek dropped (no rate / past end of file)   6 done */
+ *   0 not reached      1 armed            2 position past a known duration
+ *   3 disabled/nothing  4 nothing opened    6 repositioned
+ *   7 idle at the seek  8 no byte rate      9 no file size
+ *  10 target past the end of the file */
 static uint8_t  resume_dbg;
 
 static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
@@ -2979,17 +2981,19 @@ static void ui_draw_dynamic(void)
      * the guard rejected the point, and the two numbers say so directly. D is
      * the latched branch code documented at resume_dbg. */
     if (ui_sec != ui_last_spd) {
+        /* The packed word itself is NOT shown -- it is readable straight off
+         * the card in interact_persist.json, so the row spends its width on
+         * what only the running core knows: S the saved seconds, D which
+         * branch the restore took, Z the file size and Y the byte offset the
+         * resume wants, the last two being what D9 and D10 turn on. */
         char r[64], *rq = r;
-        const char *rl = "RES W";
+        const char *rl = "RES S";
         while (*rl) *rq++ = *rl++;
-        for (int i = 28; i >= 0; i -= 4) {
-            uint32_t n = (resume_word >> i) & 0xFu;
-            *rq++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
-        }
-        *rq++ = ' '; *rq++ = 'T'; rq = ui_dec(rq, RS_TAG(resume_word));
-        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, track_name_id() & 0x7Fu);
-        *rq++ = ' '; *rq++ = 'S'; rq = ui_dec(rq, RS_SECS(resume_word));
+        rq = ui_dec(rq, RS_SECS(resume_word));
         *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
+        *rq++ = ' '; *rq++ = 'Z'; rq = ui_dec(rq, slot_size >> 10);
+        *rq++ = ' '; *rq++ = 'Y';
+        rq = ui_dec(rq, (audio_start + ui_byte_rate() * RS_SECS(resume_word)) >> 10);
         *rq = 0;
         uint16_t rbg = ui_grad_at((FB_H - 42u));
         fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
@@ -4995,6 +4999,13 @@ int main(void)
             resume_seek_req = 0;
             uint32_t rate = ui_byte_rate();
             uint32_t want = audio_start + rate * resume_at;
+            /* One code per reason. Lumping four conditions into a single "5"
+             * said the seek was dropped without saying by which test, which is
+             * half a diagnostic. */
+            if      (idle)               resume_dbg = 7u;
+            else if (!rate)              resume_dbg = 8u;
+            else if (!slot_size)         resume_dbg = 9u;
+            else if (want >= slot_size)  resume_dbg = 10u;
             if (!idle && rate && slot_size && want < slot_size) {
                 pcm_flush();
                 refill_drain();
@@ -5011,8 +5022,6 @@ int main(void)
                 if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
                 ui_draw_dynamic();
                 resume_dbg = 6u;                 /* actually repositioned */
-            } else {
-                resume_dbg = 5u;                 /* dropped: no rate, or past EOF */
             }
             continue;
         }
