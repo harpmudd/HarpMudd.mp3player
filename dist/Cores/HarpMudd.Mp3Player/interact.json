@@ -61,14 +61,20 @@
                 "value": 1
             },
             {
-                "name": "Album art",
-                "id": 14,
-                "type": "check",
+                "name": "Saved position",
+                "id": 18,
+                "type": "slider_u32",
                 "enabled": true,
                 "persist": true,
                 "address": "0x20000010",
-                "defaultval": 1,
-                "value": 1
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 2147483647,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
             },
             {
                 "name": "Meter",
@@ -103,20 +109,14 @@
                 }
             },
             {
-                "name": "Screen blank (min)",
-                "id": 17,
-                "type": "slider_u32",
+                "name": "Resume playback",
+                "id": 19,
+                "type": "check",
                 "enabled": true,
                 "persist": true,
                 "address": "0x2000001C",
                 "defaultval": 0,
-                "graphical": {
-                    "signed": false,
-                    "min": 0,
-                    "max": 30,
-                    "adjust_small": 1,
-                    "adjust_large": 5
-                }
+                "value": 1
             }
         ],
         "messages": []

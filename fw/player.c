@@ -376,7 +376,43 @@ static uint32_t samp_per_frame = 1152u;
  * needs them declared before ui_draw_dynamic(). */
 static uint32_t audio_start;             /* first byte after any ID3 tag */
 static uint32_t bytes_per_sec = 16000u;  /* refined once decoding */
+/* Set the moment a decoded frame disagrees with the first frame's bitrate.
+ * Until then the file is CBR as far as we have seen, and for CBR the frame
+ * bitrate IS the byte rate -- exactly, with nothing to measure. */
+static uint8_t  vbr_seen;
 static uint32_t track_kbps, track_hz;
+
+/* Playback speed. 1.2x is the whole range: playing at N x needs N x the decode
+ * throughput, and against the Stage 0 figures 1.5x already breaks on 320 kbps
+ * while 2x cannot work at any bitrate. 6/5 rather than a float -- there is no
+ * FPU, and this lands in the same expression as a 64-bit shift.
+ *
+ * Deliberately NOT persisted, so it costs no settings slot (all eight are used
+ * and a ninth would mean an RTL change). Resetting to normal each launch is
+ * also the right default for something engaged per-listen. See ROADMAP. */
+#define SPEED_NUM 6u
+#define SPEED_DEN 5u
+static uint8_t speed_fast;               /* 0 = normal, 1 = 1.2x */
+
+/* Drain the PCM FIFO at the file's sample rate, scaled by the current speed;
+ * sound_i2s zero-order-holds up to its fixed 48 kHz. Pitch rises with speed --
+ * there is no room in the decode budget for time-stretching on top.
+ *
+ * ONE place computes this. It was duplicated at the two points that learn the
+ * sample rate, and a speed toggle has to reproduce it exactly or the pitch goes
+ * wrong on the next track only.
+ *
+ * Nothing else needs adjusting for speed: ui_sec, the duration and the seek
+ * distances are all derived from FILE POSITION, not wall clock, so they stay
+ * correct by construction. The FIFO drain is the only wall-clock-domain thing
+ * here. */
+static void pcm_rate_apply(uint32_t hz)
+{
+    if (!hz) return;
+    uint64_t inc = ((uint64_t)hz << 32) / CLK_HZ;
+    if (speed_fast) inc = inc * SPEED_NUM / SPEED_DEN;
+    REG(R_PCM_RATE) = (uint32_t)inc;
+}
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
 static uint8_t  size_suspect;     /* directory disagrees with the file itself   */
 static uint8_t  ui_size_warned;
@@ -509,10 +545,80 @@ static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
 static uint8_t  shuffle_on;
 static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
 
-/* Screen blanking. An always-on player left running is the burn-in case, and
- * this panel is OLED. blank_min is minutes of no button press before the screen
- * goes black; 0 disables it. Playback is untouched -- only drawing stops. */
-static uint32_t blank_min;            /* from Core Settings; 0 = never        */
+/* Screen blanking. blank_min is minutes with no button press before the screen
+ * goes black; 0 disables it. Playback is untouched -- only drawing stops.
+ *
+ * Be honest about what this buys, because an earlier version of this comment
+ * was not. The Pocket is a 1600x1440 LTPS LCD, NOT an OLED, so there is no
+ * burn-in to protect against -- an LCD gets temporary image persistence at
+ * worst. Nor is it a power saving: a core cannot reach the backlight (the APF
+ * interface carries pixel data and sync and nothing else), so the panel stays
+ * lit and the draw calls saved are a rounding error next to it.
+ *
+ * What it actually gives you is a dark screen in a dark room. That is a real
+ * want, and it is the whole of the case for this feature.
+ *
+ * Set by Select+Down, not persisted -- it costs a settings slot that resume
+ * needs more. */
+/* ---------------------------------------------------------------- RESUME
+ * Where playback was when the core was last closed, in ONE 32-bit word,
+ * because one settings slot is all there was to spare:
+ *
+ *   bits  0..6   track index   0-127, matching PL_MAX
+ *   bits  7..23  seconds       0-131071, about 36 hours -- audiobook country
+ *   bit  24      FROM PLAYLIST -- is the track index above meaningful at all
+ *   bits 25..30  reserved, always zero
+ *   bit  31      ALWAYS ZERO
+ *
+ * Bit 31 is reserved unset, and the tag is seven bits rather than eight, for a
+ * reason paid for on hardware: APF stores these values as SIGNED 32-bit. The
+ * first attempt used all 32 bits and declared the slider max as 4294967295,
+ * which APF read as -1 -- so the range became [0, -1], max below min, and
+ * every value collapsed to -1. The persist file said `"val": -1` while every
+ * other setting stored correctly. Keeping the word inside positive int32
+ * territory means no value can ever be mistaken for negative.
+ *
+ * The tag is the guard. A saved index means nothing if the .m3u has been
+ * edited since, so the byte is compared against the file that actually opens
+ * and the position is discarded when it disagrees. Eight bits is a 1-in-256
+ * chance of agreeing by accident, and the cost of that is resuming at the
+ * wrong timestamp in a real track -- recoverable with B, and bounded because
+ * the offset is range-checked against the file anyway.
+ *
+ * Seconds, not bytes: bytes would need 22 bits for a long file and leave no
+ * room for the guard, and seconds survive a re-encode of the same track. */
+#define RS_TRACK(w)   ((w) & 0x7Fu)
+#define RS_SECS(w)    (((w) >> 7) & 0x1FFFFu)
+#define RS_PL(w)      (((w) >> 24) & 1u)
+
+/* Set when the playlist started the playing track, cleared when the user
+ * picked a file themselves. Without it resume_pump() stamped pl_pos onto every
+ * save merely because a playlist EXISTED, so a standalone mp3 was stored as
+ * "playlist track 5" and came back as Phish at 128 seconds. */
+#define RS_PACK(t, s, p) (((uint32_t)((t) & 0x7Fu)) \
+                        | ((uint32_t)((s) & 0x1FFFFu) << 7) \
+                        | ((uint32_t)((p) ? 1u : 0u) << 24))
+
+static uint8_t  track_from_pl;    /* playlist started this track, not the user */
+static uint32_t resume_word;      /* the packed point, as published to APF   */
+static uint8_t  resume_on;        /* Core Settings check; default OFF, opt in */
+static uint8_t  resume_armed;     /* a saved point is waiting to be applied  */
+static uint32_t resume_at;        /* seconds to seek to once the track opens */
+static uint8_t  resume_seek_req;  /* apply resume_at at the next safe point   */
+static uint32_t resume_deadline;  /* stop waiting for a rate/size after this   */
+
+/* Which branch the boot-time restore took. Latched, so the answer survives on
+ * screen instead of having to be inferred from whether music started in the
+ * right place:
+ *   0 not reached      1 armed            2 position past a known duration
+ *   3 disabled/nothing  4 nothing opened    6 repositioned
+ *   7 idle at the seek  8 no byte rate      9 no file size
+ *  10 target past the end of the file
+ *  11 gave up waiting for a reload/stop to finish */
+static uint8_t  resume_dbg;
+static uint16_t resume_saves;     /* times resume_pump has published a point  */
+
+static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
 static uint8_t  screen_blank;         /* the screen is currently black         */
@@ -532,6 +638,12 @@ static uint16_t pl_live_count(void);
 static uint16_t pl_live_ordinal(uint16_t pos);
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
+/* Set by settings_load() once APF's stored values have been taken. Nothing may
+ * publish before that: settings_store() writes all eight words, so an earlier
+ * write would push firmware defaults over what the user had saved. Declared
+ * here rather than in settings.inc, which is included further down. */
+static uint8_t settings_adopted;
+static uint8_t settings_load_ok;   /* what the BOOT settings_load() returned */
 
 /* Defined with the rest of the blanking code, below the error paths that have
  * to wake the screen before drawing to it directly. */
@@ -576,6 +688,23 @@ static char     stale_ref_title[48];   /* title of the track being left */
 static uint32_t stale_ref_size;        /* and the size APF reported for it */
 static char     last_title[48];        /* title the current load settled on */
 static char     track_file[64];        /* filename APF reports for the slot  */
+
+/* A file identity that SURVIVES A POWER CYCLE, which cur_file_id does not.
+ *
+ * cur_file_id hashes the whole 0190 response struct -- 64 words -- and was
+ * built to answer "has the slot changed yet?" by comparing two hashes taken
+ * minutes apart in the same session. Nothing ever established it is stable
+ * across a relaunch, and it is not: resume was rejecting every saved point
+ * with a tag mismatch because the same file hashed differently on the next
+ * boot. Anything in that 256-byte window that is a handle, padding, or
+ * residue from an earlier command moves, and the hash moves with it.
+ *
+ * The filename is a property of the FILE, so it is the same on every boot.
+ * slot_filename() extracts it as the longest printable-ASCII run rather than
+ * trusting an offset, which is also why it is the sturdier thing to hash. */
+/* (track_name_id() lived here: a filename hash tried as a cross-boot file
+ * identity, measured unstable, and its gate removed. Deleted, not left to
+ * rot.) */
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
@@ -659,6 +788,18 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #define UI_CARD_H  120u
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
 
+/* Speed-branch instrumentation. ON by default here and NOT behind a button
+ * combo, deliberately: the last diagnostic on this project never appeared
+ * because its trigger was written down wrong (Select+L, when the code wanted
+ * Select and L held plus Start), and the hardware round trip was wasted. A
+ * readout with no way to fail to summon it cannot repeat that.
+ *
+ * OFF now that resume works. The rows and the resume_dbg latching stay in the
+ * source: flipping this to 1 brings back the speed row and the resume row,
+ * which between them found four separate faults here, and the 1.2x seek defect
+ * is still open. Cheaper to keep than to rewrite. */
+#define UI_SHOW_SPEED_DIAG 0
+
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
 /* Scrolling amplitude history, drawn as bars -- the "waveform" element from
@@ -697,6 +838,7 @@ static uint32_t ui_last_sec   = 0xFFFFFFFFu;
 static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
+static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
 /* One marquee per scrollable line. Title and artist can both overflow, and
  * they scroll independently -- a shared position would drag the shorter one
  * around for no reason. */
@@ -1020,6 +1162,19 @@ static uint32_t ui_byte_rate(void)
 {
     if (track_secs && slot_size > audio_start)
         return (slot_size - audio_start) / track_secs;
+
+    /* CBR with no Xing/Info header: the frame bitrate IS the byte rate, and it
+     * is exact. Measuring throughput instead was the whole defect.
+     *
+     * Three files on the test card are exactly this shape -- no frame count,
+     * constant bitrate -- and they were the ONLY three where seeking went
+     * wrong, at 1.2x and latently at 1.0x. meas_rate is a self-correcting
+     * estimate; preferring it over a number that cannot be wrong let the seek
+     * distance drift for no reason at all.
+     *
+     * meas_rate now serves only what it was ever for: a headerless VBR file,
+     * where no constant exists to read. */
+    if (!vbr_seen && bytes_per_sec) return bytes_per_sec;
     if (meas_rate) return meas_rate;
     return bytes_per_sec;
 }
@@ -1410,6 +1565,7 @@ static void ui_draw_chrome(void)
     ui_last_vu    = 0xFFFFFFFFu;
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
+    ui_last_spd   = 0xFFFFFFFFu;   /* or the diag row dies on the first reload */
     ui_last_prog  = 0xFFFFFFFFu;
     /* The mode row -- repeat, shuffle, the EQ name, N-of-M. Missing from this
      * list until now, and the second entry to be forgotten from it after
@@ -2822,6 +2978,89 @@ static void ui_draw_dynamic(void)
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
     }
 #endif
+
+    /* Speed-branch readout. These five values ARE the suspected fault, not a
+     * general-purpose dump:
+     *
+     *   1.0x/1.2x  which mode -- so a screenshot is unambiguous
+     *   T   track_secs. THE discriminator. Non-zero means ui_byte_rate() uses
+     *       the exact rate from the Xing header and the meas_rate branch is
+     *       skipped entirely. Zero is the path the old hold-to-seek bug lived
+     *       in, and "wrong on some files, fine on others" is its signature.
+     *   M   meas_rate, the measured bytes/sec. If this DRIFTS at 1.2x while
+     *       staying put at 1.0x on the same file, the fault is found.
+     *   R   what ui_byte_rate() actually returns -- the number seek and the
+     *       elapsed clock consume. Shown separately from M because which of
+     *       the three sources won is exactly what is in question.
+     *   S   ui_sec, the elapsed clock.
+     *   K   file_pos in KB, so the position is visible without eight digits.
+     *
+     * Redrawn on a change of ui_sec, i.e. about once a second, which is cheap
+     * enough not to disturb the very budget being investigated.
+     *
+     * HOW TO USE IT: play a file that misbehaves, note T. Watch M and R at
+     * 1.0x for ten seconds, hold A, watch them again. Compare, do not infer. */
+#if UI_SHOW_SPEED_DIAG
+    /* Resume row, above the speed row. W is the packed word as loaded, T its
+     * tag, C the tag of the file that actually opened -- if those two differ
+     * the guard rejected the point, and the two numbers say so directly. D is
+     * the latched branch code documented at resume_dbg. */
+    if (ui_sec != ui_last_spd) {
+        /* The packed word itself is NOT shown -- it is readable straight off
+         * the card in interact_persist.json, so the row spends its width on
+         * what only the running core knows: S the saved seconds, D which
+         * branch the restore took, Z the file size and Y the byte offset the
+         * resume wants, the last two being what D9 and D10 turn on. */
+        /* Both halves of the feature on one row, because the last failure was
+         * the SAVE and the row only described the restore:
+         *   S  seconds in the word the core currently holds
+         *   D  which branch the boot-time restore took
+         *   O  resume_on, as adopted from Core Settings
+         *   A  settings_adopted -- 0 means nothing may publish at all
+         *   V  how many times resume_pump has actually published a point
+         * V staying at 0 while music plays IS the save being dead. */
+        char r[64], *rq = r;
+        const char *rl = "RES S";
+        while (*rl) *rq++ = *rl++;
+        rq = ui_dec(rq, RS_SECS(resume_word));
+        *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
+        *rq++ = ' '; *rq++ = 'O'; rq = ui_dec(rq, resume_on);
+        *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, settings_adopted);
+        *rq++ = ' '; *rq++ = 'V'; rq = ui_dec(rq, resume_saves);
+        /* P: was the saved point from the playlist. L: what settings_load()
+         * actually returned at boot -- 0 means it took the all-zero early exit
+         * and every setting is a firmware default regardless of what the card
+         * holds, which is the "everything reset" report. C: the accent index
+         * as adopted, a setting whose stored value is 3, so C3 proves the
+         * adopt worked and C0 proves it did not. */
+        *rq++ = ' '; *rq++ = 'P'; rq = ui_dec(rq, RS_PL(resume_word));
+        *rq++ = ' '; *rq++ = 'L'; rq = ui_dec(rq, settings_load_ok);
+        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, ui_pal_idx);
+        *rq = 0;
+        uint16_t rbg = ui_grad_at((FB_H - 42u));
+        fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
+        fb_set_color(UI_RED, rbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 42u, r, TS_1X, TS_1X, UI_INNER_W);
+    }
+    if (ui_sec != ui_last_spd) {
+        ui_last_spd = ui_sec;
+        char b[64], *q = b;
+        const char *sp = speed_fast ? "1.2x " : "1.0x ";
+        while (*sp) *q++ = *sp++;
+        *q++ = 'T'; q = ui_dec(q, track_secs);
+        *q++ = ' '; *q++ = 'M'; q = ui_dec(q, meas_rate);
+        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, ui_byte_rate());
+        /* ui_sec is NOT shown -- the elapsed clock above already is it, and the
+         * two extra fields pushed the worst-case line past the 360 px column,
+         * where fb_text_clipped would have silently eaten the last value. */
+        *q++ = ' '; *q++ = 'K'; q = ui_dec(q, file_pos >> 10);
+        *q = 0;
+        uint16_t sbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
+        fb_set_color(UI_RED, sbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
 }
 
 /* cont1_key bit assignments (APF standard layout) */
@@ -2917,6 +3156,50 @@ static void ui_blank_wake(void)
 /* One call per main-loop pass. Re-arms from NOW rather than advancing by a
  * fixed step, so a long stall (a track load) cannot leave a backlog of ticks to
  * catch up on. Drift does not matter for a screen blanker. */
+/* Record where we are, once a second. Two MMIO writes and no SD access, so the
+ * cost is nothing -- the settings register file is read back by APF each frame
+ * and APF does the storing, into its own file.
+ *
+ * Only while PLAYING. Saving while paused or idle would overwrite a good point
+ * with 0:00 on the way out of a track, which is precisely the moment the value
+ * matters. The FILE index is saved, not pl_pos: pl_pos indexes the play order,
+ * which a reshuffle rewrites, and the same song would then come back as a
+ * different entry. */
+static void resume_pump(void)
+{
+    static uint32_t last_sec = 0xFFFFFFFFu;
+    /* Nothing may mark the settings dirty until settings_load() has adopted
+     * APF's stored values. settings_store() publishes ALL eight words, so a
+     * dirty flag raised first would write firmware DEFAULTS over the user's
+     * saved volume, meter and the rest -- which is exactly what reset two of
+     * them on the last build. */
+    if (!settings_adopted) return;
+    /* A pending resume must not be overwritten by the position it is about to
+     * replace. Without this the seconds saved while waiting -- 0, 1, 2 -- land
+     * on top of the value the seek is holding, and the point destroys itself
+     * in the gap between arming and firing. (Y was observed incrementing on
+     * hardware, which is this saver doing exactly that.) */
+    if (resume_seek_req) return;
+    /* PLAYLIST PLAYBACK ONLY. A file picked with Load MP3 does not record a
+     * position, by decision: making resume work for arbitrary picked files
+     * needed a cross-boot file identity that does not exist here, and every
+     * attempt at one produced a different bug.
+     *
+     * It also buys something. A standalone track can no longer overwrite the
+     * saved point, so playing a song in the middle of an audiobook does not
+     * cost you your place in it. An audiobook that wants resume goes in a
+     * playlist -- a one-line .m3u is enough. */
+    if (!track_from_pl) return;
+    if (!resume_on || idle || (paused & 1u) || !track_file[0]) return;
+    if (ui_sec == last_sec) return;
+    last_sec = ui_sec;
+
+    uint16_t f = (track_from_pl && pl_count && pl_pos < pl_count)
+               ? pl_order[pl_pos] : 0u;
+    uint32_t w = RS_PACK(f, ui_sec, track_from_pl);
+    if (w != resume_word) { resume_word = w; resume_saves++; settings_mark_dirty(); }
+}
+
 static void ui_blank_pump(void)
 {
     if (screen_blank || !blank_min) return;
@@ -2927,8 +3210,8 @@ static void ui_blank_pump(void)
 }
 
 /* Black the whole frame. Only the framebuffer -- there is no way to switch the
- * panel itself off from a core, so "blank" means every pixel black, which is
- * what an OLED needs anyway. */
+ * panel itself off from a core, so "blank" means every pixel black. The
+ * backlight stays on regardless; see the note on blank_min. */
 static void poll_input(void)
 {
     static uint32_t prev;
@@ -2959,16 +3242,41 @@ static void poll_input(void)
     /* A plays and pauses. Start only ever STOPS -- pressing it again does
      * nothing, which is what separates it from pause: stop is a state you
      * leave with play, not a toggle. Stopping also returns to 0:00. */
-    if (edge & KEY_A) {
-        /* Select+A shows the boot datatable snapshot, mirroring Select+B for
-         * the 0190 struct. Plain A still plays/pauses. */
+    /* A: TAP plays/pauses, HOLD toggles 1.2x speed.
+     *
+     * Resolves on RELEASE, the same discipline Left/Right and Select already
+     * use. Firing the tap action on the press instead would mean a long press
+     * pauses AND changes speed -- it is on the way into every hold. Same
+     * PL_HOLD_MS the Left/Right scrub uses, rather than a second threshold to
+     * learn. */
+    {
+        static uint32_t a_t0;
+        static uint8_t  a_fired;      /* the hold action already ran this press */
+        const uint32_t  a_hold_cy = CLK_HZ / 1000u * PL_HOLD_MS;
+
+        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
+
+        if ((keys & KEY_A) && !a_fired &&
+            (int32_t)(cycles() - a_t0) >= (int32_t)a_hold_cy) {
+            a_fired = 1;
+            speed_fast ^= 1u;
+            pcm_rate_apply(track_hz);
+            /* Name the speed. An unlabelled 1.2x just sounds like a bad rip,
+             * and the only other clue is the elapsed clock running fast. */
+            ui_toast_msg(speed_fast ? "SPEED 1.2x" : "SPEED NORMAL");
+        }
+
+        if ((fall & KEY_A) && !a_fired) {
+            /* Select+A shows the boot datatable snapshot, mirroring Select+B
+             * for the 0190 struct. Plain A still plays/pauses. */
 #if DEBUG_DIAG
-        if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
-        else
+            if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
+            else
 #endif
-        {
-            paused ^= 1u;
-            if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
+            {
+                paused ^= 1u;
+                if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
+            }
         }
     }
     if (edge & KEY_X) {
@@ -3116,13 +3424,36 @@ static void poll_input(void)
         }
     }
 
-    if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
-                                  ? VOL_MAX : volume + VOL_STEP;
-                           vol_apply(); ui_toast_set("VOLUME", volume, "%");
-                           settings_mark_dirty(); }
-    if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
-                           vol_apply(); ui_toast_set("VOLUME", volume, "%");
-                           settings_mark_dirty(); }
+    /* Up/Down are now guarded by Select, which they were not before: plain
+     * Select+Up used to change the volume AND toggle the art panel on release,
+     * because nothing claimed the combo. Select+Down needs it properly. */
+    if (!(keys & KEY_SELECT)) {
+        if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
+                                      ? VOL_MAX : volume + VOL_STEP;
+                               vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                               settings_mark_dirty(); }
+        if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
+                               vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                               settings_mark_dirty(); }
+    }
+
+    /* Select+Down cycles the blank timeout. It is the ONLY way to reach this
+     * now -- the Core Settings entry was given up so resume could have the
+     * slot -- so the cycle has to cover the useful values, not just on/off.
+     * Sits beside Select+L (repeat) and Select+R (shuffle), which is where a
+     * user already looks for settings-ish combos. Not persisted: it is back to
+     * OFF every launch, which is the honest cost of the trade. */
+    else if (edge & KEY_DOWN) {
+        static const uint8_t bl[] = { 0u, 1u, 5u, 10u, 30u };
+        uint32_t i = 0;
+        while (i < sizeof(bl) / sizeof(bl[0]) && bl[i] != blank_min) i++;
+        i = (i + 1u) % (sizeof(bl) / sizeof(bl[0]));
+        blank_min = bl[i];
+        sel_used  = 1;
+        ui_blank_touch();               /* restart the countdown from now */
+        if (blank_min) ui_toast_set("SCREEN BLANK", blank_min, " MIN");
+        else           ui_toast_msg("SCREEN BLANK OFF");
+    }
 
     /* ---- Select as a modifier for L/R ---- */
     if (edge & KEY_SELECT) sel_used = 0;
@@ -4056,6 +4387,7 @@ static int read_track_head(void)
     track_encoder[0] = 0; track_vbr_method = 0;
     track_secs   = 0;
     meas_rate    = 0; meas_pos0 = 0; meas_sec0 = 0;
+    vbr_seen     = 0;
 
     /* Remember what we settled on, so later probes have a reference the load
      * itself cannot corrupt. */
@@ -4262,8 +4594,7 @@ static int load_track(void)
                     MP3FrameInfo wfi;
                     MP3GetLastFrameInfo(dec, &wfi);
                     if (wfi.samprate) {
-                        uint64_t inc = ((uint64_t)wfi.samprate << 32) / CLK_HZ;
-                        REG(R_PCM_RATE) = (uint32_t)inc;
+                        pcm_rate_apply(wfi.samprate);
                         if (wfi.bitrate) bytes_per_sec = wfi.bitrate / 8u;
                         samprate   = wfi.samprate;
                         track_hz   = wfi.samprate;
@@ -4329,7 +4660,7 @@ int main(void)
      * chose. It only reads a slot -- nothing on screen depends on it -- and
      * painting before it meant the very first thing shown was always the
      * default orange regardless of what had been saved. */
-    settings_load();
+    settings_load_ok = (uint8_t)settings_load();
 
     /* Derive the background tint ONCE, here, where ui_accent has reached its
      * final value whether it was restored or left at the default. Doing it
@@ -4376,12 +4707,84 @@ int main(void)
      * target_read_slot()'s spin, and it returns immediately unless a note is
      * armed, so arming one here is the whole change. Cleared before anything
      * else paints, since PLAYLIST / N TRACKS lands on this same row. */
-    ui_boot_note("LOADING SONG");
-    int from_slot = load_track();
+    /* Say which of the two is happening. A resume takes the same visible
+     * moment as an ordinary load, and "RESUMING" is the only clue the user
+     * gets that the position was remembered before the player appears. */
+    ui_boot_note((resume_on && resume_word && RS_SECS(resume_word) > 2u)
+                 ? "RESUMING TRACK" : "LOADING TRACK");
+    /* A saved playlist point goes STRAIGHT to the playlist, before the slot is
+     * consulted at all.
+     *
+     * The MP3 slot still holds whatever played last -- 0192 leaves it there --
+     * so trying the slot first meant from_slot almost always won and the
+     * playlist branch never ran. The seek then had to be applied to whatever
+     * the slot happened to contain, which is how a standalone mp3 ended up
+     * being repositioned to a playlist track's timestamp. Choosing the source
+     * first makes the position unambiguous: it belongs to the track this
+     * branch just started. */
+    int from_slot = 0, from_list = 0;
+    if (resume_on && resume_word && RS_PL(resume_word) && pl_count
+        && RS_SECS(resume_word) > 2u) {
+        uint16_t f = RS_TRACK(resume_word);
+        if (f < pl_count) {
+            pl_resync(f);
+            from_list = pl_play_at(pl_pos);
+        }
+    }
+    if (!from_list) from_slot = load_track();
     /* The splash is already up; leave it while the playlist track loads
-     * rather than flashing instructions that are about to be replaced. */
-    int from_list = (!from_slot && pl_count) ? pl_play_at(0) : 0;
+     * rather than flashing instructions that are about to be replaced.
+     *
+     * Start at the SAVED track when there is one. pl_resync() finds the file
+     * index in whatever order this boot produced, so a resumed track is right
+     * even when shuffle has just reshuffled the list. */
+    /* Nothing in the slot and nothing resumed: start the playlist normally. */
+    if (!from_slot && !from_list && pl_count) from_list = pl_play_at(0);
     ui_boot_cancel();          /* not _clear: see the note on that function */
+
+    /* Arm the position seek only if the file that ACTUALLY opened is the one
+     * the point was saved against. A .m3u edited since would otherwise apply
+     * one track's timestamp to another. Under two seconds is not worth a
+     * reposition -- it is just the start of the track. */
+    /* NO LONGER GATED ON FILE IDENTITY.
+     *
+     * Two attempts at an identity that survives a power cycle both failed.
+     * cur_file_id hashes the 0190 response, which moves between boots.
+     * Hashing the filename should have been stable and was not either -- the
+     * name is recovered as the longest printable-ASCII run out of a shared
+     * datatable, so which run wins can differ depending on what else has been
+     * through that buffer. Every saved point was rejected, and the feature has
+     * never once worked because of a check meant to protect it.
+     *
+     * So ask a question that can actually be answered. Instead of "is this the
+     * same file", ask "is this position sensible for the file I have" -- which
+     * needs no identity, only the file itself:
+     *
+     *   - the target must land inside the file (checked at the seek)
+     *   - it must not be past a known duration (checked here)
+     *
+     * If a playlist has been edited underneath us the worst case is starting a
+     * track 56 seconds in, which B undoes. That is a far smaller cost than a
+     * guard that rejects everything, and unlike the guard it cannot fail
+     * silently -- a wrong resume is audible immediately. */
+    /* Only the track the resume branch itself started. from_slot means the
+     * slot's own file, which the point says nothing about. */
+    if (!resume_on || !resume_word || !RS_PL(resume_word)) resume_dbg = 3u;
+    else if (!from_list)                       resume_dbg = 4u;
+    else {
+        resume_at = RS_SECS(resume_word);
+        /* Past the end of a track whose length we know: not this file. */
+        if (track_secs && resume_at + 2u >= track_secs) {
+            resume_at = 0; resume_dbg = 2u;
+        } else if (resume_at > 2u) {
+            resume_seek_req = 1u; resume_dbg = 1u;
+            /* Longer than the reload gate's own hard cap of 5 s, or this
+             * expires while the load it is waiting for is still settling. */
+            resume_deadline = cycles() + CLK_HZ * 12u;
+        } else {
+            resume_dbg = 3u;
+        }
+    }
 
     if (from_slot) {
         pl_report();
@@ -4413,6 +4816,7 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+        resume_pump();
 
         /* Keeps the LOADING dots moving through the reload gate. ui_boot_tick()
          * is otherwise driven only from inside target_read_slot()'s spin, and
@@ -4444,6 +4848,18 @@ int main(void)
             refill_drain();
             ring_fill = 0; ring_rd = 0;
 
+            /* The user has chosen a file, so any resume still waiting to fire
+             * is void. It was armed at boot for the track that was in the slot
+             * THEN, and applying its position to something just picked would
+             * drop the new file in at an unrelated timestamp.
+             *
+             * Only a genuine 008A reaches here -- pl_arm_load() drives the
+             * gate by setting reload_armed directly and never sets
+             * reload_pending -- so resume's own playlist load cannot cancel
+             * itself here. */
+            resume_seek_req = 0;
+            track_from_pl  = 0u;            /* the user chose this one */
+
             REG(R_RELOAD)  = 1;             /* ack */
             reload_pending = 0;
             reload_armed    = 1;
@@ -4462,7 +4878,7 @@ int main(void)
              * getting-started steps, so the splash goes up first to give the
              * indicator a clean card. With the player already on screen its
              * own repaint is the feedback. */
-            if (idle) { ui_splash(); ui_boot_note("LOADING SONG"); }
+            if (idle) { ui_splash(); ui_boot_note("LOADING TRACK"); }
         }
         if (reload_armed) {
             /* ASK APF, do not infer: slot_file_id() hashes the 0190 response,
@@ -4570,7 +4986,18 @@ int main(void)
             ring_fill = 0; ring_rd = 0;
             pl_load();
             pl_report();
-            if (pl_count) pl_play_at(0);
+            /* Only take playback if nothing else is claiming it.
+             *
+             * Picking Load MP3 can bring a playlist-slot notification along
+             * with it, and starting track 1 then throws away the file the user
+             * actually chose -- reported as "it reloads the playlist and plays
+             * a playlist song instead of my mp3".
+             *
+             * Gated on the MP3 reload being idle rather than on playback,
+             * deliberately: picking a NEW playlist while a track is playing
+             * should still start it, which is the whole point of that action.
+             * Only a pick already in flight suppresses it. */
+            if (pl_count && !reload_pending && !reload_armed) pl_play_at(0);
             ui_mode_dirty = 1;
             continue;
         }
@@ -4659,6 +5086,74 @@ int main(void)
          * restart now IS this body. The cold reload was a relic of the
          * stale-tag era; for the SAME file there is nothing to re-resolve.
          * Track CHANGES still load cold, as they must. */
+        /* Absolute reposition for a resumed track. Deliberately the same body
+         * as stop_req below, differing only in the target: that path is the
+         * one proven not to click, and every route into playback going through
+         * the same code is why track changes stopped clicking at all.
+         *
+         * Runs once, after the track is open and its rate is known. If the
+         * rate is not known yet or the target lands past the end of the file,
+         * the resume is simply dropped and the track plays from the start --
+         * a wrong seek is worse than none. */
+        if (resume_seek_req) {
+            uint32_t rate = ui_byte_rate();
+            uint32_t want = audio_start + rate * resume_at;
+
+            /* RETRY, do not drop. slot_size is ZERO at the moment the track
+             * finishes opening -- APF has not reported a size yet, there may
+             * be no Xing header, and the probe has not run -- so a one-shot
+             * attempt always failed on D9 even though the size arrived a
+             * moment later. The readout proved it: D9 was latched at the seek
+             * while Z already read 3266 KB by the time the row drew.
+             *
+             * Falling THROUGH rather than continuing is the whole trick: the
+             * size and rate only become known BY decoding, so blocking the
+             * loop to wait for them would wait forever. Bounded at five
+             * seconds, after which the reason is recorded and the track just
+             * plays from the start. */
+            /* NOTHING may be reloading. pl_play_at() does not load the track
+             * itself -- pl_arm_load() sets slot_size = 0, force_size_probe and
+             * reload_armed, and the real load_track() runs later in the reload
+             * handler, which finishes with stop_req and a reposition to 0:00.
+             *
+             * That is what D6-but-no-resume was: the seek genuinely ran, and
+             * then the pending load wiped it. It also explains the earlier D9,
+             * since pl_arm_load() is what zeroed slot_size in the first place.
+             *
+             * stop_req is included for the same reason -- it is queued
+             * repositioning that would land after this one. */
+            if (!idle && rate && slot_size && want < slot_size
+                && !reload_pending && !reload_armed && !stop_req) {
+                pcm_flush();
+                refill_drain();
+                file_pos  = want;
+                ring_fill = 0; ring_rd = 0;
+                frames = 0; min_level = 0xFFFFFFFFu;
+                ui_sec = resume_at; ui_sec_acc = 0;
+                ui_last_sec = 0xFFFFFFFFu; ui_prog_sec = 0xFFFFFFFFu;
+                ui_last_pause = 0xFFFFFFFFu;
+                /* Restart the measurement window here, exactly as a manual
+                 * seek does -- carrying it across a reposition is what made
+                 * meas_rate self-referential once before. */
+                meas_pos0 = file_pos; meas_sec0 = ui_sec;
+                if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+                ui_draw_dynamic();
+                resume_dbg = 6u;                 /* actually repositioned */
+                resume_seek_req = 0;
+                continue;
+            }
+            if ((int32_t)(cycles() - resume_deadline) >= 0) {
+                resume_seek_req = 0;             /* give up, and say why */
+                if      (reload_pending || reload_armed || stop_req)
+                                             resume_dbg = 11u;
+                else if (idle)               resume_dbg = 7u;
+                else if (!rate)              resume_dbg = 8u;
+                else if (!slot_size)         resume_dbg = 9u;
+                else                         resume_dbg = 10u;
+            }
+            /* still waiting -- fall through so decoding continues */
+        }
+
         if (stop_req) {
             stop_req = 0;
             if (idle) continue;             /* nothing loaded to reposition */
@@ -4847,11 +5342,12 @@ int main(void)
         MP3FrameInfo fi;
         MP3GetLastFrameInfo(dec, &fi);
 
+        /* One comparison per frame, and it decides which rate source the seek
+         * arithmetic is allowed to trust. */
+        if (fi.bitrate && rate_set && fi.bitrate / 8u != bytes_per_sec) vbr_seen = 1u;
+
         if (!rate_set && fi.samprate) {
-            /* Drain at the file's true rate so pitch is right; sound_i2s
-             * zero-order-holds up to its fixed 48 kHz. */
-            uint64_t inc = ((uint64_t)fi.samprate << 32) / CLK_HZ;
-            REG(R_PCM_RATE) = (uint32_t)inc;
+            pcm_rate_apply(fi.samprate);
             if (fi.bitrate) bytes_per_sec = fi.bitrate / 8u;
             samprate   = fi.samprate;
             track_hz   = fi.samprate;

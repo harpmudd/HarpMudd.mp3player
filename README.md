@@ -2,8 +2,8 @@
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
 decodes and plays it straight off the SD card, with album art, ID3 tags, nine
-switchable meters, an eight-preset equalizer, a progress bar and settings
-persistence.
+switchable meters, an eight-preset equalizer, a progress bar, settings
+persistence and resume — it remembers where you were in a playlist.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
@@ -35,7 +35,8 @@ and whatever you pick starts playing.
 
 | Pocket | Action |
 |---|---|
-| **A** | Play / pause |
+| **A** | *Tap* — play / pause |
+| **A** | *Hold* — 1.2× speed; hold again for normal |
 | **Start** | Stop — returns to 0:00 |
 | **Left** / **Right** | *Tap* — previous / next track |
 | **Left** / **Right** | *Hold* — seek, faster the longer you hold |
@@ -48,6 +49,7 @@ and whatever you pick starts playing.
 | **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
+| **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
 
 The Pocket's own **Controls** screen names every button too, so you don't have
 to keep this table to hand.
@@ -56,12 +58,22 @@ Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
-Volume, accent color, repeat, shuffle, the meter, the art panel, the EQ preset
-and the screen-blank timeout are remembered between sessions, and the controls
-and **Core Settings** stay in step. Playback position is not — every launch
-starts a track from the beginning. The Pocket keeps the settings under
-`/Settings/HarpMudd.Mp3Player/` on the card; delete that folder to reset.
-Nothing is written to your music folder.
+Volume, accent color, repeat, shuffle, the meter and the EQ preset are
+remembered between sessions, and the controls and **Core Settings** stay in
+step. **Where you were in a playlist is remembered too** — the track and your
+position in it, so a long listen picks up where it stopped. Turn that off with
+**Resume playback** in Core Settings.
+
+That applies to playlist playback only. A file opened with **Load MP3** plays
+without recording a position, which also means a quick listen to something else
+won't cost you your place. For an audiobook, put it in a playlist — a one-line
+`.m3u` is enough.
+
+The album art panel and the screen-blank timeout are *not* remembered; both
+reset each launch and are set with buttons.
+
+The Pocket keeps all of this under `/Settings/HarpMudd.Mp3Player/` on the card;
+delete that folder to reset. Nothing is written to your music folder.
 
 ## Equalizer
 
@@ -84,15 +96,30 @@ It works while paused; there is just nothing to hear until you press play.
 Presets are loudness-matched, so switching changes the tone without changing how
 loud the music seems.
 
+### Playback speed
+
+Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
+rises with the speed, so music sounds wrong. Off every launch — it isn't
+remembered.
+
+1.2× is the whole range, and that's the CPU rather than a choice. Playing at
+double speed means decoding twice as many frames per second, which needs more
+than the 60 MHz available at any bitrate.
+
 ### Screen blanking
 
-**Screen blank (min)** in **Core Settings** blacks the screen after that many
-minutes with no button pressed. Any button wakes it, and that press does nothing
-else — reaching for a sleeping player to see what's on shouldn't pause it.
+**Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
+goes black after that long with no button pressed. Any button wakes it, and
+that press does nothing else — reaching for a sleeping player to see what's on
+shouldn't pause it.
 
 Playback carries on while the screen is black, and nothing else brings it
 back — track changes, meters and toasts all stay dark until you press
-something. Set it to 0 to disable.
+something.
+
+It resets to off each launch, and it dims rather than powers down: the Pocket's
+screen is a backlit LCD and a core can't reach the backlight, so this is for
+a dark room rather than for saving battery.
 
 ## Playlists
 
@@ -152,8 +179,9 @@ framework bugs that had to be found first — is in
 
 ## Known limitations
 
-- **Total time is estimated** on files with no Xing/Info/VBRI header — exact
-  for CBR, approximate for VBR.
+- **Total time is approximate on a VBR file with no Xing/Info/VBRI header** —
+  an unusual combination, since VBR encoders normally write one. Everything
+  else is exact.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
 - **JPEG album art only.** PNG covers are skipped rather than shown wrong —
   see [ROADMAP.md](ROADMAP.md).
@@ -162,6 +190,9 @@ framework bugs that had to be found first — is in
   past either says so instead of quietly playing fewer.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
+- **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
+  60 available, so the decoder occasionally can't keep up. Normal speed is
+  unaffected.
 
 ## Credits
 
