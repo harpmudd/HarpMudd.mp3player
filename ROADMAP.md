@@ -253,6 +253,40 @@ which is the same failure as seeding a simulation at its own fixed point.
 **When a search comes back clean, ask what shape of code it could not have
 matched.**
 
+### Shipping it as EXPERIMENTAL is on the table (user, 2026-08-11)
+
+If 1.2x never reaches "correct on every file", the user may ship it labelled
+an experimental feature rather than hold it back. Their call, not to be made
+by whoever picks this up. What that would require:
+
+- **README says so plainly** -- experimental, pitch rises with speed, seek can
+  misbehave on some files, and it is meant for spoken word.
+- **Off by default and unpersisted**, which it already is: hold A each session.
+  Nothing about a bad session survives into the next one.
+- **Distortion is disclosed, not fixed.** 1.2x needs up to 54.8 MHz of the
+  60 available, so a dense passage can underrun. That is the budget, not a bug.
+
+The seek defect is the one that decides it. Distortion is a known cost a user
+can hear and accept; a clock that walks backwards looks broken.
+
+### Capturing the seek defect properly -- do this BEFORE attempting a fix
+
+`UI_SHOW_SPEED_DIAG 1` in `fw/player.c` brings back the row:
+
+    1.0x T241 M16003 R16003 K2048
+
+For each file that misbehaves, note T FIRST, then M and R over ten seconds at
+1.0x, then the same held at 1.2x.
+
+- **T non-zero** kills the leading theory outright: the file has a Xing header,
+  `ui_byte_rate()` returns the exact rate, and `meas_rate` is never consulted.
+- **T zero** is the path the 2026-08-10 hold-to-seek bug lived in, and "wrong on
+  some files, fine on others" is that bug's signature. If M drifts at 1.2x while
+  holding steady at 1.0x on the SAME file, that is the fault located.
+
+Also record the file's bitrate and whether it is CBR or VBR. Three files that
+fail and three that do not is worth more than a long session with one.
+
 ### Agreed design (2026-08-10): hold A, no persistence
 
 Hold **A** for 1.2x, hold again for normal. Deliberately NOT a Core Setting and
