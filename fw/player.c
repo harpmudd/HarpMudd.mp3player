@@ -4671,7 +4671,7 @@ int main(void)
      * moment as an ordinary load, and "RESUMING" is the only clue the user
      * gets that the position was remembered before the player appears. */
     ui_boot_note((resume_on && resume_word && RS_SECS(resume_word) > 2u)
-                 ? "RESUMING SONG" : "LOADING SONG");
+                 ? "RESUMING TRACK" : "LOADING TRACK");
     int from_slot = load_track();
     /* The splash is already up; leave it while the playlist track loads
      * rather than flashing instructions that are about to be replaced.
@@ -4812,7 +4812,7 @@ int main(void)
              * getting-started steps, so the splash goes up first to give the
              * indicator a clean card. With the player already on screen its
              * own repaint is the feedback. */
-            if (idle) { ui_splash(); ui_boot_note("LOADING SONG"); }
+            if (idle) { ui_splash(); ui_boot_note("LOADING TRACK"); }
         }
         if (reload_armed) {
             /* ASK APF, do not infer: slot_file_id() hashes the 0190 response,

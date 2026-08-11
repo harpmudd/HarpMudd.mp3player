@@ -181,7 +181,7 @@ Three things to design around:
 
 - **The `.m3u` may have changed.** Store a hash of the track's filename beside
   the index and fall back to track 1 when it does not match, or the saved index
-  silently points at a different song.
+  silently points at a different track.
 - **APF may not flush its persist file on a hard power-off**, so the last few
   seconds of position can be lost. Acceptable; do not build a mechanism to
   defeat it.
