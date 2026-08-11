@@ -562,7 +562,16 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  *
  *   bits  0..6   track index   0-127, matching PL_MAX
  *   bits  7..23  seconds       0-131071, about 36 hours -- audiobook country
- *   bits 24..31  file tag      low byte of cur_file_id
+ *   bits 24..30  file tag      seven bits of cur_file_id
+ *   bit  31      ALWAYS ZERO
+ *
+ * Bit 31 is reserved unset, and the tag is seven bits rather than eight, for a
+ * reason paid for on hardware: APF stores these values as SIGNED 32-bit. The
+ * first attempt used all 32 bits and declared the slider max as 4294967295,
+ * which APF read as -1 -- so the range became [0, -1], max below min, and
+ * every value collapsed to -1. The persist file said `"val": -1` while every
+ * other setting stored correctly. Keeping the word inside positive int32
+ * territory means no value can ever be mistaken for negative.
  *
  * The tag is the guard. A saved index means nothing if the .m3u has been
  * edited since, so the byte is compared against the file that actually opens
@@ -575,10 +584,10 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  * room for the guard, and seconds survive a re-encode of the same track. */
 #define RS_TRACK(w)   ((w) & 0x7Fu)
 #define RS_SECS(w)    (((w) >> 7) & 0x1FFFFu)
-#define RS_TAG(w)     (((w) >> 24) & 0xFFu)
+#define RS_TAG(w)     (((w) >> 24) & 0x7Fu)
 #define RS_PACK(t, s, g) (((uint32_t)((t) & 0x7Fu)) \
                         | ((uint32_t)((s) & 0x1FFFFu) << 7) \
-                        | ((uint32_t)((g) & 0xFFu) << 24))
+                        | ((uint32_t)((g) & 0x7Fu) << 24))
 
 static uint32_t resume_word;      /* the packed point, as published to APF   */
 static uint8_t  resume_on = 1u;   /* Core Settings check; default on         */
@@ -4595,7 +4604,7 @@ int main(void)
      * one track's timestamp to another. Under two seconds is not worth a
      * reposition -- it is just the start of the track. */
     if (resume_on && resume_word && (from_slot || from_list)
-        && (cur_file_id & 0xFFu) == RS_TAG(resume_word)) {
+        && (cur_file_id & 0x7Fu) == RS_TAG(resume_word)) {
         resume_at = RS_SECS(resume_word);
         if (resume_at > 2u) resume_seek_req = 1u;
     }
