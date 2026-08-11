@@ -56,6 +56,44 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
  * Direction is resolved by comparing against what we last published: if the
  * word APF hands back differs from that, the user moved it in the Core Settings
  * menu and we adopt it. Otherwise ours stands.
+ *
+ * ---------------------------------------------------------------------------
+ * RULES FOR CHANGING interact.json IN A RELEASE. Read these before editing it.
+ *
+ * The persist file keys on `id`. Nothing else -- not the name, not the order,
+ * not the address. A released core's saved settings survive an update only for
+ * as long as those numbers hold still, and there is no versioning or migration
+ * in APF to fall back on. Stable ids ARE the mechanism.
+ *
+ *   1. NEVER renumber an existing variable. Every updating user's stored value
+ *      would land on whichever setting inherited its id -- their volume
+ *      arriving as an accent colour, silently, on first launch.
+ *
+ *   2. RETIRING a setting: delete it and leave the id dead. The orphaned entry
+ *      in the user's file is ignored. Do not close the gap.
+ *
+ *   3. ADDING one: take the next unused id, even when reusing a retired
+ *      variable's ADDRESS. That is why resume took ids 18 and 19 while sitting
+ *      at the addresses album art and screen blank had vacated -- reusing 14
+ *      and 17 would have applied a stored "album art = 1" to Resume point, and
+ *      every updating user would have resumed at a garbage position exactly
+ *      once, on the launch right after updating.
+ *
+ *   4. Changing a `type` CANNOT be made safe. The list experiment wrote its
+ *      type into the persist file and reverting interact.json was not enough
+ *      to recover -- the file had to be deleted. Treat any type change as a
+ *      settings reset and say so in the release notes.
+ *
+ *   5. Keep the ADDRESS stable too, separately from the id: it selects the
+ *      register-file slot via bridge_addr[4:2], so moving it changes which
+ *      firmware variable the word feeds.
+ *
+ * The persist file is plain JSON on the card at
+ * /Settings/<core>/Interact/_core/interact_persist.json. It is readable, it is
+ * authoritative, and it answers persistence questions with no hardware round
+ * trip -- reading it is what found the signed-int bug that made resume store
+ * -1. Check it FIRST.
+ * ---------------------------------------------------------------------------
  */
 /* Slot 4 was the album-art panel and slot 7 the screen-blank timeout. Both are
  * now button-only and unpersisted, freeing the two slots resume needs -- the
