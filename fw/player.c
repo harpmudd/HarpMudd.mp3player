@@ -594,6 +594,7 @@ static uint8_t  resume_on = 1u;   /* Core Settings check; default on         */
 static uint8_t  resume_armed;     /* a saved point is waiting to be applied  */
 static uint32_t resume_at;        /* seconds to seek to once the track opens */
 static uint8_t  resume_seek_req;  /* apply resume_at at the next safe point   */
+static uint32_t resume_deadline;  /* stop waiting for a rate/size after this   */
 
 /* Which branch the boot-time restore took. Latched, so the answer survives on
  * screen instead of having to be inferred from whether music started in the
@@ -3132,6 +3133,12 @@ static void resume_pump(void)
      * saved volume, meter and the rest -- which is exactly what reset two of
      * them on the last build. */
     if (!settings_adopted) return;
+    /* A pending resume must not be overwritten by the position it is about to
+     * replace. Without this the seconds saved while waiting -- 0, 1, 2 -- land
+     * on top of the value the seek is holding, and the point destroys itself
+     * in the gap between arming and firing. (Y was observed incrementing on
+     * hardware, which is this saver doing exactly that.) */
+    if (resume_seek_req) return;
     if (!resume_on || idle || (paused & 1u) || !track_file[0]) return;
     if (ui_sec == last_sec) return;
     last_sec = ui_sec;
@@ -4704,6 +4711,7 @@ int main(void)
             resume_at = 0; resume_dbg = 2u;
         } else if (resume_at > 2u) {
             resume_seek_req = 1u; resume_dbg = 1u;
+            resume_deadline = cycles() + CLK_HZ * 5u;
         } else {
             resume_dbg = 3u;
         }
@@ -4996,16 +5004,21 @@ int main(void)
          * the resume is simply dropped and the track plays from the start --
          * a wrong seek is worse than none. */
         if (resume_seek_req) {
-            resume_seek_req = 0;
             uint32_t rate = ui_byte_rate();
             uint32_t want = audio_start + rate * resume_at;
-            /* One code per reason. Lumping four conditions into a single "5"
-             * said the seek was dropped without saying by which test, which is
-             * half a diagnostic. */
-            if      (idle)               resume_dbg = 7u;
-            else if (!rate)              resume_dbg = 8u;
-            else if (!slot_size)         resume_dbg = 9u;
-            else if (want >= slot_size)  resume_dbg = 10u;
+
+            /* RETRY, do not drop. slot_size is ZERO at the moment the track
+             * finishes opening -- APF has not reported a size yet, there may
+             * be no Xing header, and the probe has not run -- so a one-shot
+             * attempt always failed on D9 even though the size arrived a
+             * moment later. The readout proved it: D9 was latched at the seek
+             * while Z already read 3266 KB by the time the row drew.
+             *
+             * Falling THROUGH rather than continuing is the whole trick: the
+             * size and rate only become known BY decoding, so blocking the
+             * loop to wait for them would wait forever. Bounded at five
+             * seconds, after which the reason is recorded and the track just
+             * plays from the start. */
             if (!idle && rate && slot_size && want < slot_size) {
                 pcm_flush();
                 refill_drain();
@@ -5022,8 +5035,17 @@ int main(void)
                 if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
                 ui_draw_dynamic();
                 resume_dbg = 6u;                 /* actually repositioned */
+                resume_seek_req = 0;
+                continue;
             }
-            continue;
+            if ((int32_t)(cycles() - resume_deadline) >= 0) {
+                resume_seek_req = 0;             /* give up, and say why */
+                if      (idle)               resume_dbg = 7u;
+                else if (!rate)              resume_dbg = 8u;
+                else if (!slot_size)         resume_dbg = 9u;
+                else                         resume_dbg = 10u;
+            }
+            /* still waiting -- fall through so decoding continues */
         }
 
         if (stop_req) {
