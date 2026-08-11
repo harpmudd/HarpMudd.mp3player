@@ -691,6 +691,15 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #define UI_CARD_H  120u
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
 
+/* Speed-branch instrumentation. ON by default here and NOT behind a button
+ * combo, deliberately: the last diagnostic on this project never appeared
+ * because its trigger was written down wrong (Select+L, when the code wanted
+ * Select and L held plus Start), and the hardware round trip was wasted. A
+ * readout with no way to fail to summon it cannot repeat that.
+ *
+ * Never merge to main with this at 1. */
+#define UI_SHOW_SPEED_DIAG 1
+
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
 /* Scrolling amplitude history, drawn as bars -- the "waveform" element from
@@ -729,6 +738,7 @@ static uint32_t ui_last_sec   = 0xFFFFFFFFu;
 static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
+static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
 /* One marquee per scrollable line. Title and artist can both overflow, and
  * they scroll independently -- a shared position would drag the shorter one
  * around for no reason. */
@@ -1442,6 +1452,7 @@ static void ui_draw_chrome(void)
     ui_last_vu    = 0xFFFFFFFFu;
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
+    ui_last_spd   = 0xFFFFFFFFu;   /* or the diag row dies on the first reload */
     ui_last_prog  = 0xFFFFFFFFu;
     /* The mode row -- repeat, shuffle, the EQ name, N-of-M. Missing from this
      * list until now, and the second entry to be forgotten from it after
@@ -2851,6 +2862,48 @@ static void ui_draw_dynamic(void)
         uint16_t dbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), dbg);
         fb_set_color(UI_RED, dbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+    /* Speed-branch readout. These five values ARE the suspected fault, not a
+     * general-purpose dump:
+     *
+     *   1.0x/1.2x  which mode -- so a screenshot is unambiguous
+     *   T   track_secs. THE discriminator. Non-zero means ui_byte_rate() uses
+     *       the exact rate from the Xing header and the meas_rate branch is
+     *       skipped entirely. Zero is the path the old hold-to-seek bug lived
+     *       in, and "wrong on some files, fine on others" is its signature.
+     *   M   meas_rate, the measured bytes/sec. If this DRIFTS at 1.2x while
+     *       staying put at 1.0x on the same file, the fault is found.
+     *   R   what ui_byte_rate() actually returns -- the number seek and the
+     *       elapsed clock consume. Shown separately from M because which of
+     *       the three sources won is exactly what is in question.
+     *   S   ui_sec, the elapsed clock.
+     *   K   file_pos in KB, so the position is visible without eight digits.
+     *
+     * Redrawn on a change of ui_sec, i.e. about once a second, which is cheap
+     * enough not to disturb the very budget being investigated.
+     *
+     * HOW TO USE IT: play a file that misbehaves, note T. Watch M and R at
+     * 1.0x for ten seconds, hold A, watch them again. Compare, do not infer. */
+#if UI_SHOW_SPEED_DIAG
+    if (ui_sec != ui_last_spd) {
+        ui_last_spd = ui_sec;
+        char b[64], *q = b;
+        const char *sp = speed_fast ? "1.2x " : "1.0x ";
+        while (*sp) *q++ = *sp++;
+        *q++ = 'T'; q = ui_dec(q, track_secs);
+        *q++ = ' '; *q++ = 'M'; q = ui_dec(q, meas_rate);
+        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, ui_byte_rate());
+        /* ui_sec is NOT shown -- the elapsed clock above already is it, and the
+         * two extra fields pushed the worst-case line past the 360 px column,
+         * where fb_text_clipped would have silently eaten the last value. */
+        *q++ = ' '; *q++ = 'K'; q = ui_dec(q, file_pos >> 10);
+        *q = 0;
+        uint16_t sbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
+        fb_set_color(UI_RED, sbg);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
     }
 #endif
