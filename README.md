@@ -2,8 +2,8 @@
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
 decodes and plays it straight off the SD card, with album art, ID3 tags, nine
-switchable meters, an eight-preset equalizer, a progress bar and settings
-persistence.
+switchable meters, an eight-preset equalizer, a progress bar, settings
+persistence and resume — it remembers where you were in a playlist.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
@@ -96,6 +96,16 @@ It works while paused; there is just nothing to hear until you press play.
 Presets are loudness-matched, so switching changes the tone without changing how
 loud the music seems.
 
+### Playback speed
+
+Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
+rises with the speed, so music sounds wrong. Off every launch — it isn't
+remembered.
+
+1.2× is the whole range, and that's the CPU rather than a choice. Playing at
+double speed means decoding twice as many frames per second, which needs more
+than the 60 MHz available at any bitrate.
+
 ### Screen blanking
 
 **Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
@@ -179,6 +189,9 @@ framework bugs that had to be found first — is in
   past either says so instead of quietly playing fewer.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
+- **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
+  60 available, so the decoder occasionally can't keep up. Normal speed is
+  unaffected.
 
 ## Credits
 
