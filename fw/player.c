@@ -4794,6 +4794,17 @@ int main(void)
             refill_drain();
             ring_fill = 0; ring_rd = 0;
 
+            /* The user has chosen a file, so any resume still waiting to fire
+             * is void. It was armed at boot for the track that was in the slot
+             * THEN, and applying its position to something just picked would
+             * drop the new file in at an unrelated timestamp.
+             *
+             * Only a genuine 008A reaches here -- pl_arm_load() drives the
+             * gate by setting reload_armed directly and never sets
+             * reload_pending -- so resume's own playlist load cannot cancel
+             * itself here. */
+            resume_seek_req = 0;
+
             REG(R_RELOAD)  = 1;             /* ack */
             reload_pending = 0;
             reload_armed    = 1;
