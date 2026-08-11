@@ -671,6 +671,29 @@ static char     stale_ref_title[48];   /* title of the track being left */
 static uint32_t stale_ref_size;        /* and the size APF reported for it */
 static char     last_title[48];        /* title the current load settled on */
 static char     track_file[64];        /* filename APF reports for the slot  */
+
+/* A file identity that SURVIVES A POWER CYCLE, which cur_file_id does not.
+ *
+ * cur_file_id hashes the whole 0190 response struct -- 64 words -- and was
+ * built to answer "has the slot changed yet?" by comparing two hashes taken
+ * minutes apart in the same session. Nothing ever established it is stable
+ * across a relaunch, and it is not: resume was rejecting every saved point
+ * with a tag mismatch because the same file hashed differently on the next
+ * boot. Anything in that 256-byte window that is a handle, padding, or
+ * residue from an earlier command moves, and the hash moves with it.
+ *
+ * The filename is a property of the FILE, so it is the same on every boot.
+ * slot_filename() extracts it as the longest printable-ASCII run rather than
+ * trusting an offset, which is also why it is the sturdier thing to hash. */
+static uint32_t track_name_id(void)
+{
+    uint32_t h = 2166136261u;                       /* FNV-1a */
+    for (uint32_t i = 0; i < sizeof(track_file) && track_file[i]; i++) {
+        h ^= (uint8_t)track_file[i];
+        h *= 16777619u;
+    }
+    return h;
+}
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
@@ -2964,7 +2987,7 @@ static void ui_draw_dynamic(void)
             *rq++ = (char)(n < 10u ? ('0' + n) : ('A' + n - 10u));
         }
         *rq++ = ' '; *rq++ = 'T'; rq = ui_dec(rq, RS_TAG(resume_word));
-        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, cur_file_id & 0x7Fu);
+        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, track_name_id() & 0x7Fu);
         *rq++ = ' '; *rq++ = 'S'; rq = ui_dec(rq, RS_SECS(resume_word));
         *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
         *rq = 0;
@@ -3105,12 +3128,12 @@ static void resume_pump(void)
      * saved volume, meter and the rest -- which is exactly what reset two of
      * them on the last build. */
     if (!settings_adopted) return;
-    if (!resume_on || idle || (paused & 1u) || !cur_file_id) return;
+    if (!resume_on || idle || (paused & 1u) || !track_file[0]) return;
     if (ui_sec == last_sec) return;
     last_sec = ui_sec;
 
     uint16_t f = (pl_count && pl_pos < pl_count) ? pl_order[pl_pos] : 0u;
-    uint32_t w = RS_PACK(f, ui_sec, cur_file_id);
+    uint32_t w = RS_PACK(f, ui_sec, track_name_id());
     if (w != resume_word) { resume_word = w; settings_mark_dirty(); }
 }
 
@@ -4645,7 +4668,7 @@ int main(void)
      * reposition -- it is just the start of the track. */
     if (!resume_on || !resume_word)            resume_dbg = 3u;
     else if (!(from_slot || from_list))        resume_dbg = 4u;
-    else if ((cur_file_id & 0x7Fu) != RS_TAG(resume_word)) resume_dbg = 2u;
+    else if ((track_name_id() & 0x7Fu) != RS_TAG(resume_word)) resume_dbg = 2u;
     else {
         resume_at = RS_SECS(resume_word);
         if (resume_at > 2u) { resume_seek_req = 1u; resume_dbg = 1u; }
