@@ -49,6 +49,7 @@ and whatever you pick starts playing.
 | **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
+| **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
 
 The Pocket's own **Controls** screen names every button too, so you don't have
 to keep this table to hand.
@@ -57,12 +58,17 @@ Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
-Volume, accent color, repeat, shuffle, the meter, the art panel, the EQ preset
-and the screen-blank timeout are remembered between sessions, and the controls
-and **Core Settings** stay in step. Playback position is not — every launch
-starts a track from the beginning. The Pocket keeps the settings under
-`/Settings/HarpMudd.Mp3Player/` on the card; delete that folder to reset.
-Nothing is written to your music folder.
+Volume, accent color, repeat, shuffle, the meter and the EQ preset are
+remembered between sessions, and the controls and **Core Settings** stay in
+step. **Where you were is remembered too** — the track and your position in it,
+so a long listen picks up where it stopped. Turn that off with **Resume
+playback** in Core Settings.
+
+The album art panel and the screen-blank timeout are *not* remembered; both
+reset each launch and are set with buttons.
+
+The Pocket keeps all of this under `/Settings/HarpMudd.Mp3Player/` on the card;
+delete that folder to reset. Nothing is written to your music folder.
 
 ## Equalizer
 
@@ -87,13 +93,18 @@ loud the music seems.
 
 ### Screen blanking
 
-**Screen blank (min)** in **Core Settings** blacks the screen after that many
-minutes with no button pressed. Any button wakes it, and that press does nothing
-else — reaching for a sleeping player to see what's on shouldn't pause it.
+**Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
+goes black after that long with no button pressed. Any button wakes it, and
+that press does nothing else — reaching for a sleeping player to see what's on
+shouldn't pause it.
 
 Playback carries on while the screen is black, and nothing else brings it
 back — track changes, meters and toasts all stay dark until you press
-something. Set it to 0 to disable.
+something.
+
+It resets to off each launch, and it dims rather than powers down: the Pocket's
+screen is a backlit LCD and a core can't reach the backlight, so this is for
+a dark room rather than for saving battery.
 
 ## Playlists
 

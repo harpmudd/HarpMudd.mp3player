@@ -787,8 +787,11 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * Select and L held plus Start), and the hardware round trip was wasted. A
  * readout with no way to fail to summon it cannot repeat that.
  *
- * Never merge to main with this at 1. */
-#define UI_SHOW_SPEED_DIAG 1
+ * OFF now that resume works. The rows and the resume_dbg latching stay in the
+ * source: flipping this to 1 brings back the speed row and the resume row,
+ * which between them found four separate faults here, and the 1.2x seek defect
+ * is still open. Cheaper to keep than to rewrite. */
+#define UI_SHOW_SPEED_DIAG 0
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
