@@ -3163,6 +3163,16 @@ static void resume_pump(void)
      * in the gap between arming and firing. (Y was observed incrementing on
      * hardware, which is this saver doing exactly that.) */
     if (resume_seek_req) return;
+    /* PLAYLIST PLAYBACK ONLY. A file picked with Load MP3 does not record a
+     * position, by decision: making resume work for arbitrary picked files
+     * needed a cross-boot file identity that does not exist here, and every
+     * attempt at one produced a different bug.
+     *
+     * It also buys something. A standalone track can no longer overwrite the
+     * saved point, so playing a song in the middle of an audiobook does not
+     * cost you your place in it. An audiobook that wants resume goes in a
+     * playlist -- a one-line .m3u is enough. */
+    if (!track_from_pl) return;
     if (!resume_on || idle || (paused & 1u) || !track_file[0]) return;
     if (ui_sec == last_sec) return;
     last_sec = ui_sec;
@@ -4684,26 +4694,34 @@ int main(void)
      * gets that the position was remembered before the player appears. */
     ui_boot_note((resume_on && resume_word && RS_SECS(resume_word) > 2u)
                  ? "RESUMING TRACK" : "LOADING TRACK");
-    int from_slot = load_track();
+    /* A saved playlist point goes STRAIGHT to the playlist, before the slot is
+     * consulted at all.
+     *
+     * The MP3 slot still holds whatever played last -- 0192 leaves it there --
+     * so trying the slot first meant from_slot almost always won and the
+     * playlist branch never ran. The seek then had to be applied to whatever
+     * the slot happened to contain, which is how a standalone mp3 ended up
+     * being repositioned to a playlist track's timestamp. Choosing the source
+     * first makes the position unambiguous: it belongs to the track this
+     * branch just started. */
+    int from_slot = 0, from_list = 0;
+    if (resume_on && resume_word && RS_PL(resume_word) && pl_count
+        && RS_SECS(resume_word) > 2u) {
+        uint16_t f = RS_TRACK(resume_word);
+        if (f < pl_count) {
+            pl_resync(f);
+            from_list = pl_play_at(pl_pos);
+        }
+    }
+    if (!from_list) from_slot = load_track();
     /* The splash is already up; leave it while the playlist track loads
      * rather than flashing instructions that are about to be replaced.
      *
      * Start at the SAVED track when there is one. pl_resync() finds the file
      * index in whatever order this boot produced, so a resumed track is right
      * even when shuffle has just reshuffled the list. */
-    int from_list = 0;
-    if (!from_slot && pl_count) {
-        uint16_t want = 0;
-        /* Only when the saved point CAME from the playlist. A standalone
-         * mp3's position carries no meaningful track index, and treating one
-         * as an index is what started a playlist track instead of the file
-         * the user had been listening to. */
-        if (resume_on && resume_word && RS_PL(resume_word)) {
-            uint16_t f = RS_TRACK(resume_word);
-            if (f < pl_count) { pl_resync(f); want = pl_pos; }
-        }
-        from_list = pl_play_at(want);
-    }
+    /* Nothing in the slot and nothing resumed: start the playlist normally. */
+    if (!from_slot && !from_list && pl_count) from_list = pl_play_at(0);
     ui_boot_cancel();          /* not _clear: see the note on that function */
 
     /* Arm the position seek only if the file that ACTUALLY opened is the one
@@ -4731,8 +4749,10 @@ int main(void)
      * track 56 seconds in, which B undoes. That is a far smaller cost than a
      * guard that rejects everything, and unlike the guard it cannot fail
      * silently -- a wrong resume is audible immediately. */
-    if (!resume_on || !resume_word)            resume_dbg = 3u;
-    else if (!(from_slot || from_list))        resume_dbg = 4u;
+    /* Only the track the resume branch itself started. from_slot means the
+     * slot's own file, which the point says nothing about. */
+    if (!resume_on || !resume_word || !RS_PL(resume_word)) resume_dbg = 3u;
+    else if (!from_list)                       resume_dbg = 4u;
     else {
         resume_at = RS_SECS(resume_word);
         /* Past the end of a track whose length we know: not this file. */
