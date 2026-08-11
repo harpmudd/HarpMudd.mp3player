@@ -116,7 +116,7 @@
                 "persist": true,
                 "address": "0x2000001C",
                 "defaultval": 0,
-                "value": 0
+                "value": 1
             }
         ],
         "messages": []
