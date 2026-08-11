@@ -376,6 +376,10 @@ static uint32_t samp_per_frame = 1152u;
  * needs them declared before ui_draw_dynamic(). */
 static uint32_t audio_start;             /* first byte after any ID3 tag */
 static uint32_t bytes_per_sec = 16000u;  /* refined once decoding */
+/* Set the moment a decoded frame disagrees with the first frame's bitrate.
+ * Until then the file is CBR as far as we have seen, and for CBR the frame
+ * bitrate IS the byte rate -- exactly, with nothing to measure. */
+static uint8_t  vbr_seen;
 static uint32_t track_kbps, track_hz;
 
 /* Playback speed. 1.2x is the whole range: playing at N x needs N x the decode
@@ -1158,6 +1162,19 @@ static uint32_t ui_byte_rate(void)
 {
     if (track_secs && slot_size > audio_start)
         return (slot_size - audio_start) / track_secs;
+
+    /* CBR with no Xing/Info header: the frame bitrate IS the byte rate, and it
+     * is exact. Measuring throughput instead was the whole defect.
+     *
+     * Three files on the test card are exactly this shape -- no frame count,
+     * constant bitrate -- and they were the ONLY three where seeking went
+     * wrong, at 1.2x and latently at 1.0x. meas_rate is a self-correcting
+     * estimate; preferring it over a number that cannot be wrong let the seek
+     * distance drift for no reason at all.
+     *
+     * meas_rate now serves only what it was ever for: a headerless VBR file,
+     * where no constant exists to read. */
+    if (!vbr_seen && bytes_per_sec) return bytes_per_sec;
     if (meas_rate) return meas_rate;
     return bytes_per_sec;
 }
@@ -4370,6 +4387,7 @@ static int read_track_head(void)
     track_encoder[0] = 0; track_vbr_method = 0;
     track_secs   = 0;
     meas_rate    = 0; meas_pos0 = 0; meas_sec0 = 0;
+    vbr_seen     = 0;
 
     /* Remember what we settled on, so later probes have a reference the load
      * itself cannot corrupt. */
@@ -5323,6 +5341,10 @@ int main(void)
 
         MP3FrameInfo fi;
         MP3GetLastFrameInfo(dec, &fi);
+
+        /* One comparison per frame, and it decides which rate source the seek
+         * arithmetic is allowed to trust. */
+        if (fi.bitrate && rate_set && fi.bitrate / 8u != bytes_per_sec) vbr_seen = 1u;
 
         if (!rate_set && fi.samprate) {
             pcm_rate_apply(fi.samprate);

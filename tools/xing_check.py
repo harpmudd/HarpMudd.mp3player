@@ -114,3 +114,34 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def bitrate_varies(path, probe_frames=400):
+    """Walk real frame headers and report whether the bitrate ever changes.
+
+    A file with no Xing header is not necessarily VBR -- plain CBR encoders
+    often write none. That distinction decides the fix: for CBR the first
+    frame's bitrate IS the exact byte rate, so nothing needs measuring.
+    """
+    with path.open("rb") as fh:
+        b = fh.read(4 << 20)
+    off = id3_len(b)
+    f = first_frame(b, off)
+    if not f:
+        return None
+    i = f[0]
+    seen, n = set(), 0
+    while n < probe_frames and i + 4 < len(b):
+        if b[i] != 0xFF or (b[i + 1] & 0xE0) != 0xE0:
+            i += 1
+            continue
+        br = BITRATE_V1L3[(b[i + 2] >> 4) & 0xF]
+        sr = SAMPRATE_V1[(b[i + 2] >> 2) & 3]
+        if not br or not sr:
+            i += 1
+            continue
+        pad = (b[i + 2] >> 1) & 1
+        seen.add(br)
+        n += 1
+        i += (144000 * br) // sr + pad
+    return sorted(seen), n
