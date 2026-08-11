@@ -179,8 +179,9 @@ framework bugs that had to be found first — is in
 
 ## Known limitations
 
-- **Total time is estimated** on files with no Xing/Info/VBRI header — exact
-  for CBR, approximate for VBR.
+- **Total time is approximate on a VBR file with no Xing/Info/VBRI header** —
+  an unusual combination, since VBR encoders normally write one. Everything
+  else is exact.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
 - **JPEG album art only.** PNG covers are skipped rather than shown wrong —
   see [ROADMAP.md](ROADMAP.md).
