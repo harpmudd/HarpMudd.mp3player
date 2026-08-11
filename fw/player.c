@@ -590,7 +590,7 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
                         | ((uint32_t)((g) & 0x7Fu) << 24))
 
 static uint32_t resume_word;      /* the packed point, as published to APF   */
-static uint8_t  resume_on = 1u;   /* Core Settings check; default on         */
+static uint8_t  resume_on;        /* Core Settings check; default OFF, opt in */
 static uint8_t  resume_armed;     /* a saved point is waiting to be applied  */
 static uint32_t resume_at;        /* seconds to seek to once the track opens */
 static uint8_t  resume_seek_req;  /* apply resume_at at the next safe point   */

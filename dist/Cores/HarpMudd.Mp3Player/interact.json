@@ -61,10 +61,10 @@
                 "value": 1
             },
             {
-                "name": "Resume point",
+                "name": "Saved position",
                 "id": 18,
                 "type": "slider_u32",
-                "enabled": true,
+                "enabled": false,
                 "persist": true,
                 "address": "0x20000010",
                 "defaultval": 0,
@@ -115,8 +115,8 @@
                 "enabled": true,
                 "persist": true,
                 "address": "0x2000001C",
-                "defaultval": 1,
-                "value": 1
+                "defaultval": 0,
+                "value": 0
             }
         ],
         "messages": []
