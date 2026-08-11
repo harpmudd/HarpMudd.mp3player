@@ -4920,7 +4920,18 @@ int main(void)
             ring_fill = 0; ring_rd = 0;
             pl_load();
             pl_report();
-            if (pl_count) pl_play_at(0);
+            /* Only take playback if nothing else is claiming it.
+             *
+             * Picking Load MP3 can bring a playlist-slot notification along
+             * with it, and starting track 1 then throws away the file the user
+             * actually chose -- reported as "it reloads the playlist and plays
+             * a playlist song instead of my mp3".
+             *
+             * Gated on the MP3 reload being idle rather than on playback,
+             * deliberately: picking a NEW playlist while a track is playing
+             * should still start it, which is the whole point of that action.
+             * Only a pick already in flight suppresses it. */
+            if (pl_count && !reload_pending && !reload_armed) pl_play_at(0);
             ui_mode_dirty = 1;
             continue;
         }
