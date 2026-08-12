@@ -655,6 +655,10 @@ static uint16_t pl_live_ordinal(uint16_t pos);
  * because the splash summary above it draws the name. Empty when APF will not
  * say what is in the slot. */
 static char pl_name[24];
+static char pl_name_raw[24];      /* same, in the card's own spelling */
+/* The remembered list is reopened at BOOT only. pl_load() also runs whenever
+ * the user picks a playlist, and restoring there would override the pick. */
+static uint8_t pl_restore_pending = 1u;
 
 /* The playlist to reopen at boot, packed four characters per settings word.
  *

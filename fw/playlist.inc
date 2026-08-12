@@ -716,7 +716,7 @@ static int pl_advance_auto(void)
  * in what APF put there. Showing the name settles that in one boot. */
 static void pl_name_read(void)
 {
-    pl_name[0] = 0;
+    pl_name[0] = 0; pl_name_raw[0] = 0;
     uint8_t buf[DT_WORDS * 4u];
     uint32_t at = 0, len = pl_template(PL_SLOT_ID, buf, &at);
     if (!len) return;
@@ -731,10 +731,16 @@ static void pl_name_read(void)
     uint32_t n = 0;
     for (uint32_t i = start; i < at + len && n < sizeof(pl_name) - 1u; i++) {
         char c = (char)buf[i];
+        /* Raw case is kept as well as the uppercased display form. The stored
+         * stem is reopened BY NAME later, and uppercasing it would ask APF for
+         * SHENANIGANS.m3u when the card holds Shenanigans.m3u -- fine on FAT,
+         * not something to rely on. */
+        pl_name_raw[n] = c;
         if (c >= 'a' && c <= 'z') c = (char)(c - 32);
         pl_name[n++] = c;
     }
     pl_name[n] = 0;
+    pl_name_raw[n] = 0;
 }
 
 /* The name the core falls back to. Only used when APF has nothing in the
@@ -755,17 +761,19 @@ static void pl_stem_of(const char *name, char *out)
     uint32_t n = 0;
     for (uint32_t i = 0; name[i] && n < PL_STEM_MAX; i++) {
         if (name[i] == '.') break;                 /* stop at the extension */
-        char c = name[i];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        out[n++] = c;
+        out[n++] = name[i];                        /* CASE PRESERVED */
     }
     out[n] = 0;
 }
 
+static char pl_upper(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
+
+/* Case-insensitive: the two sides come from different places and only the
+ * card's own spelling is authoritative. */
 static int pl_stem_eq(const char *a, const char *b)
 {
     for (uint32_t i = 0; i <= PL_STEM_MAX; i++) {
-        if (a[i] != b[i]) return 0;
+        if (pl_upper(a[i]) != pl_upper(b[i])) return 0;
         if (!a[i]) return 1;
     }
     return 1;
@@ -777,7 +785,7 @@ static int pl_stem_eq(const char *a, const char *b)
 static void pl_remember(void)
 {
     char stem[PL_STEM_MAX + 1u];
-    pl_stem_of(pl_name, stem);
+    pl_stem_of(pl_name_raw, stem);
     if (!stem[0] || pl_stem_eq(stem, pl_saved_stem)) return;
     for (uint32_t i = 0; i <= PL_STEM_MAX; i++) pl_saved_stem[i] = stem[i];
     settings_mark_dirty();
@@ -814,9 +822,16 @@ static void pl_load(void)
      *
      * Skipped when the slot already holds the right list, so the ordinary
      * case costs nothing and picking a new list mid-session is untouched. */
-    if (pl_saved_stem[0]) {
+    /* ONLY on the first load of the session.
+     *
+     * pl_load() runs at boot AND every time the user picks a list, and the
+     * first version did not distinguish them -- so choosing Shenanigans.m3u
+     * made this see a name differing from the remembered one and helpfully
+     * "restore" the remembered one over the top. It fought the user's pick
+     * every single time, which is exactly how it was reported. */
+    if (pl_restore_pending && pl_saved_stem[0]) {
         char cur[PL_STEM_MAX + 1u];
-        pl_stem_of(pl_name, cur);
+        pl_stem_of(pl_name_raw, cur);
         if (!pl_stem_eq(cur, pl_saved_stem)) {
             char want[PL_STEM_MAX + 5u];
             uint32_t n = 0;
@@ -826,6 +841,8 @@ static void pl_load(void)
             if (pl_open_into(PL_SLOT_ID, want)) pl_name_read();
         }
     }
+
+    pl_restore_pending = 0;
 
     uint32_t len = pl_read_raw();
     if (!len && pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME)) {
