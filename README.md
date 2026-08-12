@@ -1,7 +1,7 @@
 # MP3 Player — Analogue Pocket
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, ID3 tags, nine
+decodes and plays it straight off the SD card, with album art, ID3 tags, ten
 switchable meters, an eight-preset equalizer, a progress bar, settings
 persistence and resume — it remembers where you were in a playlist.
 
@@ -17,25 +17,19 @@ files into:
 /Assets/mp3player/common/
 ```
 
-They can live anywhere on the card; keeping them there makes them quick to find
-in the browser.
-
-`mp3player.rom` is the firmware — the core won't start without it. That, your
-music and a `playlist.m3u` if you want one are all that belong there.
-
-The Pocket lists the core as **MP3 Player**; open that to launch it.
+They can live anywhere on the card; that folder is just where the browser
+starts. `mp3player.rom` is the firmware and has to stay there — the core won't
+start without it.
 
 ## Playing
 
-At launch the core looks for **`playlist.m3u`** specifically, and starts
-playing it. Other playlists are loaded by name rather than found automatically,
-so a card holding only `audiobook.m3u` won't start on its own the first time —
-pick it once with **Load Playlist** and it becomes the one that loads at every
-launch after that, picking up where you left off.
+At launch the core loads **`playlist.m3u`** — that name specifically, not any
+playlist it finds. Pick another once with **Load Playlist** and that becomes
+the one that loads from then on, picking up where you left off.
 
-With no `playlist.m3u` and nothing remembered, you get a short getting-started
-screen; press **Analogue** and choose **Load MP3** or **Load Playlist**. The
-same menu switches either at any time, and whatever you pick starts playing.
+With no `playlist.m3u` and nothing remembered you get a getting-started screen;
+press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
+switches either at any time, and whatever you pick starts playing.
 
 | Pocket | Action |
 |---|---|
@@ -55,9 +49,6 @@ same menu switches either at any time, and whatever you pick starts playing.
 | **Select** + **R** | Shuffle on / off |
 | **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
 
-The Pocket's own **Controls** screen names every button too, so you don't have
-to keep this table to hand.
-
 Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
@@ -65,24 +56,17 @@ restarting the current one is instant.
 Volume, accent color, repeat, shuffle, the meter and the EQ preset are
 remembered between sessions, and the controls and **Core Settings** stay in
 step. **Where you were in a playlist is remembered too** — the track and your
-position in it, so a long listen picks up where it stopped. Turn that off with
-**Resume playback** in Core Settings.
+position in it. Turn that off with **Resume playback** in Core Settings.
 
-It is **one bookmark, not one per playlist**. The core remembers the last
-playlist you used and your place in it; switching to another replaces what it
-was holding. Leave `audiobook.m3u` partway through, listen to `music.m3u`, and
-the audiobook starts again from the beginning next time.
+It is **one bookmark, not one per playlist**: switching lists replaces what was
+held for the last one, so an audiobook left partway through starts over if you
+listen to something else in between. It also applies to playlists only — a file
+opened with **Load MP3** records no position. For an audiobook, put it in a
+playlist; a one-line `.m3u` is enough.
 
-That applies to playlist playback only. A file opened with **Load MP3** plays
-without recording a position, which also means a quick listen to something else
-won't cost you your place. For an audiobook, put it in a playlist — a one-line
-`.m3u` is enough.
-
-The album art panel and the screen-blank timeout are *not* remembered; both
-reset each launch and are set with buttons.
-
-The Pocket keeps all of this under `/Settings/HarpMudd.Mp3Player/` on the card;
-delete that folder to reset. Nothing is written to your music folder.
+The album art panel and the screen-blank timeout reset each launch. Everything
+saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
+Nothing is written to your music folder.
 
 ## Equalizer
 
@@ -100,8 +84,6 @@ on `FLAT`.
 | **VOCAL** | mid forward, lows trimmed |
 | **TREBLE** | high shelf lift |
 
-It works while paused; there is just nothing to hear until you press play.
-
 Presets are loudness-matched, so switching changes the tone without changing how
 loud the music seems.
 
@@ -111,24 +93,20 @@ Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
 rises with the speed, so music sounds wrong. Off every launch — it isn't
 remembered.
 
-1.2× is the whole range, and that's the CPU rather than a choice. Playing at
-double speed means decoding twice as many frames per second, which needs more
-than the 60 MHz available at any bitrate.
+1.2× is the whole range — that's the CPU, not a choice. Double speed means
+decoding twice as many frames a second, past what the 60 MHz can do.
 
 ### Screen blanking
 
 **Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
-goes black after that long with no button pressed. Any button wakes it, and
-that press does nothing else — reaching for a sleeping player to see what's on
-shouldn't pause it.
+goes black after that long with no button pressed, and any button wakes it
+without doing anything else — reaching for a sleeping player shouldn't pause
+it. Playback carries on regardless, and nothing but a button press brings the
+screen back.
 
-Playback carries on while the screen is black, and nothing else brings it
-back — track changes, meters and toasts all stay dark until you press
-something.
-
-It resets to off each launch, and it dims rather than powers down: the Pocket's
-screen is a backlit LCD and a core can't reach the backlight, so this is for
-a dark room rather than for saving battery.
+It resets to off each launch, and it dims rather than powers down: a core can't
+reach the Pocket's backlight, so this is for a dark room rather than for saving
+battery.
 
 ## Playlists
 
@@ -144,9 +122,8 @@ Rhinestone Eyes.mp3
 Bare names are relative to that folder; a leading `/` is from the card root.
 Lines starting with `#` are ignored, so exported playlists work as-is.
 
-`playlist.m3u` loads at boot. Pick a different one with **Load Playlist** and
-that becomes the one it remembers — so `audiobook.m3u` stays loaded across
-launches, along with your place in it.
+Any other name is picked with **Load Playlist**, and becomes the one that loads
+at launch from then on.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
@@ -181,17 +158,14 @@ stereo.<br clear="right">
 
 ### Magic eye
 
-The tenth meter, and the one worth looking for: a pair of **EM84 indicator
-tubes**, the bar-type magic eye fitted to tube amplifiers and tape decks either
-side of 1960. One tube per channel, left and right, each with a fluorescent
-strip that rises with its own signal.
+A pair of **EM84 indicator tubes** — the bar-type magic eye from valve
+amplifiers and tape decks. One tube per channel, each with a fluorescent strip
+that rises with its own signal.
 
-They behave like the valves they are imitating. The strips move on the same
-ballistics as the VU needles — quick to rise, slow to fall — and never go fully
-dark, because a real tube's heater is always on. Each tube throws light across
-the panel beside it, brightest where the pair face each other. The etched scale
-follows your accent color; the phosphor stays its own cyan-green, because in
-any other color it would just be a bar meter.
+They move on the same ballistics as the VU needles, quick to rise and slow to
+fall, and never go fully dark, because a real tube's heater is always on. Each
+throws light across the panel beside it, brightest between the two. The etched
+scale follows your accent color; the phosphor keeps its own cyan-green.
 
 ## How it works
 
