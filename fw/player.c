@@ -3410,7 +3410,16 @@ static void ui_draw_dynamic(void)
 
     /* Transport state, in the gap to the right of the clock. Both strings are
      * the same length so one overwrites the other cleanly. */
-    {
+    /* NOT while a boot note is up. UI_BOOT_Y and UI_TRANSPORT_Y are the SAME
+     * ROW -- both 262 -- so during a switch this repainted PLAYING, the
+     * arrows and the EQ name straight over "LOADING PLAYLIST" while
+     * ui_boot_tick() animated its dots on top of both. The user saw the
+     * transport line garbled, assumed the pick had failed, and picked again:
+     * that is a large part of what "I have to load it twice" has been.
+     *
+     * The note owns the row until ui_boot_cancel(), whose callers already
+     * force a full transport repaint after it. */
+    if (!ui_boot_msg) {
         uint16_t tbg = ui_grad_at((UI_TIME_Y + 10u));
         /* Left end of its own row. The arrows sit at a FIXED x derived from
          * the WIDER of the two words, so switching PLAYING <-> PAUSED cannot
