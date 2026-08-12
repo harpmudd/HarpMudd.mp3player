@@ -83,6 +83,25 @@ much worse:
 
 Only worth revisiting if the slot genuinely cannot be made to retain.
 
+### SCOPE, and it must be in the README before release
+
+**One remembered playlist and one position, not one per playlist.** There is a
+single saved stem and a single packed point, so switching lists overwrites
+what was held for the previous one.
+
+The consequence a user will hit: partway through `audiobook.m3u`, switch to
+`music.m3u`, and the audiobook's place is gone -- returning to it starts at
+track 1. "It remembers where you were" reads as a per-book bookmark, and that
+is not what this is.
+
+Per-playlist positions would need a stem plus a point for each, so four
+settings words each against five free after this release -- one more playlist
+and it needs another register widen. Not worth it unless someone asks.
+
+Wording for the README, roughly: "The core remembers the last playlist you
+used and your place in it. Switching to another playlist replaces what it was
+holding, so it is one bookmark rather than one per list."
+
 ### Version
 
 **v1.1.1.** It is a defect in a shipped feature, not new capability: resume is
