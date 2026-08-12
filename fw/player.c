@@ -679,6 +679,21 @@ static uint8_t pl_restore_pending = 1u;
  * it holds at exactly that moment. One 0190 per menu close, at a point where
  * playback is already interrupted, against a notification that is sometimes
  * simply absent. */
+/* paused is a bitmask: 1 the user, 2 the OS menu, 4 a playlist switch in
+ * progress. The switch bit exists for two reasons, and the second is probably
+ * the bigger one:
+ *
+ *   - it takes the core's 0180 refill traffic off the bus while APF is trying
+ *     to reassign slot 3, which is the collision the user suspects is behind
+ *     the occasional pick that does nothing;
+ *   - the old track used to keep playing throughout the wait, which can run to
+ *     five seconds. Music continuing while the screen says LOADING PLAYLIST
+ *     reads as NOTHING HAPPENING, and that is what makes a user pick again.
+ *     Silence reads as working.
+ *
+ * load_track() ends with paused = 0, so a successful switch clears it; the
+ * completion branch clears it too, for the paths that never get that far. */
+#define PAUSE_LOAD 4u
 static uint8_t  pl_check_req;     /* menu just closed: ask slot 3 what it holds */
 static uint8_t  pl_skip_gate;     /* 0190 already proved it changed             */
 static uint32_t pl_fb_at;         /* when the fallback last loaded              */
@@ -5665,6 +5680,12 @@ int main(void)
             pl_retry        = 1u;        /* one automatic second attempt */
             pl_probe_at     = cycles();
             pl_reload_at    = cycles() + CLK_HZ * 5u;
+            /* Cut the outgoing track NOW rather than at the moment the switch
+             * lands -- see PAUSE_LOAD. */
+            pcm_flush();
+            refill_drain();
+            ring_fill = 0; ring_rd = 0;
+            paused |= PAUSE_LOAD;
             /* Say something immediately. The gate below waits for APF to
              * switch the slot -- usually quick, five second cap -- and with
              * the player still up and the old track still playing there is
@@ -5781,6 +5802,10 @@ int main(void)
                     ui_boot_cancel();
                     ui_mode_dirty = 1;
                     ui_last_pause = 0xFFFFFFFFu;
+                    /* Released here as well as by load_track(), for the paths
+                     * that never reach one -- an empty or unreadable list, or
+                     * a pick that lost the race to something else. */
+                    paused &= (uint32_t)~PAUSE_LOAD;
                     pl_report();
                     /* Only take playback if nothing else is claiming it. A
                      * Load MP3 pick can bring a playlist notification with it,
@@ -5801,8 +5826,8 @@ int main(void)
                     continue;
                 }
             }
-            /* Still waiting for APF to switch the slot. Fall through so the
-             * current track keeps playing while it does. */
+            /* Still waiting for APF to switch the slot. Nothing is playing
+             * while we do -- see PAUSE_LOAD. */
         }
 
         /* Track skip (Left/Right held). pl_play_at() issues 0192; APF then
