@@ -1866,20 +1866,41 @@ static void poll_input(void);
  * they cannot drift -- they are the same screen, and previously each drew the
  * title itself. `f/den` is the title's fade position; the card and version do
  * not fade, because animating the frame draws the eye to the furniture. */
-static void ui_splash_card(uint32_t f, uint32_t den)
+/* The parts of the splash card that never change: the panel itself and the
+ * version. Split out because the fade redraws the TITLE 33 times, and this
+ * used to be redrawn with it.
+ *
+ * That was the rest of the boot flicker. Capping the fade at 33 steps stopped
+ * the title flashing thousands of times a second, but each of those 33 still
+ * refilled the whole card first -- wiping the title AND the version and
+ * writing them back, 33 times, with scanout free to catch either gap. The
+ * version never changes at all, so it was pure churn.
+ *
+ * Glyph cells paint their own background, so the title can be redrawn in
+ * place over itself without the panel underneath being cleared first. */
+static void ui_splash_bg(void)
 {
     /* Identical geometry to ui_draw_chrome()'s card, at full width since the
      * splash has no art panel to make room for. */
     fb_round_rect(UI_MARGIN - 8u, UI_TITLE_Y - 14u,
                   UI_INNER_W + 16u, UI_CARD_H, 8u, UI_PANEL);
 
-    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
-    fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
-
     fb_set_color(UI_DIM, UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_SPL_VER_Y, "v" APP_VER, TS_1X, TS_1X,
                     UI_INNER_W);
+}
+
+static void ui_splash_title(uint32_t f, uint32_t den)
+{
+    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
+    fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
+}
+
+static void ui_splash_card(uint32_t f, uint32_t den)
+{
+    ui_splash_bg();
+    ui_splash_title(f, den);
 }
 
 static void ui_splash(void)
@@ -2042,11 +2063,12 @@ static void ui_splash_anim(void)
      * is what made it flash: each repaint erases its own cell before writing
      * the glyph, and scanout catches the gap. */
     uint32_t last_f = 0xFFFFFFFFu;
+    ui_splash_bg();                  /* ONCE -- see ui_splash_bg() */
     for (;;) {
         uint32_t el = cycles() - t0;
         if (el >= CLK_HZ / 1000u * INTRO_MS) break;
         uint32_t f = (el < fade_end) ? (el * STEP_DEN / fade_end) : STEP_DEN;
-        if (f != last_f) { last_f = f; ui_splash_card(f, STEP_DEN); }
+        if (f != last_f) { last_f = f; ui_splash_title(f, STEP_DEN); }
         ui_wave_anim_tick();
     }
 
