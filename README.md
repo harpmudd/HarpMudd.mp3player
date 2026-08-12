@@ -27,11 +27,15 @@ The Pocket lists the core as **MP3 Player**; open that to launch it.
 
 ## Playing
 
-If a playlist is on the card, the core starts playing its first track at launch.
+At launch the core looks for **`playlist.m3u`** specifically, and starts
+playing it. Other playlists are loaded by name rather than found automatically,
+so a card holding only `audiobook.m3u` won't start on its own the first time —
+pick it once with **Load Playlist** and it becomes the one that loads at every
+launch after that, picking up where you left off.
 
-Otherwise you get a short getting-started screen; press **Analogue** and choose
-**Load MP3** or **Load Playlist**. The same menu switches either at any time,
-and whatever you pick starts playing.
+With no `playlist.m3u` and nothing remembered, you get a short getting-started
+screen; press **Analogue** and choose **Load MP3** or **Load Playlist**. The
+same menu switches either at any time, and whatever you pick starts playing.
 
 | Pocket | Action |
 |---|---|

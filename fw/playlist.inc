@@ -809,10 +809,14 @@ static void pl_load(void)
      * no playlist loaded at all. The only trustworthy test of "is there a
      * playlist here" is trying to read one.
      *
-     * data.json no longer declares a filename for slot 3: declaring one made
-     * APF reset the slot at every core load and throw away the user's chosen
-     * list, which was the whole multi-playlist defect. Opening the documented
-     * default here puts the first-run convenience back. */
+     * STALE COMMENT CORRECTED: data.json DOES declare "playlist.m3u" for slot
+     * 3. Removing it was tried, on the theory that APF resetting the slot at
+     * every core load was throwing away the user's chosen list -- and it was
+     * reverted, because slot 3 does not retain the pick either way. So APF
+     * puts playlist.m3u in the slot at every launch and the remembered list
+     * is reopened by name below, which is what actually makes multi-playlist
+     * work. This open-by-name is the belt to that braces: it also covers a
+     * slot APF left empty. */
     /* If a different list is remembered, reopen it BEFORE reading.
      *
      * The slot cannot remember anything itself -- with a filename declared in
