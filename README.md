@@ -164,9 +164,7 @@ not how many lines the file has.
   don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
   oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
-  peak dots and a magic eye — a pair of EM84 indicator tubes, one per channel,
-  their fluorescent strips rising with the music and throwing light across the
-  panel.
+  peak dots and the magic eye — see below.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
@@ -176,6 +174,20 @@ not how many lines the file has.
 
 CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
 stereo.<br clear="right">
+
+### Magic eye
+
+The tenth meter, and the one worth looking for: a pair of **EM84 indicator
+tubes**, the bar-type magic eye fitted to tube amplifiers and tape decks either
+side of 1960. One tube per channel, left and right, each with a fluorescent
+strip that rises with its own signal.
+
+They behave like the valves they are imitating. The strips move on the same
+ballistics as the VU needles — quick to rise, slow to fall — and never go fully
+dark, because a real tube's heater is always on. Each tube throws light across
+the panel beside it, brightest where the pair face each other. The etched scale
+follows your accent color; the phosphor stays its own cyan-green, because in
+any other color it would just be a bar meter.
 
 ## How it works
 
