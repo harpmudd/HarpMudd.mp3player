@@ -176,6 +176,21 @@ static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
+/* The one place a byte becomes a glyph index. The atlas holds 0x20..0x7E and
+ * nothing else, so everything outside that is a space.
+ *
+ * This exists because the width path and the DRAW path disagreed. fb_adv()
+ * substituted a space for an out-of-range byte while fb_char() masked with
+ * 0x7F and sent the result to the engine -- so the first UTF-8 byte of an
+ * accented or symbol character (0xE2, say) was drawn as 'b' while being
+ * measured as a space. Wrong glyphs AND overlapping spacing, from one title
+ * containing a character the font cannot show. Both now ask this. */
+static uint32_t fb_glyph(char ch)
+{
+    uint32_t c = (unsigned char)ch;
+    return (c < FONT_FIRST || c > FONT_LAST) ? (uint32_t)' ' : c;
+}
+
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
@@ -183,8 +198,7 @@ static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
 static uint32_t fb_adv(char ch, uint32_t sx)
 {
     unsigned char c = (unsigned char)ch;
-    if (c < FONT_FIRST || c > FONT_LAST) c = ' ';
-    return ((uint32_t)font_adv[c - FONT_FIRST] * ts_half[sx]) / 2u;
+    return ((uint32_t)font_adv[fb_glyph(c) - FONT_FIRST] * ts_half[sx]) / 2u;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -280,7 +294,7 @@ static void fb_char(uint32_t x, uint32_t y, char ch, uint32_t sx, uint32_t sy)
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
     REG(R_FB_GO)   = FB_OP_CHAR
-                   | (((uint32_t)(unsigned char)ch & 0x7Fu) << 3)
+                   | ((fb_glyph(ch) & 0x7Fu) << 3)
                    | (sx << 10)
                    | (sy << 12);
 }
