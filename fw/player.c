@@ -4917,6 +4917,10 @@ int main(void)
             reload_probe_at = cycles();
             reload_settle   = cycles() + CLK_HZ * 3u / 2u;   /* blind fallback */
             reload_at       = cycles() + CLK_HZ * 5u;        /* hard cap       */
+            /* Same gap: this gate waits at least 1.5 s before the track even
+             * opens. The splash carries LOADING TRACK from the idle screen,
+             * but with the player up there was nothing at all. */
+            ui_toast_msg("LOADING TRACK");
 
             /* Say so NOW, not when the gate below finally opens. That wait is
              * at least 1.5 s and can reach 5 s, and with the screen unchanged
@@ -5046,6 +5050,12 @@ int main(void)
             pl_reload_armed = 1u;
             pl_probe_at     = cycles();
             pl_reload_at    = cycles() + CLK_HZ * 5u;
+            /* Say something immediately. The gate below waits for APF to
+             * switch the slot -- usually quick, five second cap -- and with
+             * the player still up and the old track still playing there is
+             * otherwise nothing to show the pick registered. The boot row
+             * cannot be used: UI_BOOT_Y is the live transport row. */
+            ui_toast_msg("LOADING PLAYLIST");
             continue;
         }
 
@@ -5056,6 +5066,9 @@ int main(void)
             if (due || expired) {
                 pl_probe_at = cycles() + CLK_HZ / 10u;
                 pl_name_read();
+                /* Refreshed each probe: a toast holds ~1 s then dissolves, so
+                 * a slow switch would fade it out mid-load. */
+                ui_toast_msg("LOADING PLAYLIST");
 
                 int changed = 0;
                 for (uint32_t i = 0; i < sizeof(pl_leaving); i++) {
