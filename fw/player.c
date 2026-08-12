@@ -995,6 +995,11 @@ static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 #define EYE_GLASS_L 0x530Du       /* envelope, on the specular streak      */
 #define EYE_GETTER  0x6BD0u       /* getter flash inside the crown         */
 #define EYE_SOCKET  0x1082u       /* base of the envelope, in the socket   */
+/* The scale ticks and the plinth are the ONLY parts of this meter that follow
+ * the accent, and they have to, for the reason written on the VU face: with a
+ * fixed palette throughout, cycling the colour moved nothing and the meter
+ * looked broken. The phosphor cannot take the accent -- the glow is the
+ * instrument -- so the etched scale carries it instead. */
 #define EYE_DARK    0x0082u       /* strip window, unexcited               */
 #define EYE_H2      0x0A89u       /* outer halo                            */
 #define EYE_H1      0x1DC3u       /* inner halo                            */
@@ -2752,17 +2757,32 @@ static void ui_draw_dynamic(void)
                     fb_rect(bx - 4u, by, EYE_BAR_W + 8u, bh, EYE_DARK);
 
                     /* Scale ticks etched beside the strip, as on the real
-                     * tube's faceplate. */
+                     * tube's faceplate, in the accent. Mixed toward the glass
+                     * rather than laid on pure, so they read as printed ON it
+                     * instead of floating above it -- and the TOP tick goes on
+                     * full, marking the loud end the way the VU's face marks
+                     * its peak zone. */
                     for (uint32_t t = 1; t < 4u; t++)
                         fb_rect(bx + EYE_BAR_W + 5u, by + (bh * t) / 4u,
-                                2, 1, EYE_GETTER);
+                                2, 1,
+                                (t == 1u) ? ui_accent
+                                          : ui_mix(EYE_GLASS_L, ui_accent,
+                                                   3u, 4u));
                 }
 
                 /* Exactly the width of the pair, not wider. Overhanging it
                   * put 8px of plinth under each pool, and the pool repaints
                   * that span with the bed -- which chewed the ends off the
-                  * base plate and read as a gap in the light. */
-                fb_round_rect(x0, basy, pair, 5u, 2u, basc);
+                  * base plate and read as a gap in the light. It cannot gain
+                  * substance by growing sideways, so it gains it by being
+                  * shaded: a lit top edge and a shadowed underside turn a flat
+                  * bar into a slab with thickness. Six rows, which is every
+                  * one left between the socket and the bottom of the box. */
+                fb_round_rect(x0, basy, pair, 6u, 2u, basc);
+                fb_rect(x0 + 2u, basy, pair - 4u, 1,
+                        ui_mix(basc, UI_WHITE, 1u, 4u));
+                fb_rect(x0 + 2u, basy + 5u, pair - 4u, 1,
+                        ui_mix(basc, 0x0000u, 1u, 2u));
                 eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
                 /* The box was just cleared, so there is no old cone to
                  * erase -- and after a width change its coordinates would
@@ -2831,7 +2851,7 @@ static void ui_draw_dynamic(void)
                      * photographed pair reflects in its acrylic. */
                     uint32_t rf = (lit * 4u) / bh + 1u;
                     for (uint32_t k = 0; k < 3u; k++)
-                        fb_rect(bx - 3u, basy + k, EYE_BAR_W + 6u, 1,
+                        fb_rect(bx - 3u, basy + 1u + k, EYE_BAR_W + 6u, 1,
                                 (k < rf) ? ui_mix(basc, EYE_LIT, 3u - k, 9u)
                                          : basc);
                     *shown = lit;
