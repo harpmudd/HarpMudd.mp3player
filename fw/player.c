@@ -964,28 +964,46 @@ static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 
 /* ---- Magic eye (EM84 indicator tube) ----------------------------------
  *
- * The BAR type, not the 6E5 circular fan I built first: two glass tubes
- * side by side, each with a vertical fluorescent strip whose LENGTH
- * follows its channel. One tube for left, one for right, the way the real
- * pair is wired.
+ * The BAR type: two glass tubes side by side, each with a vertical
+ * fluorescent strip whose LENGTH follows its channel.
  *
- * Everything here is an axis-aligned rect, so it is cheaper than the fan
- * as well as being the right instrument. The envelopes and the unlit
- * strips are cached like the VU face, so a frame repaints only the strips:
- * four rects a channel, eight in all.
+ * The first attempt was a rounded rect with a solid bar in it and read as
+ * generic, correctly -- that describes a bar meter, and this screen has
+ * two of those already. What makes a tube look like a tube is not its
+ * outline, it is the GLASS and the BLOOM:
  *
- * CYAN-GREEN, not the accent. Everything else on this screen is a tone of
- * ui_accent, on purpose (see the VU face). This breaks that knowingly --
- * the glow IS the instrument, and in any other colour this is just a bar
- * meter, which the screen already has two of. */
-#define EYE_GLASS   0x2860u       /* smoked envelope                       */
-#define EYE_EDGE    0x39E7u       /* highlight down one side of the glass  */
-#define EYE_DARK    0x08C3u       /* strip, unexcited                      */
-#define EYE_GLOW    0x1C0Du       /* halo either side of the strip         */
-#define EYE_LIT     0x47FBu       /* the phosphor itself                   */
-#define EYE_TUBE_W  30u
-#define EYE_TUBE_G   8u           /* gap between the pair                  */
-#define EYE_BAR_W   10u
+ *   - the envelope is shaded PER COLUMN, bright near the left and falling
+ *     off both ways, so it reads as a cylinder rather than a slab;
+ *   - the top is DOMED, by a per-column offset off the same circle search
+ *     fb_round_rect uses, with a pip above it;
+ *   - a getter flash sits inside the crown, the silvery patch every real
+ *     tube carries;
+ *   - the phosphor has a bright core, two halo layers either side, and a
+ *     bloom that spills ABOVE the tip -- a hard-edged bar is the single
+ *     biggest reason a glow reads as a rectangle;
+ *   - the glow reflects in the base plate, the way the photographed pair
+ *     reflects in its acrylic.
+ *
+ * Nearly all of that is in the CACHED pass, so the per-frame cost is the
+ * strip and its reflection -- about eleven rects a channel.
+ *
+ * CYAN-GREEN, not the accent. Everything else here is a tone of ui_accent
+ * on purpose (see the VU face); this breaks it knowingly, because the glow
+ * IS the instrument. The base plate is accent-tinted instead -- a chassis
+ * can follow the theme where the phosphor cannot. */
+#define EYE_GLASS_D 0x18E4u       /* envelope, in shadow                   */
+#define EYE_GLASS_L 0x530Du       /* envelope, on the specular streak      */
+#define EYE_GETTER  0x6BD0u       /* getter flash inside the crown         */
+#define EYE_SOCKET  0x1082u       /* base of the envelope, in the socket   */
+#define EYE_DARK    0x0082u       /* strip window, unexcited               */
+#define EYE_H2      0x0A89u       /* outer halo                            */
+#define EYE_H1      0x1DC3u       /* inner halo                            */
+#define EYE_LIT     0x57FCu       /* the phosphor itself                   */
+#define EYE_TUBE_W  34u
+#define EYE_TUBE_G  10u           /* gap between the pair                  */
+#define EYE_BAR_W    6u           /* the strip core; halos add 4 each side */
+#define EYE_DOME     9u           /* rows the crown curves through         */
+#define EYE_TUBE_H  58u
 static uint32_t eye_l, eye_r;     /* Q8 deflection, 0..255                 */
 static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
 static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
@@ -2580,44 +2598,72 @@ static void ui_draw_dynamic(void)
         }
 
         /* ---- MAGIC EYE (EM84) ---------------------------------------------
-         * Two tubes, one per channel; see the EYE_* block. The envelope is
-         * cached, so a frame touches only the strips. */
+         * Two tubes, one per channel. See the EYE_* block for why the glass
+         * is shaded per column and why the glow blooms. */
         if (viz_mode == VIZ_EYE) {
             if (wf || ww != eye_face_w) eye_face = 0;
 
             uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
-            uint32_t th   = UI_WAVE_H - 16u;              /* envelope height */
-            uint32_t ty   = UI_WAVE_Y + 3u;
+            uint32_t ty   = UI_WAVE_Y + 4u;
             uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
-            uint32_t bh   = th - 14u;             /* strip window inside it */
-            uint32_t by   = ty + 7u;
+            uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
+            uint32_t bh   = 34u;                     /* ...and its height   */
+            uint32_t basy = ty + EYE_TUBE_H + 1u;    /* plinth              */
+            uint16_t basc = ui_mix(bed, ui_accent, 1u, 3u);
 
             if (!eye_face) {
                 fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+
                 for (uint32_t ch = 0; ch < 2u; ch++) {
                     uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
-                    fb_round_rect(tx, ty, EYE_TUBE_W, th, 9u, EYE_GLASS);
-                    /* One lit edge reads as curvature. Without it the
-                     * envelope is a grey slab, not glass. */
-                    fb_rect(tx + 2u, ty + 9u, 1, th - 18u, EYE_EDGE);
-                    fb_rect(tx + (EYE_TUBE_W - EYE_BAR_W) / 2u - 2u, by,
-                            EYE_BAR_W + 4u, bh, EYE_DARK);
+                    uint32_t hw = EYE_TUBE_W / 2u;
+
+                    /* One vertical rect per column: the shade makes it a
+                     * cylinder, and the crown's curve is a per-column top
+                     * offset, so both come out of the same pass. */
+                    for (uint32_t i = 0; i < EYE_TUBE_W; i++) {
+                        uint32_t dx = (i < hw) ? (hw - i) : (i - hw);
+                        uint32_t yc = 0;             /* circle, as elsewhere */
+                        while ((yc + 1u) * (yc + 1u) + dx * dx <= hw * hw) yc++;
+                        uint32_t off = EYE_DOME - (EYE_DOME * yc) / hw;
+
+                        /* Specular streak left of centre, falling off faster
+                         * to the right -- lit from the upper left, like the
+                         * rest of the screen's shading. */
+                        uint32_t dl = (i < 8u) ? (8u - i) * 2u
+                                               : ((i - 8u) * 5u) / 4u;
+                        uint32_t lv = (dl < 28u) ? (31u - dl) : 3u;
+                        fb_rect(tx + i, ty + off, 1, EYE_TUBE_H - off,
+                                ui_mix(EYE_GLASS_D, EYE_GLASS_L, lv, 31u));
+                    }
+
+                    /* Pip on the crown, and the getter flash under it. */
+                    fb_rect(tx + hw - 2u, ty - 3u, 4, 4, EYE_GLASS_D);
+                    fb_rect(tx + 6u, ty + EYE_DOME + 1u,
+                            EYE_TUBE_W - 12u, 3, EYE_GETTER);
+                    /* Socket end: the glass goes into a base, so the bottom
+                     * rows are shadow rather than more cylinder. */
+                    fb_rect(tx + 1u, ty + EYE_TUBE_H - 6u,
+                            EYE_TUBE_W - 2u, 6, EYE_SOCKET);
+
+                    uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
+                    fb_rect(bx - 4u, by, EYE_BAR_W + 8u, bh, EYE_DARK);
+
+                    /* Scale ticks etched beside the strip, as on the real
+                     * tube's faceplate. */
+                    for (uint32_t t = 1; t < 4u; t++)
+                        fb_rect(bx + EYE_BAR_W + 5u, by + (bh * t) / 4u,
+                                2, 1, EYE_GETTER);
                 }
-                /* A base plate under the pair. Two capsules alone float in
-                 * the middle of a box four times their width; sitting them
-                 * on something reads as a piece of gear instead. This part
-                 * IS accent-tinted -- the plinth is the chassis, not the
-                 * tube, so it can follow the theme without the phosphor
-                 * having to. */
-                fb_round_rect(x0 - 8u, ty + th + 2u, pair + 16u, 6u, 2u,
-                              ui_mix(bed, ui_accent, 1u, 3u));
+
+                fb_round_rect(x0 - 8u, basy, pair + 16u, 5u, 2u, basc);
                 eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
             }
 
             for (uint32_t ch = 0; ch < 2u; ch++) {
-                /* VU ballistics per channel -- the tubes are pretending to
-                 * be the same era of gear as the needles, and two different
-                 * feels would read as two different instruments. */
+                /* VU ballistics per channel -- the tubes are imitating the
+                 * same era of gear as the needles, and two different feels
+                 * would read as two different instruments. */
                 uint32_t pk  = ch ? peak_r : peak_l;
                 uint32_t tgt = (pk * 255u) / 32768u;
                 if (tgt > 255u) tgt = 255u;
@@ -2628,6 +2674,12 @@ static void ui_draw_dynamic(void)
                                 if (*v < tgt) *v = tgt; }
 
                 uint8_t  lit   = (uint8_t)((*v * bh) / 255u);
+                /* A real tube is never fully dark -- the strip sits at a
+                 * short resting length with no signal, because the heater is
+                 * on. Going to zero made the pair look switched OFF during
+                 * quiet passages, which is the opposite of the impression a
+                 * glowing tube is here to give. */
+                if (lit < 3u) lit = 3u;
                 uint8_t *shown = ch ? &eye_shown_r : &eye_shown_l;
                 if (eye_face && lit == *shown) continue;   /* nothing moved */
 
@@ -2635,16 +2687,33 @@ static void ui_draw_dynamic(void)
                 uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
                 uint32_t ly = by + bh - lit;          /* the strip grows UP */
 
-                /* Lit span, its halo, then the dark remainder above it --
-                 * together exactly the strip window, so no pixel is left
-                 * holding the previous frame's value. */
+                /* Dark first, then the glow over it, so the window is fully
+                 * covered whichever way the strip moved. */
+                if (lit < bh) fb_rect(bx - 4u, by, EYE_BAR_W + 8u,
+                                      bh - lit, EYE_DARK);
                 if (lit) {
+                    fb_rect(bx - 4u, ly, 2, lit, EYE_H2);
+                    fb_rect(bx - 2u, ly, 2, lit, EYE_H1);
                     fb_rect(bx, ly, EYE_BAR_W, lit, EYE_LIT);
-                    fb_rect(bx - 2u, ly, 2, lit, EYE_GLOW);
-                    fb_rect(bx + EYE_BAR_W, ly, 2, lit, EYE_GLOW);
+                    fb_rect(bx + EYE_BAR_W, ly, 2, lit, EYE_H1);
+                    fb_rect(bx + EYE_BAR_W + 2u, ly, 2, lit, EYE_H2);
+                    /* Bloom ABOVE the tip. Without it the strip ends on a
+                     * hard edge and the whole thing reads as a rectangle
+                     * rather than as something glowing. */
+                    if (ly >= by + 2u) {
+                        fb_rect(bx - 2u, ly - 1u, EYE_BAR_W + 4u, 1, EYE_H1);
+                        fb_rect(bx - 1u, ly - 2u, EYE_BAR_W + 2u, 1, EYE_H2);
+                    }
                 }
-                if (lit < bh)
-                    fb_rect(bx - 2u, by, EYE_BAR_W + 4u, bh - lit, EYE_DARK);
+
+                /* ...and the glow reflected in the plinth, brightest at the
+                 * tube and fading down, the way the photographed pair
+                 * reflects in its acrylic. */
+                uint32_t rf = lit ? (lit * 4u) / bh + 1u : 0u;
+                for (uint32_t k = 0; k < 3u; k++)
+                    fb_rect(bx - 3u, basy + k, EYE_BAR_W + 6u, 1,
+                            (k < rf) ? ui_mix(basc, EYE_LIT, 3u - k, 9u)
+                                     : basc);
 
                 *shown = lit;
             }
