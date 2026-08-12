@@ -5148,23 +5148,25 @@ int main(void)
 
                         if (same || stale) {
                             pl_retry        = 0;
-                            /* Reopening the slot by the name APF is NOW
-                             * reporting makes it re-resolve the file, which is
-                             * what drops the fragment cache. Waiting alone does
-                             * not: the cache has no timeout. */
-                            if (stale) {
-                                char again[sizeof(pl_name_raw)];
-                                for (uint32_t i = 0; i < sizeof(again); i++)
-                                    again[i] = pl_name_raw[i];
-                                pl_open_into(PL_SLOT_ID, again);
-                            }
+                            /* 0190 already names the right file, so there is
+                             * nothing to reopen -- only APF's cached fragments
+                             * for slot 3, which still describe the old one.
+                             * Touching a different slot is the documented (and
+                             * here already proven) way to drop them. Waiting
+                             * would not: a cache has no timeout.
+                             *
+                             * Safe at this point specifically: the stream is
+                             * already flushed for the reload, so the re-walk
+                             * this costs lands in silence rather than starving
+                             * a running decode. */
+                            if (stale) target_flush_slot_cache();
                             pl_reload_armed = 1u;
                             /* A stale read has already changed name, so its
                              * probe fires at once -- this delay IS the settle.
                              * The `same` case is still waiting on the name, so
                              * it keeps the fast poll. */
                             pl_probe_at     = cycles() +
-                                              (stale ? CLK_HZ / 2u : CLK_HZ / 10u);
+                                              (stale ? CLK_HZ / 4u : CLK_HZ / 10u);
                             pl_reload_at    = cycles() + CLK_HZ * 5u;
                             continue;        /* indicator stays up across it */
                         }
