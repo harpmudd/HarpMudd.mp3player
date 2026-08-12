@@ -1945,6 +1945,11 @@ static void ui_boot_note(const char *msg)
     ui_boot_msg  = msg;
     ui_boot_t    = 0;
     ui_boot_next = 0;                       /* first tick paints immediately */
+    /* WIPE FIRST. On the splash this row is empty so it never mattered, but in
+     * the player it is the transport row -- PLAYING, the repeat and shuffle
+     * arrows, the EQ name -- and writing over it left the old glyphs showing
+     * around the shorter new text. */
+    fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
     fb_set_color(UI_WHITE, ui_boot_bg());
     /* Left-aligned at UI_MARGIN, like every other row on this screen and on
      * the player it is imitating. An earlier version centred the label and its
@@ -4907,7 +4912,10 @@ int main(void)
             /* Same gap: this gate waits at least 1.5 s before the track even
              * opens. The splash carries LOADING TRACK from the idle screen,
              * but with the player up there was nothing at all. */
-            ui_boot_note("LOADING TRACK");
+            /* The boot path sets resume_seek_req before the main loop, so the
+             * gate load that follows is part of RESUMING -- saying LOADING
+             * here overwrote the splash's own message with a contradiction. */
+            ui_boot_note(resume_seek_req ? "RESUMING TRACK" : "LOADING TRACK");
 
             /* Say so NOW, not when the gate below finally opens. That wait is
              * at least 1.5 s and can reach 5 s, and with the screen unchanged
@@ -4962,11 +4970,15 @@ int main(void)
                 /* The indicator went up when the pick was detected, not here.
                  * was_idle only decides what to restore if the open fails. */
                 int was_idle = idle;
-                if (!was_idle) ui_boot_note("LOADING TRACK");
+                if (!was_idle)
+                    ui_boot_note(resume_seek_req ? "RESUMING TRACK"
+                                                 : "LOADING TRACK");
                 int opened   = load_track();
                 ui_boot_cancel();          /* chrome has repainted the row */
+                /* Icons and the PLAYING label are tracked separately, so a
+                 * wiped row needs both invalidated or the label never returns. */
                 ui_mode_dirty = 1;
-                ui_boot_cancel();
+                ui_last_pause = 0xFFFFFFFFu;
 
                 if (!opened && was_idle) {
                     /* The splash went up to carry the indicator; put the
@@ -5081,6 +5093,7 @@ int main(void)
                      * in the player, and ui_mode_dirty below repaints it. */
                     ui_boot_cancel();
                     ui_mode_dirty = 1;
+                    ui_last_pause = 0xFFFFFFFFu;
                     pl_report();
                     /* Only take playback if nothing else is claiming it. A
                      * Load MP3 pick can bring a playlist notification with it,
