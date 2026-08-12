@@ -636,13 +636,6 @@ static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
 static uint8_t  screen_blank;         /* the screen is currently black         */
-/* Set once the boot sequence is done and the player owns the screen.
- *
- * The loading TOASTS exist for picks made from the menu with the player up.
- * During boot the splash already narrates itself on its own row -- LOADING
- * PLAYLIST, then RESUMING TRACK -- so a toast underneath saying LOADING TRACK
- * as well is the same news three times. */
-static uint8_t  boot_done;
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
 static uint8_t  stopped;                 /* Start: at 0:00, not merely paused  */
@@ -3099,23 +3092,6 @@ static void ui_draw_dynamic(void)
 #endif
 }
 
-/* Set a toast AND paint it, right now.
- *
- * ui_toast_msg() only sets state; the pixels arrive on the next
- * ui_draw_dynamic(). That is fine after a button press, but pl_load() and
- * load_track() BLOCK the main loop for the whole of their work -- so a toast
- * set before one of them does not appear until it has finished, which showed
- * up as "LOADING TRACK flashes briefly at the end". Painting it here puts it
- * on screen before the blocking call rather than after. */
-static void ui_toast_now(const char *msg)
-{
-    ui_toast_msg(msg);
-    /* Not while the screen is blanked -- ui_draw_dynamic() returns early
-     * there anyway, but being explicit keeps a load from being the one thing
-     * that lights the panel. (ui_dump_mode is declared further down and is a
-     * developer screen; it guards itself inside ui_draw_dynamic.) */
-    if (!screen_blank) ui_draw_dynamic();
-}
 
 /* cont1_key bit assignments (APF standard layout) */
 #define KEY_UP      (1u << 0)
@@ -4863,9 +4839,6 @@ int main(void)
                      : (const char *)0);
     }
 
-    /* The splash owns the screen until here. */
-    boot_done = 1u;
-
     for (;;) {
         poll_input();
 
@@ -4934,7 +4907,7 @@ int main(void)
             /* Same gap: this gate waits at least 1.5 s before the track even
              * opens. The splash carries LOADING TRACK from the idle screen,
              * but with the player up there was nothing at all. */
-            if (boot_done) ui_toast_now("LOADING TRACK");
+            ui_boot_note("LOADING TRACK");
 
             /* Say so NOW, not when the gate below finally opens. That wait is
              * at least 1.5 s and can reach 5 s, and with the screen unchanged
@@ -4989,8 +4962,10 @@ int main(void)
                 /* The indicator went up when the pick was detected, not here.
                  * was_idle only decides what to restore if the open fails. */
                 int was_idle = idle;
-                if (!was_idle && boot_done) ui_toast_now("LOADING TRACK");
+                if (!was_idle) ui_boot_note("LOADING TRACK");
                 int opened   = load_track();
+                ui_boot_cancel();          /* chrome has repainted the row */
+                ui_mode_dirty = 1;
                 ui_boot_cancel();
 
                 if (!opened && was_idle) {
@@ -5070,7 +5045,7 @@ int main(void)
              * the player still up and the old track still playing there is
              * otherwise nothing to show the pick registered. The boot row
              * cannot be used: UI_BOOT_Y is the live transport row. */
-            if (boot_done) ui_toast_now("LOADING PLAYLIST");
+            ui_boot_note("LOADING PLAYLIST");
             continue;
         }
 
@@ -5094,7 +5069,7 @@ int main(void)
                 if (changed || expired) {
                     pl_reload_armed = 0;
                     pl_load_n++;
-                    if (boot_done) ui_toast_now("LOADING PLAYLIST");
+                    ui_boot_note("LOADING PLAYLIST");
                     /* Same cut as a skip: pl_load() blocks on slot-3 reads for
                      * longer than the FIFO holds, and picking a playlist means
                      * leaving the current track anyway. */
@@ -5102,6 +5077,10 @@ int main(void)
                     refill_drain();
                     ring_fill = 0; ring_rd = 0;
                     pl_load();
+                    /* Release the row WITHOUT wiping: it is the transport row
+                     * in the player, and ui_mode_dirty below repaints it. */
+                    ui_boot_cancel();
+                    ui_mode_dirty = 1;
                     pl_report();
                     /* Only take playback if nothing else is claiming it. A
                      * Load MP3 pick can bring a playlist notification with it,
