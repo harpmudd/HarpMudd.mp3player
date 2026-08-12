@@ -194,6 +194,9 @@ framework bugs that had to be found first — is in
   past either says so instead of quietly playing fewer.
 - **No spectrum display.** The decoder doesn't expose frequency bins, so the
   meters show loudness, waveform and stereo instead.
+- **Very occasionally, picking a playlist does nothing.** No loading message,
+  no change — the core is never told the pick happened. Pick it again and it
+  loads. Rare, and not something a normal session tends to run into.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.

@@ -133,13 +133,33 @@ that takes many attempts to hit, which is why it has not been done.
 Cheap corroboration if it ever comes up in the wild: whether other cores with
 user-reloadable slots show the same thing. No compile needed.
 
-### Mitigation that IS shipped
+### Mitigations that ARE shipped
 
-`pl_check_req` — on the Analogue menu CLOSING, ask slot 3 what it holds and
-raise the load ourselves if it is not what is loaded. One 0190 at a moment
-where playback is already interrupted; a metadata query, not a slot read, so
-it does not cost the MP3 slot its fragment cache. Helps if the notification
-was dropped; cannot help if APF never made the assignment.
+Three, and after them the user could no longer reproduce it. None is PROVEN
+to be the fix — the fault took many attempts to hit, so absence is weak
+evidence — but all three earn their place on other grounds.
+
+1. **Row 262 has one owner.** UI_BOOT_Y and UI_TRANSPORT_Y are the same line,
+   so the transport repainted over LOADING PLAYLIST during the wait. A switch
+   can legitimately take seconds, and a garbled row during it reads as a dead
+   pick — so the user picks again. This alone removes a large part of the
+   reported behaviour whatever the root cause is.
+2. **`pl_check_req`** — on the Analogue menu CLOSING, ask slot 3 what it holds
+   and raise the load ourselves if it is not what is loaded. One 0190 at a
+   moment where playback is already interrupted; a metadata query, not a slot
+   read, so it does not cost the MP3 slot its fragment cache. Helps if the
+   notification was dropped; cannot help if APF never made the assignment.
+3. **`PAUSE_LOAD`** (the user's idea) — pause the outgoing track for the
+   duration of the switch. Takes the core's 0180 refill traffic off the bus
+   while APF is reassigning slot 3, which is the contention the user
+   suspected; and silence during the wait reads as WORKING, where music
+   continuing reads as nothing happening.
+
+If it ever returns it clears all three at once, leaving "APF never made the
+assignment" as the only surviving explanation.
+
+Documented in the README as a known limitation, so a user who does hit it
+knows to pick again rather than assuming the core is broken.
 
 # Enhancements
 
@@ -545,11 +565,6 @@ and elapsed/total.
 
 ### Buildable from what exists
 
-- **Magic Eye (6E5 / EM84)** -- user's idea, and the strongest. Pairs with the
-  VU needles as the vintage-gear set. 6E5 is the circular fan whose shadow
-  wedge closes as level rises; EM84 is twin horizontal bars meeting in the
-  middle, which gives L/R for free. Add phosphor persistence -- DECAY the green
-  rather than redrawing it, the same history decay the waterfall already uses.
 - **L/R isometric cube stacks** -- user's idea. Discrete blocks in fake-3D with
   peak-hold caps; the isometric projection is what keeps it distinct from the
   mirrored bars.
