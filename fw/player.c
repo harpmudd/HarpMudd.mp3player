@@ -669,6 +669,7 @@ static uint8_t  pl_reload_armed;
 static uint32_t pl_reload_at;        /* hard deadline: act regardless */
 static uint32_t pl_probe_at;         /* next slot-changed check */
 static char     pl_leaving[24];      /* the name we are switching AWAY from */
+static uint8_t  pl_retry;            /* one re-arm if the switch did not take */
 
 /* The playlist to reopen at boot, packed four characters per settings word.
  *
@@ -5063,6 +5064,7 @@ int main(void)
             for (uint32_t i = 0; i < sizeof(pl_leaving); i++)
                 pl_leaving[i] = pl_name_raw[i];
             pl_reload_armed = 1u;
+            pl_retry        = 1u;        /* one automatic second attempt */
             pl_probe_at     = cycles();
             pl_reload_at    = cycles() + CLK_HZ * 5u;
             /* Say something immediately. The gate below waits for APF to
@@ -5102,6 +5104,37 @@ int main(void)
                     refill_drain();
                     ring_fill = 0; ring_rd = 0;
                     pl_load();
+
+                    /* Did the switch actually happen?
+                     *
+                     * If the slot still reports the name we were leaving, APF
+                     * had not swapped it when the gate fired -- the probe saw
+                     * a stale 0190, or the five second cap expired first --
+                     * and we have just reloaded the OLD list. That is the
+                     * intermittent "pick it twice" fault, and it is DETECTABLE
+                     * here even though the race causing it is not reliably
+                     * reproducible.
+                     *
+                     * So make the second attempt ourselves. Once only: picking
+                     * the SAME playlist again is a legitimate case where the
+                     * name does not change, and that must cost one wasted
+                     * retry rather than a loop. */
+                    if (pl_retry) {
+                        int same = 1;
+                        for (uint32_t i = 0; i < sizeof(pl_leaving); i++) {
+                            if (pl_name_raw[i] != pl_leaving[i]) { same = 0; break; }
+                            if (!pl_leaving[i]) break;
+                        }
+                        if (same) {
+                            pl_retry        = 0;
+                            pl_reload_armed = 1u;
+                            pl_probe_at     = cycles() + CLK_HZ / 10u;
+                            pl_reload_at    = cycles() + CLK_HZ * 5u;
+                            continue;        /* indicator stays up across it */
+                        }
+                    }
+                    pl_retry = 0;
+
                     /* Release the row WITHOUT wiping: it is the transport row
                      * in the player, and ui_mode_dirty below repaints it. */
                     ui_boot_cancel();
