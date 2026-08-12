@@ -4957,6 +4957,10 @@ int main(void)
             if ((int32_t)(cycles() - reload_settle)   >= 0 &&
                 (int32_t)(cycles() - reload_probe_at) >= 0) {
                 reload_probe_at = cycles() + CLK_HZ / 10u;
+                /* Refreshed each probe: a toast holds ~1 s then dissolves, and
+                 * this gate waits at least 1.5 s, so without this it fades out
+                 * mid-load and reads as nothing happening. */
+                ui_toast_msg("LOADING TRACK");
                 uint32_t id = slot_file_id();
                 if (id != 0u && id != stale_ref_file_id) ready = 1;
             }
