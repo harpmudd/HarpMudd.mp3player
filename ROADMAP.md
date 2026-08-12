@@ -375,6 +375,57 @@ below is about.
 
 Roughly 2 hours, one hardware test.
 
+## Track changes take too long — user report 2026-08-12
+
+"Skipping titles needs a bit long time." Real, and measured rather than
+guessed: the load path is already instrumented as `ld_head`, `ld_size`,
+`ld_art`, `ld_pre` and `ld_total`. **Read those before optimising anything** --
+two earlier attempts to reason about this were wrong, and the numbers are
+already there.
+
+Artwork decode dominates. The known levers, in order:
+
+1. **`_tag_size` is 4 KB**, so an 847 KB cover costs ~207 target reads. Raising
+   it is a one-line change, but a read larger than 4 KB is UNPROVEN on this
+   hardware -- prove the read first, in isolation.
+2. **A scaled IDCT inside picojpeg.** Half scale is roughly quarter cost. The
+   reduce path already skips this for covers over 736 px, so the win is on
+   SMALL covers, which are the ones taking the full decode.
+3. Art is decoded before the first note plays. Decoding it AFTER playback
+   starts would hide the cost entirely, at the price of a panel that appears a
+   moment late. Probably the biggest perceived win for the least work.
+
+## Show the filename on screen — user request 2026-08-12
+
+"I wish that the file name is showing somewhere on the screen." Cheap and
+clearly right: `track_file` already holds it, filled by `slot_filename()` for
+the playlist work.
+
+Best placement is where the title goes **when a file has no ID3 tag**. The
+current fallback is a diagnostic string -- "(No ID3 Tag)" and friends -- which
+tells the user nothing they can act on, where the filename is usually the
+actual song name. Strictly better than what is there now.
+
+Worth considering as a permanent third line as well, but that costs vertical
+space the layout does not obviously have; the untagged case is free.
+
+## Hold-A for 1.2x is too easy to trigger by accident
+
+A user reported a track playing at "double speed". The likely cause is not a
+decode fault at all -- it is hold-A engaging 1.2x when they meant to pause.
+
+**PL_HOLD_MS is 400 ms**, shared with the Left/Right scrub. That is a sensible
+threshold for a deliberate scrub and a short one for a button whose tap action
+is PAUSE: pressing pause with any deliberation crosses it. The toast says
+SPEED 1.2x, but a user who was not looking at the screen just hears the music
+speed up for no reason.
+
+Options, cheapest first: a longer threshold for A alone (say 800 ms, since
+nothing about speed needs to be quick); require Select+A; or drop the gesture
+and put speed in Core Settings, which costs a slot but cannot be hit by
+accident. Confirm the cause before changing anything -- the user was asked and
+has not answered yet.
+
 ## Scrobble log (.scrobbler.log) — requested by a user 2026-08-11
 
 "Could the core write played tracks to a log file like Rockbox does, so I can
