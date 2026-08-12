@@ -1009,23 +1009,36 @@ static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
 static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
 static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
 
-/* Light thrown onto the panel either side of each tube, tracking the tip of
- * its own strip. The pair occupies 78 px of a box nearly four times that, and
- * spill is what a bright tube in a dark case actually does with the space.
+/* Light thrown onto the panel beside each tube. The pair occupies 78 px of a
+ * box nearly four times that, and spill is what a bright tube in a dark case
+ * does with the space.
  *
- * A cone: five bands stepping outward, each shorter than the last, weighted by
- * how far up the strip is. Only the OUTWARD side of each tube is lit -- the
- * 10 px between them has no room for a falloff and would just look smudged.
+ * Anchored to the MIDDLE of the tube, not to the tip of its strip. Tracking
+ * the tip was the first attempt and looked wrong for a reason worth keeping:
+ * the strip grows upward from the bottom, so at low level the tip -- and with
+ * it the whole pool of light -- sat down at the tube's base, as though the
+ * glow came from the socket. A tube lights the room from where the tube is.
  *
- * Quantised into 4-row strips. The bed is a dithered per-row gradient, so a
- * flat rect over several rows would band; re-mixing per row instead costs five
- * times the rects. Over four rows the ramp moves well under one level, so the
- * quantisation is invisible while the banding would not have been. */
-#define EYE_CAST_N   5u           /* bands stepping outward               */
-#define EYE_CAST_W   7u           /* px per band                          */
-#define EYE_CAST_H  24u           /* rows tall at the innermost band      */
-#define EYE_CAST_S   4u           /* rows per quantised strip             */
-static uint8_t eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;  /* tip last cast for */
+ * Elliptical falloff, so it reads as a pool rather than a wedge, and it
+ * reaches further out than the cone did.
+ *
+ * Driven by a SEPARATE, heavily smoothed level rather than by the strip.
+ * Light in a room does not snap, and this is a wash behind an instrument that
+ * is already showing the fast movement -- the smoothing is what makes it
+ * atmosphere instead of a second meter. It also pays for itself: quantised to
+ * a few steps, most frames leave it alone entirely.
+ *
+ * Self-erasing. The bounding box is FIXED now that the pool no longer moves,
+ * so bands past the current reach are painted with the bed itself and there is
+ * no separate erase pass. Quantised into 4-row strips: the bed is a dithered
+ * per-row gradient, and over four rows the ramp moves well under one level. */
+#define EYE_GLOW_RX    40u        /* how far the light reaches outward    */
+#define EYE_GLOW_RY    24u        /* ...and half how tall the pool is     */
+#define EYE_GLOW_NB     5u        /* bands across that reach              */
+#define EYE_GLOW_S      4u        /* rows per quantised strip             */
+#define EYE_GLOW_STEPS  6u        /* intensity steps; redrawn on a change */
+static uint32_t eye_gl_l, eye_gl_r;        /* slow-smoothed level         */
+static uint8_t  eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;   /* step drawn   */
 
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
@@ -2695,6 +2708,14 @@ static void ui_draw_dynamic(void)
                 else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
                                 if (*v < tgt) *v = tgt; }
 
+                /* A second, far slower follower for the cast light. */
+                uint32_t *g = ch ? &eye_gl_r : &eye_gl_l;
+                if (*v > *g) *g += (*v - *g + 15u) / 16u;
+                else         *g -= (*g - *v) / 16u;
+
+                uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
+                uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
+
                 uint8_t  lit   = (uint8_t)((*v * bh) / 255u);
                 /* A real tube is never fully dark -- the strip sits at a
                  * short resting length with no signal, because the heater is
@@ -2703,17 +2724,14 @@ static void ui_draw_dynamic(void)
                  * glowing tube is here to give. */
                 if (lit < 3u) lit = 3u;
                 uint8_t *shown = ch ? &eye_shown_r : &eye_shown_l;
-                if (eye_face && lit == *shown) continue;   /* nothing moved */
 
-                uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
-                uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
-                uint32_t ly = by + bh - lit;          /* the strip grows UP */
+                if (!eye_face || lit != *shown) {
+                    uint32_t ly = by + bh - lit;      /* the strip grows UP */
 
-                /* Dark first, then the glow over it, so the window is fully
-                 * covered whichever way the strip moved. */
-                if (lit < bh) fb_rect(bx - 4u, by, EYE_BAR_W + 8u,
-                                      bh - lit, EYE_DARK);
-                if (lit) {
+                    /* Dark first, then the glow over it, so the window is
+                     * fully covered whichever way the strip moved. */
+                    if (lit < bh) fb_rect(bx - 4u, by, EYE_BAR_W + 8u,
+                                          bh - lit, EYE_DARK);
                     fb_rect(bx - 4u, ly, 2, lit, EYE_H2);
                     fb_rect(bx - 2u, ly, 2, lit, EYE_H1);
                     fb_rect(bx, ly, EYE_BAR_W, lit, EYE_LIT);
@@ -2726,73 +2744,56 @@ static void ui_draw_dynamic(void)
                         fb_rect(bx - 2u, ly - 1u, EYE_BAR_W + 4u, 1, EYE_H1);
                         fb_rect(bx - 1u, ly - 2u, EYE_BAR_W + 2u, 1, EYE_H2);
                     }
+
+                    /* ...and reflected in the plinth, the way the
+                     * photographed pair reflects in its acrylic. */
+                    uint32_t rf = (lit * 4u) / bh + 1u;
+                    for (uint32_t k = 0; k < 3u; k++)
+                        fb_rect(bx - 3u, basy + k, EYE_BAR_W + 6u, 1,
+                                (k < rf) ? ui_mix(basc, EYE_LIT, 3u - k, 9u)
+                                         : basc);
+                    *shown = lit;
                 }
 
-                /* Light thrown onto the panel beside the tube, following
-                 * the tip. See the EYE_CAST_* block.
-                 *
-                 * Erase the old cone before drawing the new one: it MOVES
-                 * vertically, so unlike the strip it never covers where it
-                 * was. One bounding box, in the same 4-row strips, since the
-                 * widest band is the innermost. */
-                {
-                    uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
-                    uint32_t reach = EYE_CAST_N * EYE_CAST_W;
-                    uint32_t cx0   = ch ? (tx + EYE_TUBE_W) : (tx - reach);
+                /* The pool of light beside the tube. See the EYE_GLOW_*
+                 * block: fixed centre, elliptical, slow, and only touched
+                 * when its quantised level actually changes. */
+                uint8_t  step = (uint8_t)((*g * EYE_GLOW_STEPS) / 256u);
+                uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
+                if (!eye_face || step != *cast) {
+                    uint32_t gcy  = ty + EYE_TUBE_H / 2u;
+                    uint32_t bw   = EYE_GLOW_RX / EYE_GLOW_NB;
+                    uint32_t base = ch ? (tx + EYE_TUBE_W)
+                                       : (tx - EYE_GLOW_RX);
+                    uint32_t amt  = (step * 18u) / EYE_GLOW_STEPS;
 
-                    for (uint32_t pass = 0; pass < 2u; pass++) {
-                        uint32_t tip;
-                        if (pass == 0) {
-                            if (*cast == 0xFFu) continue;      /* nothing yet */
-                            tip = UI_WAVE_Y + *cast;
-                        } else {
-                            tip = ly;
+                    for (uint32_t k = 0; k < 2u * EYE_GLOW_RY;
+                         k += EYE_GLOW_S) {
+                        uint32_t y  = gcy - EYE_GLOW_RY + k;
+                        uint32_t dy = (y + EYE_GLOW_S / 2u > gcy)
+                                    ? (y + EYE_GLOW_S / 2u - gcy)
+                                    : (gcy - y - EYE_GLOW_S / 2u);
+                        /* Half-width of the ellipse at this row, by the same
+                         * integer circle search the crown uses. */
+                        uint32_t yc = 0;
+                        while ((yc + 1u) * (yc + 1u) + dy * dy
+                               <= EYE_GLOW_RY * EYE_GLOW_RY) yc++;
+                        uint32_t rx = (EYE_GLOW_RX * yc) / EYE_GLOW_RY;
+                        uint16_t bg = ui_grad_at(y);
+
+                        for (uint32_t b = 0; b < EYE_GLOW_NB; b++) {
+                            uint32_t d   = b * bw + bw / 2u;   /* from tube */
+                            uint32_t wgt = (d < rx)
+                                         ? (amt * (rx - d)) / EYE_GLOW_RX : 0u;
+                            uint32_t gx  = ch
+                                         ? (base + b * bw)
+                                         : (base + (EYE_GLOW_NB - 1u - b) * bw);
+                            fb_rect(gx, y, bw, EYE_GLOW_S,
+                                    wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
                         }
-
-                        /* Clamp so a tip near either end of the window cannot
-                         * push the cone outside the meter box. */
-                        uint32_t top = (tip > UI_WAVE_Y + EYE_CAST_H / 2u)
-                                     ? (tip - EYE_CAST_H / 2u) : UI_WAVE_Y;
-                        if (top + EYE_CAST_H > UI_WAVE_Y + UI_WAVE_H)
-                            top = UI_WAVE_Y + UI_WAVE_H - EYE_CAST_H;
-
-                        if (pass == 0) {
-                            for (uint32_t k = 0; k < EYE_CAST_H;
-                                 k += EYE_CAST_S)
-                                fb_rect(cx0, top + k, reach, EYE_CAST_S,
-                                        ui_grad_at(top + k));
-                            continue;
-                        }
-
-                        uint32_t amt = (lit * 14u) / bh;
-                        for (uint32_t b = 0; b < EYE_CAST_N; b++) {
-                            uint32_t vh = EYE_CAST_H - b * EYE_CAST_S;
-                            uint32_t y  = top + (EYE_CAST_H - vh) / 2u;
-                            uint32_t bxo = ch ? (cx0 + b * EYE_CAST_W)
-                                              : (cx0 + (EYE_CAST_N - 1u - b)
-                                                       * EYE_CAST_W);
-                            uint32_t wgt = (amt * (EYE_CAST_N - b))
-                                         / EYE_CAST_N;
-                            if (!wgt) continue;
-                            for (uint32_t k = 0; k < vh; k += EYE_CAST_S)
-                                fb_rect(bxo, y + k, EYE_CAST_W, EYE_CAST_S,
-                                        ui_mix(ui_grad_at(y + k), EYE_LIT,
-                                               wgt, 64u));
-                        }
-                        *cast = (uint8_t)(ly - UI_WAVE_Y);
                     }
+                    *cast = step;
                 }
-
-                /* ...and the glow reflected in the plinth, brightest at the
-                 * tube and fading down, the way the photographed pair
-                 * reflects in its acrylic. */
-                uint32_t rf = lit ? (lit * 4u) / bh + 1u : 0u;
-                for (uint32_t k = 0; k < 3u; k++)
-                    fb_rect(bx - 3u, basy + k, EYE_BAR_W + 6u, 1,
-                            (k < rf) ? ui_mix(basc, EYE_LIT, 3u - k, 9u)
-                                     : basc);
-
-                *shown = lit;
             }
 
             eye_face   = 1;
