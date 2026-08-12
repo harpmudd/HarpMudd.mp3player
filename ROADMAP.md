@@ -17,98 +17,74 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Resume only works with the DEFAULT playlist — branch `resume-playlist-name`
+## Resume only works with the DEFAULT playlist — FIXED in v1.2.0, awaiting final QA
 
-Reported by a user against v1.1.0. Resume restores track and position fine with
-`playlist.m3u`, but a user running `audiobook.m3u` does not get their place
-back. Multiple named playlists is a reasonable thing to do and the feature
-should support it.
+Reported against v1.1.0: resume restored track and position with
+`playlist.m3u`, but a user running `audiobook.m3u` never got their place back.
 
-### What is already established, without a hardware round
+### The theory that was wrong, and how it was killed
 
-**The firmware never names a playlist.** `pl_load()` reads whatever APF has put
-in slot 3; nothing in `fw/` contains the string `playlist.m3u` outside a
-getting-started caption. So the behaviour CANNOT differ between two playlists
-because of our code -- the difference has to be in what APF puts in the slot.
+The firmware never names a playlist -- `pl_load()` reads whatever APF put in
+slot 3 -- so the behaviour could only differ because of what APF put there.
+`data.json` declared `filename: playlist.m3u` on slot 3 and nothing on slot 2,
+and slot 2 is the one proven to retain a pick. The natural conclusion was that
+a declared filename resets the slot.
 
-**And `data.json` is the only thing that distinguishes them:**
+Half right. Removing the declaration was tested on hardware and made it WORSE:
+APF then prompted for a playlist at every boot, and a picked list still did not
+come back. **Slot 3 is not retained either way** -- reset to the declared file
+with one, empty and prompting without. There is no arrangement of `data.json`
+that remembers a pick, which is what forced the real fix.
 
-| slot | declared `filename` | retained across launches? |
-|------|--------------------|---------------------------|
-| 2 MP3 | none | YES -- proven; resume depends on it |
-| 3 Playlist | `playlist.m3u` | reported NO |
+### What actually shipped
 
-So the leading theory is that **a slot with a declared `filename` is reset to
-that file at core load, while a slot without one keeps the user's pick.** That
-fits both observations exactly and needs no new mechanism to explain.
+Storing the name, because APF cannot enumerate a directory and `0192` can only
+open something already held. That needed slots, and all eight were used:
 
-**NOT yet confirmed.** It is a deduction from one report plus the slot table.
-Confirm before building on it.
+- **RTL:** settings index 3 bits -> 4, register file 8 words -> 16,
+  `CORE_VERSION` -> rev 21. Timing closed at 1.029 ns on the 100 MHz domain,
+  down from 1.270 but positive; RAM blocks unchanged at 300/308 because
+  `ramstyle = "logic"` keeps the file in fabric.
+- **Firmware:** three words hold twelve characters of the playlist STEM, four
+  7-bit chars per word with bit 31 clear (APF stores these signed). `.m3u` is
+  implied. `pl_load()` reopens the remembered stem by name, at boot only.
 
-### The confirmation, which is also a feature
-
-`pl_name_read()` asks 0190 for slot 3's filename and the splash summary now
-prints it in place of the word PLAYLIST -- `AUDIOBOOK.M3U  12 TRACKS`. Useful
-on its own for anyone running more than one list, and it settles the theory in
-a single boot:
-
-- launch after picking `audiobook.m3u`, and the splash says **PLAYLIST.M3U**
-  -> the slot was reset, theory confirmed
-- it says **AUDIOBOOK.M3U** -> the slot IS retained and the fault is elsewhere,
-  theory dead, look at the saved track index instead
-
-### The fix, if the theory holds
-
-**Remove `"filename": "playlist.m3u"` from slot 3**, so it retains the last
-pick like the MP3 slot does. That alone breaks first-run behaviour -- a card
-with `playlist.m3u` on it would no longer auto-load -- so pair it with: at
-boot, if the slot is empty, open `playlist.m3u` into it BY NAME with 0192.
-`pl_open_name()` already does that shape of open; it would need a variant
-targeting slot 3.
-
-Net effect: the default still loads for a new user, and a user who picks
-another list keeps it. **No settings slot, no RTL, no CORE_VERSION bump.**
-
-### Why NOT to store the playlist name in a setting
-
-The obvious alternative is saving the name alongside the resume point. It is
-much worse:
-
-- Settings words are 32-bit ints. A name needs four words for sixteen
-  characters, and **there are no free slots** -- widening the index means RTL,
-  a CORE_VERSION bump and a timing round.
-- APF has no directory listing, so a stored name only helps if we can reopen it
-  by name -- which is exactly what the cheap fix does anyway, without storing
-  anything.
-
-Only worth revisiting if the slot genuinely cannot be made to retain.
+Two faults found on the way, both worth keeping in mind for anything similar:
+restoring on EVERY `pl_load()` overrode the user's own pick, because that
+function runs for a menu choice as well as at boot; and storing the stem
+uppercased asked APF for `SHENANIGANS.m3u` against a card holding
+`Shenanigans.m3u`.
 
 ### SCOPE, and it must be in the README before release
 
 **One remembered playlist and one position, not one per playlist.** There is a
-single saved stem and a single packed point, so switching lists overwrites
-what was held for the previous one.
+single saved stem and a single packed point, so switching lists overwrites what
+was held for the previous one.
 
 The consequence a user will hit: partway through `audiobook.m3u`, switch to
 `music.m3u`, and the audiobook's place is gone -- returning to it starts at
 track 1. "It remembers where you were" reads as a per-book bookmark, and that
 is not what this is.
 
-Per-playlist positions would need a stem plus a point for each, so four
-settings words each against five free after this release -- one more playlist
-and it needs another register widen. Not worth it unless someone asks.
+Per-playlist positions would need a stem plus a point each, four words apiece
+against five slots free after this release -- a second one needs another
+register widen. Not worth it unless someone asks.
 
-Wording for the README, roughly: "The core remembers the last playlist you
-used and your place in it. Switching to another playlist replaces what it was
+Wording for the README, roughly: "The core remembers the last playlist you used
+and your place in it. Switching to another playlist replaces what it was
 holding, so it is one bookmark rather than one per list."
 
-### Version
+### Still open
 
-**v1.1.1.** It is a defect in a shipped feature, not new capability: resume is
-documented as remembering your place in a playlist and does not, for anyone
-not using the default name. Naming the playlist on the splash is a small
-visible addition riding along, which is a patch-release judgement call rather
-than a minor bump.
+- **Intermittent double-load when switching playlists.** A reload gate was
+  added -- record the name being left, poll 0190 until it differs -- and it has
+  behaved since, but nothing proves it. `UI_SHOW_SPEED_DIAG 1` brings back the
+  N and L counters: N is notifications delivered, L is loads performed, and one
+  moving without the other names the layer.
+- **Full QA pass.** This is the first bitstream change in months, and the
+  drawing paths were reworked throughout.
+- **Version is v1.2.0**, not the v1.1.1 first estimated: the fix needed new
+  RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
 
 # Enhancements
 
