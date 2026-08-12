@@ -1032,20 +1032,30 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * so bands past the current reach are painted with the bed itself and there is
  * no separate erase pass. Quantised into 4-row strips: the bed is a dithered
  * per-row gradient, and over four rows the ramp moves well under one level. */
-#define EYE_GLOW_RX    56u        /* how far the light reaches outward    */
-#define EYE_GLOW_RY    24u        /* ...and half how tall the pool is     */
-#define EYE_GLOW_NB     7u        /* bands across that reach -- 8px each  */
+#define EYE_GLOW_RX    72u        /* how far the light reaches outward    */
+#define EYE_GLOW_RY    20u        /* ...and half how tall the pool is     */
+#define EYE_GLOW_NB     9u        /* bands across that reach -- 8px each  */
 #define EYE_GLOW_S      4u        /* rows per quantised strip             */
-#define EYE_GLOW_STEPS  6u        /* intensity steps; redrawn on a change */
+#define EYE_GLOW_STEPS  6u        /* intensity steps                      */
 #define EYE_GLOW_PEAK  26u        /* strongest mix, out of 64             */
-/* The pool RIDES a little with the strip -- not tracking its tip, which put
- * the light down at the socket, but drifting a few pixels up as the level
- * rises. Anchoring it dead still read as a lamp behind the tube rather than
- * as the tube's own glow; a small sympathetic movement is what ties them
- * together. Quantised like the intensity, so it costs redraws only when it
- * actually shifts. */
-#define EYE_GLOW_TRAV   6u        /* half the total drift, in rows        */
-#define EYE_GLOW_POS    6u        /* positions across that drift          */
+#define EYE_GLOW_POS    8u        /* vertical positions across the travel */
+/* POSITION and BRIGHTNESS come from different places, and that split is the
+ * point.
+ *
+ * The pool sits on the MIDDLE OF THE LIT STRIP, taken from the same fast
+ * value the strip itself is drawn from, so the two cannot drift apart --
+ * driving the position from the slow follower is what made the light lag
+ * visibly behind the bars. As the strip grows upward its midpoint rises, so
+ * the light rises with it; at rest it sits low, where the lit part actually
+ * is. That is also the earlier "it comes from the socket" complaint answered
+ * properly: the light was following the TIP, which is the one part of the
+ * strip that is nowhere near the middle of the glow.
+ *
+ * Brightness keeps the slow follower. Light in a room does not snap, and this
+ * is a wash behind an instrument already showing the fast movement.
+ *
+ * Both are quantised -- eight positions, six intensities -- so a redraw costs
+ * only when one of them actually steps. */
 static uint32_t eye_gl_l, eye_gl_r;        /* slow-smoothed level         */
 static uint8_t  eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;   /* step drawn   */
 
@@ -2731,10 +2741,11 @@ static void ui_draw_dynamic(void)
                 else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
                                 if (*v < tgt) *v = tgt; }
 
-                /* A second, far slower follower for the cast light. */
+                /* A second, slower follower -- for the cast light's
+                 * BRIGHTNESS only. Its position comes off the strip. */
                 uint32_t *g = ch ? &eye_gl_r : &eye_gl_l;
-                if (*v > *g) *g += (*v - *g + 15u) / 16u;
-                else         *g -= (*g - *v) / 16u;
+                if (*v > *g) *g += (*v - *g + 7u) / 8u;
+                else         *g -= (*g - *v) / 8u;
 
                 uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
                 uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
@@ -2782,13 +2793,17 @@ static void ui_draw_dynamic(void)
                  * block: fixed centre, elliptical, slow, and only touched
                  * when its quantised level actually changes. */
                 uint8_t  step = (uint8_t)((*g * EYE_GLOW_STEPS) / 256u);
-                uint32_t pos  = (*g * EYE_GLOW_POS) / 256u;
-                uint8_t  key  = (uint8_t)(step * 8u + pos);
+                uint32_t pos  = ((uint32_t)lit * EYE_GLOW_POS) / bh;
+                uint8_t  key  = (uint8_t)(step * 16u + pos);
                 uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
                 if (!eye_face || key != *cast) {
-                    uint32_t gcy  = ty + EYE_TUBE_H / 2u + EYE_GLOW_TRAV
-                                  - (pos * 2u * EYE_GLOW_TRAV)
-                                    / (EYE_GLOW_POS - 1u);
+                    /* Midpoint of the lit strip, then held inside the box
+                     * so a pool centred low cannot run off the bottom. */
+                    uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
+                    if (gcy < UI_WAVE_Y + EYE_GLOW_RY)
+                        gcy = UI_WAVE_Y + EYE_GLOW_RY;
+                    if (gcy + EYE_GLOW_RY > UI_WAVE_Y + UI_WAVE_H)
+                        gcy = UI_WAVE_Y + UI_WAVE_H - EYE_GLOW_RY;
                     uint32_t bw   = EYE_GLOW_RX / EYE_GLOW_NB;
                     uint32_t base = ch ? (tx + EYE_TUBE_W)
                                        : (tx - EYE_GLOW_RX);
