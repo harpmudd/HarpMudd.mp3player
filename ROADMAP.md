@@ -470,6 +470,64 @@ decoding the next track's opening frames *while* the current one is still
 playing, which needs a second decoder instance (~34 KB heap) and a second ring.
 Memory is the constraint, not logic.
 
+## More meters — idea bank (user, 2026-08-12)
+
+"I'd occasionally like to slip a new one in every once in a while." So this is
+a standing list, not a task. Nine exist: bars, waterfall, L/R levels, phase
+scope, oscilloscope, VU needles, scrolling waveform, mirrored bars, peak dots.
+
+**APPEND to the `VIZ_*` enum, never reorder it.** `viz_mode` persists as an
+INDEX, so inserting a meter in the middle silently repoints every user's saved
+preference at a different one. Same rule as the interact.json ids. Adding one
+is otherwise self-contained: an enum entry, a draw block in `ui_draw_dynamic`,
+and a name in the toast chain.
+
+**What a new meter can read for free.** The per-frame loop at the `peak_l`/
+`peak_r` computation already visits EVERY sample of every decoded frame, so
+anything derived per-sample costs only the arithmetic, not the traversal.
+Available today: peak L, peak R, the `wave[]` history, the scope sample spread,
+and elapsed/total.
+
+### Buildable from what exists
+
+- **Magic Eye (6E5 / EM84)** -- user's idea, and the strongest. Pairs with the
+  VU needles as the vintage-gear set. 6E5 is the circular fan whose shadow
+  wedge closes as level rises; EM84 is twin horizontal bars meeting in the
+  middle, which gives L/R for free. Add phosphor persistence -- DECAY the green
+  rather than redrawing it, the same history decay the waterfall already uses.
+- **L/R isometric cube stacks** -- user's idea. Discrete blocks in fake-3D with
+  peak-hold caps; the isometric projection is what keeps it distinct from the
+  mirrored bars.
+- **Vinyl platter and tonearm** -- platter spins, arm creeps inward with track
+  progress, highlight pulses with level. Uses elapsed/total, which no current
+  meter visualises.
+- **Tape reels** -- same data. The supply reel speeding up as it empties is the
+  detail that sells it.
+- **Radar sweep** -- a line sweeps a circle painting level as radius, with a
+  decaying trail. Polar version of the scrolling waveform.
+
+### Needs one enabler: a bass proxy
+
+A **one-pole lowpass in the existing per-sample loop** -- a shift and an add.
+Unlocks:
+
+- **Beating speaker cone** -- user's idea, and it NEEDS this. Driven by overall
+  level it wobbles on everything and reads wrong; driven by bass energy it
+  thumps on kicks.
+- **Ferrofluid spikes**, and **pressure rings** emitted on each kick.
+
+### The one that unlocks the most: an RTL filter bank
+
+[[Spectrum display]] below says the decoder exposes no frequency bins. True,
+and beside the point -- what is needed is a filter bank, and **the EQ is
+already biquads in hardware**. An analysis bank in RTL costs LOGIC, not BRAM
+(the resource at 97%), and zero CPU. Retires the known limitation and unlocks
+true spectrum bars, a real spectrogram waterfall, and a graphic-EQ display.
+
+In firmware instead: possible on a decimated signal, but decode leaves roughly
+14 MHz of the 60 at 1x (derived from the measured 54.8 MHz at 1.2x, not
+measured directly) and nothing at 1.2x.
+
 ## Spectrum display
 
 The decoder doesn't expose frequency bins, so every meter shows loudness,
