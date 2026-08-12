@@ -161,6 +161,25 @@ assignment" as the only surviving explanation.
 Documented in the README as a known limitation, so a user who does hit it
 knows to pick again rather than assuming the core is broken.
 
+## Headerless VBR still estimates the total time — dropped from the README
+
+Removed from Known limitations 2026-08-12 as too narrow to be worth a user's
+attention, and recorded here so it is not simply forgotten.
+
+Still true: a VBR file with no Xing/Info/VBRI header has no frame count and no
+fixed byte rate, so the total is derived from a drifting estimate and reads
+wrong. CBR without a header is exact — that was the 1.2x seek fix, which
+computes the rate from the first frame.
+
+Near-unreachable in practice: LAME and every mainstream VBR encoder write a
+Xing header, so this needs a file from an unusual encoder or one that has had
+its header stripped. `tools/xing_check.py` reports which files in a folder
+carry one, if evidence is ever wanted.
+
+Restore the README line if anyone reports a wrong duration — the symptom is
+otherwise baffling, and the cause is a property of their file rather than
+anything they can see.
+
 # Enhancements
 
 ## PNG album art — MEASURED AND DEPRIORITIZED

@@ -168,17 +168,12 @@ framework bugs that had to be found first — is in
 
 ## Known limitations
 
-- **Total time is approximate on a VBR file with no Xing/Info/VBRI header** —
-  an unusual combination, since VBR encoders normally write one. Everything
-  else is exact.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
 - **JPEG album art only.** PNG covers are skipped rather than shown wrong —
   see [ROADMAP.md](ROADMAP.md).
 - **Playlists are capped at 128 tracks**, or 16 KB of `.m3u` text — whichever
   comes first, which allows about 128 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **No spectrum display.** The decoder doesn't expose frequency bins, so the
-  meters show loudness, waveform and stereo instead.
 - **Very occasionally, picking a playlist does nothing.** No loading message,
   no change — the core is never told the pick happened. Pick it again and it
   loads. Rare, and not something a normal session tends to run into.
