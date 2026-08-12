@@ -64,6 +64,11 @@ step. **Where you were in a playlist is remembered too** — the track and your
 position in it, so a long listen picks up where it stopped. Turn that off with
 **Resume playback** in Core Settings.
 
+It is **one bookmark, not one per playlist**. The core remembers the last
+playlist you used and your place in it; switching to another replaces what it
+was holding. Leave `audiobook.m3u` partway through, listen to `music.m3u`, and
+the audiobook starts again from the beginning next time.
+
 That applies to playlist playback only. A file opened with **Load MP3** plays
 without recording a position, which also means a quick listen to something else
 won't cost you your place. For an audiobook, put it in a playlist — a one-line
@@ -153,7 +158,8 @@ not how many lines the file has.
 <img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
 - **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
-  files that carry nothing else.
+  files that carry nothing else. A file with no readable tag shows its
+  filename, which is usually the song name anyway.
 - **Album art** from the tag's embedded image — JPEG only; tracks without it
   don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
