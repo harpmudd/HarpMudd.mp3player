@@ -962,31 +962,34 @@ static uint8_t  vu_face;          /* the static face is on screen        */
 static uint16_t vu_face_w;        /* ...and the width it was drawn for   */
 static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 
-/* ---- Magic eye (6E5 indicator tube) -----------------------------------
+/* ---- Magic eye (EM84 indicator tube) ----------------------------------
  *
- * A circular phosphor target with a dark wedge that CLOSES as the signal
- * rises -- silence is a wide shadow, full scale is none. Shares the VU's
- * ballistics deliberately: both are pretending to be the same era of gear,
- * and two different feels would read as two different instruments.
+ * The BAR type, not the 6E5 circular fan I built first: two glass tubes
+ * side by side, each with a vertical fluorescent strip whose LENGTH
+ * follows its channel. One tube for left, one for right, the way the real
+ * pair is wired.
  *
- * Drawn as ROW SPANS, not radial spokes. Spokes are the obvious way to fill
- * a wedge and cost roughly 1200 fb_rect calls a frame, each one waiting on
- * the hardware. A circle and a wedge are both row-shaped, so one span per
- * scanline does the same job -- and once the disc is cached, only the few
- * pixels the wedge edge actually moved are repainted.
+ * Everything here is an axis-aligned rect, so it is cheaper than the fan
+ * as well as being the right instrument. The envelopes and the unlit
+ * strips are cached like the VU face, so a frame repaints only the strips:
+ * four rects a channel, eight in all.
  *
- * GREEN, not the accent. Everything else on this screen is a tone of
- * ui_accent, on purpose (see the VU face). This one breaks that rule
- * knowingly: a magic eye that is not that specific green is not a magic
- * eye, it is a pie chart. */
-#define EYE_GREEN   0x37ECu       /* phosphor                              */
-#define EYE_DIM     0x1B26u       /* rim falloff: the envelope's edge      */
-#define EYE_SHADOW  0x0942u       /* the wedge -- dark, but still greenish */
-static uint32_t eye_v;            /* Q8 deflection, 0..255                 */
-static uint8_t  eye_face;         /* the static disc is on screen          */
-static uint16_t eye_face_w;       /* ...and the width it was drawn for     */
-static uint8_t  eye_shown;        /* deflection the wedge is drawn for     */
-static uint8_t  eye_hw[40];       /* circle half-width per row, by |dy|    */
+ * CYAN-GREEN, not the accent. Everything else on this screen is a tone of
+ * ui_accent, on purpose (see the VU face). This breaks that knowingly --
+ * the glow IS the instrument, and in any other colour this is just a bar
+ * meter, which the screen already has two of. */
+#define EYE_GLASS   0x2860u       /* smoked envelope                       */
+#define EYE_EDGE    0x39E7u       /* highlight down one side of the glass  */
+#define EYE_DARK    0x08C3u       /* strip, unexcited                      */
+#define EYE_GLOW    0x1C0Du       /* halo either side of the strip         */
+#define EYE_LIT     0x47FBu       /* the phosphor itself                   */
+#define EYE_TUBE_W  30u
+#define EYE_TUBE_G   8u           /* gap between the pair                  */
+#define EYE_BAR_W   10u
+static uint32_t eye_l, eye_r;     /* Q8 deflection, 0..255                 */
+static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
+static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
+static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
 
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
@@ -2349,7 +2352,7 @@ static void ui_draw_dynamic(void)
      * a graphic, and freezing it half-shut looks broken. eye_v counts DOWN to
      * rest, so "not yet settled" is a non-zero deflection, same as the VU. */
     uint32_t vu_settling = ((viz_mode == VIZ_VU)  && (vu_l || vu_r)) ||
-                           ((viz_mode == VIZ_EYE) && eye_v);
+                           ((viz_mode == VIZ_EYE) && (eye_l || eye_r));
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
 
@@ -2576,113 +2579,77 @@ static void ui_draw_dynamic(void)
             goto viz_done;
         }
 
-        /* ---- MAGIC EYE ----------------------------------------------------
-         * See the EYE_* block for why this is drawn as row spans and why it
-         * is green. Two passes: a cached disc, then a wedge that repaints
-         * only the pixels its edge actually crossed. */
+        /* ---- MAGIC EYE (EM84) ---------------------------------------------
+         * Two tubes, one per channel; see the EYE_* block. The envelope is
+         * cached, so a frame touches only the strips. */
         if (viz_mode == VIZ_EYE) {
             if (wf || ww != eye_face_w) eye_face = 0;
 
-            /* Fit the box on whichever axis is tighter -- the width moves with
-             * the art panel, so a radius derived from height alone would run
-             * off the sides once the panel is hidden. */
-            uint32_t r = (UI_WAVE_H / 2u) - 2u;
-            uint32_t rw = (ww / 2u > 2u) ? (ww / 2u - 2u) : 1u;
-            if (r > rw) r = rw;
-            if (r > sizeof(eye_hw) - 1u) r = sizeof(eye_hw) - 1u;
-            uint32_t hub = r / 6u;                  /* the cathode shield */
-            uint32_t cx  = UI_MARGIN + ww / 2u;
-            uint32_t cy  = UI_WAVE_Y + UI_WAVE_H / 2u;
-
-            /* VU ballistics, on the loudest channel. peak_amp is already the
-             * max of the two, which is what a single-eye tube would show. */
-            uint32_t tgt = (peak_amp * 255u) / 32768u;
-            if (tgt > 255u) tgt = 255u;
-            if (paused) tgt = 0;
-            if (tgt > eye_v) { eye_v += VU_ATT; if (eye_v > tgt) eye_v = tgt; }
-            else             { eye_v = (eye_v > VU_DEC) ? (eye_v - VU_DEC) : 0u;
-                               if (eye_v < tgt) eye_v = tgt; }
+            uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
+            uint32_t th   = UI_WAVE_H - 16u;              /* envelope height */
+            uint32_t ty   = UI_WAVE_Y + 3u;
+            uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
+            uint32_t bh   = th - 14u;             /* strip window inside it */
+            uint32_t by   = ty + 7u;
 
             if (!eye_face) {
                 fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
-
-                /* Half-width per row by integer search, ONCE per geometry --
-                 * ~35 iterations total, against a sqrt per row per frame. */
-                for (uint32_t dy = 0; dy <= r; dy++) {
-                    uint32_t rem = r * r - dy * dy;
-                    uint32_t k = 0;
-                    while ((k + 1u) * (k + 1u) <= rem) k++;
-                    eye_hw[dy] = (uint8_t)k;
-
-                    /* Rim rows get the dimmer tone so the disc has an edge
-                     * rather than a hard cut against the gradient. */
-                    uint16_t c = (dy > r - 2u) ? EYE_DIM : EYE_GREEN;
-                    fb_rect(cx - k, cy - dy, 2u * k + 1u, 1, c);
-                    if (dy) fb_rect(cx - k, cy + dy, 2u * k + 1u, 1, c);
+                for (uint32_t ch = 0; ch < 2u; ch++) {
+                    uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
+                    fb_round_rect(tx, ty, EYE_TUBE_W, th, 9u, EYE_GLASS);
+                    /* One lit edge reads as curvature. Without it the
+                     * envelope is a grey slab, not glass. */
+                    fb_rect(tx + 2u, ty + 9u, 1, th - 18u, EYE_EDGE);
+                    fb_rect(tx + (EYE_TUBE_W - EYE_BAR_W) / 2u - 2u, by,
+                            EYE_BAR_W + 4u, bh, EYE_DARK);
                 }
-
-                /* Hub last: the wedge converges on it, which is what makes
-                 * the shadow read as cast BY something. */
-                for (uint32_t dy = 0; dy <= hub; dy++) {
-                    uint32_t rem = hub * hub - dy * dy;
-                    uint32_t k = 0;
-                    while ((k + 1u) * (k + 1u) <= rem) k++;
-                    fb_rect(cx - k, cy - dy, 2u * k + 1u, 1, EYE_SHADOW);
-                    if (dy) fb_rect(cx - k, cy + dy, 2u * k + 1u, 1, EYE_SHADOW);
-                }
-
-                /* 255 == fully closed == no wedge on screen, which is exactly
-                 * what the disc we just drew shows. */
-                eye_shown = 255u;
+                /* A base plate under the pair. Two capsules alone float in
+                 * the middle of a box four times their width; sitting them
+                 * on something reads as a piece of gear instead. This part
+                 * IS accent-tinted -- the plinth is the chassis, not the
+                 * tube, so it can follow the theme without the phosphor
+                 * having to. */
+                fb_round_rect(x0 - 8u, ty + th + 2u, pair + 16u, 6u, 2u,
+                              ui_mix(bed, ui_accent, 1u, 3u));
+                eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
             }
 
-            uint8_t now = (uint8_t)eye_v;
-            if (eye_face && now == eye_shown) goto viz_done;   /* nothing moved */
+            for (uint32_t ch = 0; ch < 2u; ch++) {
+                /* VU ballistics per channel -- the tubes are pretending to
+                 * be the same era of gear as the needles, and two different
+                 * feels would read as two different instruments. */
+                uint32_t pk  = ch ? peak_r : peak_l;
+                uint32_t tgt = (pk * 255u) / 32768u;
+                if (tgt > 255u) tgt = 255u;
+                if (paused) tgt = 0;
+                uint32_t *v = ch ? &eye_r : &eye_l;
+                if (tgt > *v) { *v += VU_ATT; if (*v > tgt) *v = tgt; }
+                else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
+                                if (*v < tgt) *v = tgt; }
 
-            /* Wedge half-width is linear in dy: w = dy * tan(theta). Reuse the
-             * VU's table -- index 8 is 0 degrees and 16 is +50, so mapping the
-             * INVERSE of the level onto 128..255 gives a wedge that is widest
-             * at silence and shut at full scale. One divide per frame, hoisted
-             * out of the row loop as a Q12 slope. */
-            int32_t sn, cs;
-            vu_angle(128u + (255u - now) / 2u, &sn, &cs);
-            int32_t slope = cs ? (sn * 4096) / cs : 0;
+                uint8_t  lit   = (uint8_t)((*v * bh) / 255u);
+                uint8_t *shown = ch ? &eye_shown_r : &eye_shown_l;
+                if (eye_face && lit == *shown) continue;   /* nothing moved */
 
-            /* Repaint each row WHOLE -- shadow, then phosphor out to the rim
-             * on both sides -- rather than painting only the sliver the edge
-             * crossed.
-             *
-             * The sliver version was cheaper and WRONG, which tools/
-             * eye_preview.py showed before this ever reached hardware. Slivers
-             * make the wedge an even number of pixels wide, so it sits half a
-             * pixel off the axis; on every row where it should have covered
-             * the disc completely it left one lit pixel on the right rim, and
-             * those stack into a bright diagonal scar down the shadow.
-             *
-             * Whole rows are symmetric by construction: 2w+1 of shadow plus
-             * (hw-w) of phosphor each side is exactly the 2hw+1 the row has.
-             * Three rects a row, ~28 rows, and only when the level moved --
-             * the same order as the bars. No flicker either: every pixel goes
-             * straight from its old colour to its new one, where the VU's
-             * problem was clearing to the bed FIRST and being scanned out in
-             * between. */
-            for (uint32_t dy = hub + 1u; dy <= r; dy++) {
-                int32_t hw = (int32_t)eye_hw[dy];
-                int32_t w  = ((int32_t)dy * slope) >> 12;
-                if (w > hw) w = hw;
+                uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
+                uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
+                uint32_t ly = by + bh - lit;          /* the strip grows UP */
 
-                fb_rect(cx - (uint32_t)w, cy + dy,
-                        2u * (uint32_t)w + 1u, 1, EYE_SHADOW);
-                if (hw > w) {
-                    uint16_t ph = (dy > r - 2u) ? EYE_DIM : EYE_GREEN;
-                    uint32_t n  = (uint32_t)(hw - w);
-                    fb_rect(cx - (uint32_t)hw,     cy + dy, n, 1, ph);
-                    fb_rect(cx + (uint32_t)w + 1u, cy + dy, n, 1, ph);
+                /* Lit span, its halo, then the dark remainder above it --
+                 * together exactly the strip window, so no pixel is left
+                 * holding the previous frame's value. */
+                if (lit) {
+                    fb_rect(bx, ly, EYE_BAR_W, lit, EYE_LIT);
+                    fb_rect(bx - 2u, ly, 2, lit, EYE_GLOW);
+                    fb_rect(bx + EYE_BAR_W, ly, 2, lit, EYE_GLOW);
                 }
+                if (lit < bh)
+                    fb_rect(bx - 2u, by, EYE_BAR_W + 4u, bh - lit, EYE_DARK);
+
+                *shown = lit;
             }
 
-            eye_shown = now;
-            eye_face  = 1;
+            eye_face   = 1;
             eye_face_w = (uint16_t)ww;
             goto viz_done;
         }
