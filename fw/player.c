@@ -1492,28 +1492,42 @@ static void ui_draw_chrome(void)
     if (screen_blank) return;
     ui_gradient();
 
-    /* When there's no usable title, say WHICH failure it was and show the
-     * first bytes of the file -- see head_bytes' comment. */
-    char fallback[24];
+    /* When there's no usable title, show the FILENAME.
+     *
+     * It is almost always the song name, so an untagged file reads as itself.
+     * What used to be here was a DIAGNOSTIC -- "NOTAG FFFB9064 R04", the head
+     * bytes and the reload status. It told three failure modes apart during
+     * the reload hunt and earned its place then, but a user is not debugging
+     * this core: a file that plays perfectly well was announcing itself as a
+     * hex dump. Nothing internal goes on this screen any more.
+     *
+     * That also retires the UNICODE TAG case, which was the same mistake in
+     * words -- a tag encoding the parser declines to handle is our limitation
+     * to state in the README, not a caption for someone's music. The filename
+     * is the better answer there too, and those files always have one. */
+    char namebuf[48];
     const char *title = track_title;
     if (!track_title[0]) {
-        if (title_status == ID3_UNSUPPORTED_ENCODING) {
-            title = "UNICODE TAG";
-        } else {
-            char *p = fallback;
-            /* NORD == the sentinel survived, i.e. the read delivered nothing;
-             * NOTAG/NOTIT == real bytes arrived but weren't a tag. */
-            int nothing_landed = (head_bytes[0] == 0xA5u && head_bytes[1] == 0xA5u &&
-                                  head_bytes[2] == 0xA5u && head_bytes[3] == 0xA5u);
-            const char *tag = nothing_landed ? "NORD "
-                            : (title_status == ID3_NO_TAG) ? "NOTAG " : "NOTIT ";
-            while (*tag) *p++ = *tag++;
-            for (int i = 0; i < 4; i++) p = ui_hex2(p, head_bytes[i]);
-            *p++ = ' '; *p++ = 'R';
-            p = ui_hex2(p, (uint8_t)reload_status);
-            *p = 0;
-            title = fallback;
+        /* Last path component, extension dropped: the slot holds a full path
+         * ("/Assets/mp3player/common/Flodown.mp3"). */
+        uint32_t start = 0;
+        for (uint32_t i = 0; track_file[i]; i++)
+            if (track_file[i] == '/' || track_file[i] == 0x5Cu) start = i + 1u;
+
+        uint32_t n = 0, dot = 0;
+        for (uint32_t i = start; track_file[i] && n < sizeof(namebuf) - 1u; i++) {
+            if (track_file[i] == '.') dot = n;      /* LAST dot, not the first */
+            namebuf[n++] = track_file[i];
         }
+        /* Only trim at a dot that actually looks like an extension -- a name
+         * such as "Blur - 13.mp3" must not lose its number, and a leading dot
+         * is not an extension at all. */
+        if (dot && n - dot <= 5u) n = dot;
+        namebuf[n] = 0;
+
+        /* No tag and no name means APF told us nothing about the slot. Rare,
+         * and still not the user's problem to diagnose. */
+        title = n ? namebuf : "UNKNOWN TRACK";
     }
 
     /* Fixed, deliberately. Reflowing the text when the panel slides made the
@@ -2228,14 +2242,13 @@ static void ui_load_failed(void)
     fb_set_color(UI_RED, UI_BG);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_2X, TS_2X, UI_INNER_W);
 
-    char b[24], *p = b;
-    const char *t = "HEAD ";
-    while (*t) *p++ = *t++;
-    for (int i = 0; i < 4; i++) p = ui_hex2(p, head_bytes[i]);
-    *p = 0;
+    /* This line used to print the file's first four bytes as hex. That is a
+     * debugging aid, and it was on the ONE screen a user is most likely to see
+     * when something has gone wrong -- the moment they least need a hex dump.
+     * Say what happened in words instead. */
     fb_set_color(UI_DIM, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u, b,
-                    TS_1X, TS_1X, UI_INNER_W);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u,
+                    "THE FILE COULD NOT BE READ", TS_1X, TS_1X, UI_INNER_W);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
                     "USE CORE MENU TO PICK", TS_1X, TS_1X, UI_INNER_W);
 

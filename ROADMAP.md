@@ -395,20 +395,6 @@ Artwork decode dominates. The known levers, in order:
    starts would hide the cost entirely, at the price of a panel that appears a
    moment late. Probably the biggest perceived win for the least work.
 
-## Show the filename on screen — user request 2026-08-12
-
-"I wish that the file name is showing somewhere on the screen." Cheap and
-clearly right: `track_file` already holds it, filled by `slot_filename()` for
-the playlist work.
-
-Best placement is where the title goes **when a file has no ID3 tag**. The
-current fallback is a diagnostic string -- "(No ID3 Tag)" and friends -- which
-tells the user nothing they can act on, where the filename is usually the
-actual song name. Strictly better than what is there now.
-
-Worth considering as a permanent third line as well, but that costs vertical
-space the layout does not obviously have; the untagged case is free.
-
 ## Hold-A for 1.2x is too easy to trigger by accident
 
 A user reported a track playing at "double speed". The likely cause is not a
@@ -528,6 +514,35 @@ not a bulk tidy.
 # Fixed
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
+
+## No internals on screen, and the filename when a file has no tag — 2026-08-12
+
+Two places put debugging output in front of users, and both shipped.
+
+**The title row.** A file with no readable ID3 tag displayed
+`NOTAG FFFB9064 R04` -- a status word, the file's first four bytes, and the
+reload status. That string was built to tell three failure modes apart during
+the reload hunt and it earned its place then. On a shipped player it captioned
+a file that was playing perfectly well with a hex dump.
+
+Now shows the FILENAME, which is almost always the song name: last path
+component, extension trimmed only when the dot looks like one (`Blur - 13.mp3`
+must keep its number). Falls back to `UNKNOWN TRACK` when APF reports no name
+either. This also retires the `UNICODE TAG` caption -- the same mistake in
+words. A tag encoding the parser declines is our limitation to state in the
+README, not a label for someone's music, and those files have filenames too.
+
+**The LOAD FAILED screen.** Printed `HEAD FFFB9064` under the heading: a hex
+dump on the one screen a user sees when something has already gone wrong. Now
+says `THE FILE COULD NOT BE READ`.
+
+Left alone deliberately: `! FILE SIZE WRONG - CHECK SD CARD` is plain and
+tells the user what to do about it. The Select+A / Select+B struct dumps are
+behind `#if DEBUG_DIAG`, which is 0, so a release build cannot reach them.
+
+**Standing rule from the user: no diagnostic is ever shown to users.** Debug
+output goes behind a compile-time flag from the start, not "temporarily" into
+a live screen.
 
 ## Shuffle produced the same order every boot — FIXED 2026-08-10
 
