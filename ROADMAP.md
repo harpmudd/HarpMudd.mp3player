@@ -86,6 +86,61 @@ holding, so it is one bookmark rather than one per list."
 - **Version is v1.2.0**, not the v1.1.1 first estimated: the fix needed new
   RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
 
+## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
+
+Rare. Picking a playlist from the Core menu sometimes has no effect at all:
+no LOADING message, no load, and waiting does not help. Picking again works.
+User decision 2026-08-12: **not a deal breaker** — it is rare, and the natural
+user response (pick again) is also the workaround.
+
+### What the instrumentation actually proved
+
+A diagnostic build recorded every switch (`UI_SHOW_SPEED_DIAG`, plus
+`pl_sw_*`/`tk_hist` — all still in the source, one flag away):
+
+- `N` always equalled `L`: every notification that arrived produced a load.
+- Every recorded switch read `G1 R0 P1 F0` — gate confirmed the name change,
+  no retry needed, playback taken, nothing blocking, right track count.
+- `X` stayed 0: `load_track()` never came back empty.
+
+**There was never a failed load.** The failures are picks that never reach the
+core at all, so nothing downstream of the notification can see them — which is
+why three separate firmware fixes changed nothing.
+
+### Two theories killed on the way
+
+- **"Slow load, no feedback."** Plausible and wrong. UI_BOOT_Y and
+  UI_TRANSPORT_Y are both row 262, so the transport repainted over
+  LOADING PLAYLIST during the wait and the user re-picked out of impatience.
+  That was a REAL bug and is fixed — but the fault survived the fix.
+- **"Playback was blocked by an armed reload."** `P1 F0` killed it outright.
+
+### Where it points now
+
+`0190` says the slot still holds the OLD playlist, so APF appears not to have
+performed the assignment — not a dropped message, a pick that did not take.
+The core-side CDC was read and is correct: `dataslot_update` is a one-cycle
+`clk_74a` pulse converted to a toggle with the ID latched in the same cycle,
+which is the right idiom (see [[apf-target-commands]]).
+
+### The one test that would settle it
+
+Count EVERY `dataslot_update` pulse in `clk_74a`, ignoring the slot ID, and
+expose the counter. Raw count moves on a dead pick -> ours. Does not move ->
+Analogue's. Costs an RTL change and a Quartus rebuild, then waiting on a fault
+that takes many attempts to hit, which is why it has not been done.
+
+Cheap corroboration if it ever comes up in the wild: whether other cores with
+user-reloadable slots show the same thing. No compile needed.
+
+### Mitigation that IS shipped
+
+`pl_check_req` — on the Analogue menu CLOSING, ask slot 3 what it holds and
+raise the load ourselves if it is not what is loaded. One 0190 at a moment
+where playback is already interrupted; a metadata query, not a slot read, so
+it does not cost the MP3 slot its fragment cache. Helps if the notification
+was dropped; cannot help if APF never made the assignment.
+
 # Enhancements
 
 ## PNG album art — MEASURED AND DEPRIORITIZED
