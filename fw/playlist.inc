@@ -755,22 +755,24 @@ static void pl_load(void)
     pl_dead_clear();
     pl_name_read();
 
-    /* An EMPTY slot means nothing has ever been picked -- data.json no longer
-     * declares a filename for slot 3, because declaring one made APF reset the
-     * slot to it at every core load and silently throw away the user's chosen
-     * playlist. That was the whole multi-playlist defect: pick Shenanigans.m3u,
-     * relaunch, get playlist.m3u.
+    /* Ask by READING, not by asking what is in the slot.
      *
-     * Removing the declaration costs the first-run convenience of a card that
-     * just works, so put it back here: open the documented default BY NAME.
-     * This needs a template struct from some slot, so it only succeeds once
-     * APF has a file somewhere -- on a truly virgin card the getting-started
-     * screen is the right answer anyway, and it says which button to press. */
-    if (!pl_name[0]) {
-        if (pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME)) pl_name_read();
-    }
-
+     * The first version tested pl_name[0] for emptiness and skipped the
+     * fallback whenever it looked non-empty -- but pl_name comes from the 0190
+     * response struct, which holds RESIDUE from whatever getfile ran last. So
+     * it read as full when the slot was empty, the fallback never fired, and
+     * no playlist loaded at all. The only trustworthy test of "is there a
+     * playlist here" is trying to read one.
+     *
+     * data.json no longer declares a filename for slot 3: declaring one made
+     * APF reset the slot at every core load and throw away the user's chosen
+     * list, which was the whole multi-playlist defect. Opening the documented
+     * default here puts the first-run convenience back. */
     uint32_t len = pl_read_raw();
+    if (!len && pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME)) {
+        pl_name_read();
+        len = pl_read_raw();
+    }
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
     pl_parse(len);
     if (!pl_count) { pl_status = PL_ERR_EMPTY; return; }
