@@ -99,6 +99,8 @@ static uint8_t pl_open_timeout;      /* 0192 never answered; errcode is stale  *
  * code that justifies giving up on an entry for good. */
 #define PL_ERRCODE_NOFILE 4u
 
+static int pl_open_name(const char *name);   /* -> pl_open_into(MP3 slot) */
+
 /* Fetch a template descriptor into `buf`. Returns the length of the printable
  * path it contains, or 0.
  *
@@ -131,7 +133,10 @@ static uint32_t pl_template(uint32_t slot, uint8_t *buf, uint32_t *name_at)
     return best_len;
 }
 
-static int pl_open_name(const char *name)
+/* Open `name` into ANY slot. The target used to be hardwired to the MP3 slot;
+ * slot 3 needs it too now that the playlist slot no longer declares a default
+ * filename and has to be filled by the core on a fresh card. */
+static int pl_open_into(uint32_t slot, const char *name)
 {
     pl_open_err = PLO_OK; pl_open_errcode = 0; pl_open_timeout = 0;
 
@@ -201,7 +206,7 @@ static int pl_open_name(const char *name)
     /* This switches the slot but raises NO 008A -- that notification is for a
      * file the USER picked from the menu, not one the core opened. The caller
      * therefore has to drive the load itself; see pl_play_at(). */
-    if (!pl_cmd(TGT_OPENFILE, MP3_SLOT_ID, CLK_HZ * 3u)) {
+    if (!pl_cmd(TGT_OPENFILE, slot, CLK_HZ * 3u)) {
         pl_open_err     = PLO_OPEN;
         pl_open_timeout = pl_cmd_timedout;
         pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
@@ -732,6 +737,15 @@ static void pl_name_read(void)
     pl_name[n] = 0;
 }
 
+/* The name the core falls back to. Only used when APF has nothing in the
+ * playlist slot -- once the user picks a list, that pick is what persists. */
+#define PL_DEFAULT_NAME "playlist.m3u"
+
+static int pl_open_name(const char *name)
+{
+    return pl_open_into(MP3_SLOT_ID, name);
+}
+
 static void pl_load(void)
 {
     pl_count = 0; pl_pos = 0; pl_status = PL_OK;
@@ -740,6 +754,22 @@ static void pl_load(void)
      * playlist gives every entry another chance. */
     pl_dead_clear();
     pl_name_read();
+
+    /* An EMPTY slot means nothing has ever been picked -- data.json no longer
+     * declares a filename for slot 3, because declaring one made APF reset the
+     * slot to it at every core load and silently throw away the user's chosen
+     * playlist. That was the whole multi-playlist defect: pick Shenanigans.m3u,
+     * relaunch, get playlist.m3u.
+     *
+     * Removing the declaration costs the first-run convenience of a card that
+     * just works, so put it back here: open the documented default BY NAME.
+     * This needs a template struct from some slot, so it only succeeds once
+     * APF has a file somewhere -- on a truly virgin card the getting-started
+     * screen is the right answer anyway, and it says which button to press. */
+    if (!pl_name[0]) {
+        if (pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME)) pl_name_read();
+    }
+
     uint32_t len = pl_read_raw();
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
     pl_parse(len);

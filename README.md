@@ -135,7 +135,9 @@ Rhinestone Eyes.mp3
 Bare names are relative to that folder; a leading `/` is from the card root.
 Lines starting with `#` are ignored, so exported playlists work as-is.
 
-`playlist.m3u` loads at boot; any other name loads from **Load Playlist**.
+`playlist.m3u` loads at boot. Pick a different one with **Load Playlist** and
+that becomes the one it remembers — so `audiobook.m3u` stays loaded across
+launches, along with your place in it.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
