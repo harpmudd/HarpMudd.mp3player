@@ -660,6 +660,13 @@ static char pl_name_raw[24];      /* same, in the card's own spelling */
  * the user picks a playlist, and restoring there would override the pick. */
 static uint8_t pl_restore_pending = 1u;
 
+/* Gate for a playlist-slot reload, mirroring the one the MP3 slot already has.
+ * 008A means the user PICKED a file, not that the slot is readable yet. */
+static uint8_t  pl_reload_armed;
+static uint32_t pl_reload_at;        /* hard deadline: act regardless */
+static uint32_t pl_probe_at;         /* next slot-changed check */
+static char     pl_leaving[24];      /* the name we are switching AWAY from */
+
 /* The playlist to reopen at boot, packed four characters per settings word.
  *
  * Storing the NAME is unavoidable. APF cannot enumerate a directory, so 0192
@@ -5019,31 +5026,60 @@ int main(void)
         /* The user picked a different playlist. Re-reading slot 3 flushes the
          * MP3 slot's fragment cache, so this pauses briefly rather than doing
          * it underneath a running stream. */
+        /* ARM, do not act. 008A says the user picked a playlist, not that APF
+         * has switched the slot -- exactly the fault the MP3 slot needed a
+         * gate for, and it showed here as "sometimes you have to pick the new
+         * playlist twice": the first read still returned the OLD list, and the
+         * second attempt worked only because the slot had caught up by then.
+         *
+         * Record what we are leaving, then wait for 0190 to report something
+         * else. Positive confirmation, not a blind delay. */
         if (pl_reload_pending) {
             pl_reload_pending = 0;
             REG(R_RELOAD) = RL_PL_RELOAD;            /* ack just this bit */
-            /* Same cut as a skip: pl_load() blocks on slot-3 reads for longer
-             * than the FIFO holds, and picking a playlist means leaving the
-             * current track anyway. */
-            pcm_flush();
-            refill_drain();
-            ring_fill = 0; ring_rd = 0;
-            pl_load();
-            pl_report();
-            /* Only take playback if nothing else is claiming it.
-             *
-             * Picking Load MP3 can bring a playlist-slot notification along
-             * with it, and starting track 1 then throws away the file the user
-             * actually chose -- reported as "it reloads the playlist and plays
-             * a playlist song instead of my mp3".
-             *
-             * Gated on the MP3 reload being idle rather than on playback,
-             * deliberately: picking a NEW playlist while a track is playing
-             * should still start it, which is the whole point of that action.
-             * Only a pick already in flight suppresses it. */
-            if (pl_count && !reload_pending && !reload_armed) pl_play_at(0);
-            ui_mode_dirty = 1;
+            for (uint32_t i = 0; i < sizeof(pl_leaving); i++)
+                pl_leaving[i] = pl_name_raw[i];
+            pl_reload_armed = 1u;
+            pl_probe_at     = cycles();
+            pl_reload_at    = cycles() + CLK_HZ * 5u;
             continue;
+        }
+
+        if (pl_reload_armed) {
+            int expired = (int32_t)(cycles() - pl_reload_at) >= 0;
+            int due     = (int32_t)(cycles() - pl_probe_at)  >= 0;
+
+            if (due || expired) {
+                pl_probe_at = cycles() + CLK_HZ / 10u;
+                pl_name_read();
+
+                int changed = 0;
+                for (uint32_t i = 0; i < sizeof(pl_leaving); i++) {
+                    if (pl_name_raw[i] != pl_leaving[i]) { changed = 1; break; }
+                    if (!pl_leaving[i]) break;
+                }
+
+                if (changed || expired) {
+                    pl_reload_armed = 0;
+                    /* Same cut as a skip: pl_load() blocks on slot-3 reads for
+                     * longer than the FIFO holds, and picking a playlist means
+                     * leaving the current track anyway. */
+                    pcm_flush();
+                    refill_drain();
+                    ring_fill = 0; ring_rd = 0;
+                    pl_load();
+                    pl_report();
+                    /* Only take playback if nothing else is claiming it. A
+                     * Load MP3 pick can bring a playlist notification with it,
+                     * and starting track 1 then discards the chosen file. */
+                    if (pl_count && !reload_pending && !reload_armed)
+                        pl_play_at(0);
+                    ui_mode_dirty = 1;
+                    continue;
+                }
+            }
+            /* Still waiting for APF to switch the slot. Fall through so the
+             * current track keeps playing while it does. */
         }
 
         /* Track skip (Left/Right held). pl_play_at() issues 0192; APF then
