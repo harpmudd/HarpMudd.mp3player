@@ -58,11 +58,11 @@ remembered between sessions, and the controls and **Core Settings** stay in
 step. **Where you were in a playlist is remembered too** — the track and your
 position in it. Turn that off with **Resume playback** in Core Settings.
 
-It is **one bookmark, not one per playlist**: switching lists replaces what was
-held for the last one, so an audiobook left partway through starts over if you
-listen to something else in between. It also applies to playlists only — a file
-opened with **Load MP3** records no position. For an audiobook, put it in a
-playlist; a one-line `.m3u` is enough.
+Only one place is remembered, for the last playlist you used. Switch to another
+list and the first one starts over next time.
+
+**Load MP3** records no position at all, so for an audiobook use a playlist — a
+one-line `.m3u` is enough.
 
 The album art panel and the screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
@@ -145,7 +145,7 @@ not how many lines the file has.
   don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
   oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
-  peak dots and the magic eye — see below.
+  peak dots and a magic eye — a pair of EM84 tubes, one per channel.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
@@ -155,17 +155,6 @@ not how many lines the file has.
 
 CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
 stereo.<br clear="right">
-
-### Magic eye
-
-A pair of **EM84 indicator tubes** — the bar-type magic eye from valve
-amplifiers and tape decks. One tube per channel, each with a fluorescent strip
-that rises with its own signal.
-
-They move on the same ballistics as the VU needles, quick to rise and slow to
-fall, and never go fully dark, because a real tube's heater is always on. Each
-throws light across the panel beside it, brightest between the two. The etched
-scale follows your accent color; the phosphor keeps its own cyan-green.
 
 ## How it works
 
