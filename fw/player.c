@@ -662,6 +662,9 @@ static uint8_t pl_restore_pending = 1u;
 
 /* Gate for a playlist-slot reload, mirroring the one the MP3 slot already has.
  * 008A means the user PICKED a file, not that the slot is readable yet. */
+static uint16_t pl_notify_n;      /* playlist notifications seen from the RTL */
+static uint16_t pl_load_n;        /* times pl_load() actually ran             */
+static uint32_t pl_reload_seen;   /* OR of every R_RELOAD word observed       */
 static uint8_t  pl_reload_armed;
 static uint32_t pl_reload_at;        /* hard deadline: act regardless */
 static uint32_t pl_probe_at;         /* next slot-changed check */
@@ -844,7 +847,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-#define UI_SHOW_SPEED_DIAG 0
+#define UI_SHOW_SPEED_DIAG 1
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -3078,6 +3081,14 @@ static void ui_draw_dynamic(void)
         *rq++ = ' '; *rq++ = 'O'; rq = ui_dec(rq, resume_on);
         *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, settings_adopted);
         *rq++ = ' '; *rq++ = 'V'; rq = ui_dec(rq, resume_saves);
+        /* N = playlist notifications the RTL delivered, L = times pl_load()
+         * actually ran, A = gate currently armed, R = OR of every R_RELOAD
+         * word seen. If N stays put when you pick a playlist, the
+         * notification never arrived and nothing above it can be at fault. */
+        *rq++ = ' '; *rq++ = 'N'; rq = ui_dec(rq, pl_notify_n);
+        *rq++ = ' '; *rq++ = 'L'; rq = ui_dec(rq, pl_load_n);
+        *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, pl_reload_armed);
+        *rq++ = ' '; *rq++ = 'R'; rq = ui_dec(rq, pl_reload_seen);
         /* P: was the saved point from the playlist. L: what settings_load()
          * actually returned at boot -- 0 means it took the all-zero early exit
          * and every setting is a firmware default regardless of what the card
@@ -3567,7 +3578,15 @@ static void poll_input(void)
      * which is where the CPU spends most of its time when keeping up, so a
      * reload is noticed immediately instead of after the current frame. */
     if (REG(R_RELOAD) & RL_PENDING) reload_pending = 1u;
-    if (REG(R_RELOAD) & RL_PL_RELOAD) pl_reload_pending = 1u;
+    {
+        uint32_t rl = REG(R_RELOAD);
+        /* Count the EDGE. The bit is sticky until acked and poll_input runs
+         * every loop iteration, so counting the level would tick thousands of
+         * times per pick and say nothing. */
+        if ((rl & RL_PL_RELOAD) && !pl_reload_pending) pl_notify_n++;
+        if (rl & RL_PL_RELOAD) pl_reload_pending = 1u;
+        pl_reload_seen |= rl;              /* sticky: every bit ever observed */
+    }
 }
 
 /* Drops every sample queued in the hardware FIFO. Required on any
@@ -5078,6 +5097,7 @@ int main(void)
 
                 if (changed || expired) {
                     pl_reload_armed = 0;
+                    pl_load_n++;
                     /* Same cut as a skip: pl_load() blocks on slot-3 reads for
                      * longer than the FIFO holds, and picking a playlist means
                      * leaving the current track anyway. */
