@@ -669,6 +669,19 @@ static uint8_t pl_restore_pending = 1u;
 static uint16_t pl_notify_n;      /* playlist notifications seen from the RTL */
 static uint16_t pl_load_n;        /* times pl_load() actually ran             */
 static uint32_t pl_reload_seen;   /* OR of every R_RELOAD word observed       */
+/* Last playlist SWITCH, recorded so the failure can be read off the screen
+ * instead of reasoned about. Two blind fixes have already been wrong about
+ * this one; these five fields separate every remaining explanation.
+ *   G  1 the gate saw the name change, 2 it gave up and fired on the cap
+ *   R  0 no retry, 1 retried on an unchanged name, 2 on unchanged CONTENT
+ *   P  1 pl_play_at(0) ran, 0 it was skipped
+ *   F  reload_pending | reload_armed<<1 at the moment P was decided
+ *   T  pl_count after the load
+ * L not advancing with N means the gate never fired at all; L advancing with
+ * P zero means the list loaded and playback simply was not taken, which no
+ * amount of retrying the READ would ever fix. */
+static uint8_t  pl_sw_ge, pl_sw_rt, pl_sw_pp, pl_sw_fl;
+static uint16_t pl_sw_ct;
 static uint8_t  pl_reload_armed;
 static uint32_t pl_reload_at;        /* hard deadline: act regardless */
 static uint32_t pl_probe_at;         /* next slot-changed check */
@@ -852,7 +865,10 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-#define UI_SHOW_SPEED_DIAG 0
+/* TEMPORARY -- 1 only for a diagnostic build handed over to reproduce the
+ * intermittent playlist double-load. MUST go back to 0 before anything
+ * ships: no diagnostic is ever shown to users. */
+#define UI_SHOW_SPEED_DIAG 1
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -3564,6 +3580,11 @@ static void ui_draw_dynamic(void)
         while (*sp) *q++ = *sp++;
         *q++ = ' '; *q++ = 'N'; q = ui_dec(q, pl_notify_n);
         *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
+        *q++ = ' '; *q++ = 'G'; q = ui_dec(q, pl_sw_ge);
+        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, pl_sw_rt);
+        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, pl_sw_pp);
+        *q++ = ' '; *q++ = 'F'; q = ui_dec(q, pl_sw_fl);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_sw_ct);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -5557,6 +5578,8 @@ int main(void)
                 if (changed || expired) {
                     pl_reload_armed = 0;
                     pl_load_n++;
+                    pl_sw_ge = changed ? 1u : 2u;
+                    pl_sw_rt = 0u;
                     ui_boot_note("LOADING PLAYLIST");
                     /* Same cut as a skip: pl_load() blocks on slot-3 reads for
                      * longer than the FIFO holds, and picking a playlist means
@@ -5606,6 +5629,7 @@ int main(void)
                         int stale = (!same && pl_sig && pl_sig == sig_was);
 
                         if (same || stale) {
+                            pl_sw_rt        = same ? 1u : 2u;
                             pl_retry        = 0;
                             /* 0190 already names the right file, so there is
                              * nothing to reopen -- only APF's cached fragments
@@ -5641,8 +5665,12 @@ int main(void)
                     /* Only take playback if nothing else is claiming it. A
                      * Load MP3 pick can bring a playlist notification with it,
                      * and starting track 1 then discards the chosen file. */
-                    if (pl_count && !reload_pending && !reload_armed)
-                        pl_play_at(0);
+                    pl_sw_ct = pl_count;
+                    pl_sw_fl = (uint8_t)((reload_pending ? 1u : 0u)
+                                       | (reload_armed  ? 2u : 0u));
+                    pl_sw_pp = (pl_count && !reload_pending && !reload_armed)
+                             ? 1u : 0u;
+                    if (pl_sw_pp) pl_play_at(0);
                     ui_mode_dirty = 1;
                     continue;
                 }
