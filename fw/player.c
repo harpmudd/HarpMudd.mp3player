@@ -138,12 +138,12 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503314u   /* rev 20: interact settings         */
+#define EXPECT_VERSION 0x4D503315u   /* rev 21: 16 setting slots          */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.1.0"
+#define APP_VER "1.2.0"
 
 /* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
  * Select+A (APF slot table, boot vs live), Select+B (the framework's file
@@ -655,6 +655,21 @@ static uint16_t pl_live_ordinal(uint16_t pos);
  * because the splash summary above it draws the name. Empty when APF will not
  * say what is in the slot. */
 static char pl_name[24];
+
+/* The playlist to reopen at boot, packed four characters per settings word.
+ *
+ * Storing the NAME is unavoidable. APF cannot enumerate a directory, so 0192
+ * can only open something we already hold, and the slot itself remembers
+ * nothing: with a filename declared in data.json APF resets it to that file at
+ * every core load, and without one the slot comes up empty and prompts. Both
+ * were measured. There is no arrangement of data.json that remembers a pick.
+ *
+ * Twelve characters of STEM, with ".m3u" implied rather than stored -- that
+ * covers "Shenanigans", "audiobook" and most real names for three words
+ * instead of four. Truncation is possible and harmless: a name that does not
+ * round-trip simply fails to reopen and the default loads. */
+#define PL_STEM_MAX 12u
+static char pl_saved_stem[PL_STEM_MAX + 1u];
 
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;

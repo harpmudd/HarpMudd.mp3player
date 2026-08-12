@@ -746,6 +746,43 @@ static int pl_open_name(const char *name)
     return pl_open_into(MP3_SLOT_ID, name);
 }
 
+/* Reduce pl_name ("SHENANIGANS.M3U") to the stem we store ("SHENANIGANS").
+ * Uppercase throughout: pl_name is already uppercased for the splash, and
+ * comparing case-insensitively is what lets a stored stem match a slot whose
+ * path APF reports in whatever case it likes. */
+static void pl_stem_of(const char *name, char *out)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; name[i] && n < PL_STEM_MAX; i++) {
+        if (name[i] == '.') break;                 /* stop at the extension */
+        char c = name[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        out[n++] = c;
+    }
+    out[n] = 0;
+}
+
+static int pl_stem_eq(const char *a, const char *b)
+{
+    for (uint32_t i = 0; i <= PL_STEM_MAX; i++) {
+        if (a[i] != b[i]) return 0;
+        if (!a[i]) return 1;
+    }
+    return 1;
+}
+
+/* Remember whichever list is loaded, so the next boot can reopen it. Called
+ * once a playlist has actually parsed -- an unreadable file must not overwrite
+ * a good remembered name. */
+static void pl_remember(void)
+{
+    char stem[PL_STEM_MAX + 1u];
+    pl_stem_of(pl_name, stem);
+    if (!stem[0] || pl_stem_eq(stem, pl_saved_stem)) return;
+    for (uint32_t i = 0; i <= PL_STEM_MAX; i++) pl_saved_stem[i] = stem[i];
+    settings_mark_dirty();
+}
+
 static void pl_load(void)
 {
     pl_count = 0; pl_pos = 0; pl_status = PL_OK;
@@ -768,6 +805,28 @@ static void pl_load(void)
      * APF reset the slot at every core load and throw away the user's chosen
      * list, which was the whole multi-playlist defect. Opening the documented
      * default here puts the first-run convenience back. */
+    /* If a different list is remembered, reopen it BEFORE reading.
+     *
+     * The slot cannot remember anything itself -- with a filename declared in
+     * data.json APF resets it to that file every core load, and without one it
+     * comes up empty. Both measured. So the core reopens the remembered stem
+     * by name, which is the only mechanism the platform offers.
+     *
+     * Skipped when the slot already holds the right list, so the ordinary
+     * case costs nothing and picking a new list mid-session is untouched. */
+    if (pl_saved_stem[0]) {
+        char cur[PL_STEM_MAX + 1u];
+        pl_stem_of(pl_name, cur);
+        if (!pl_stem_eq(cur, pl_saved_stem)) {
+            char want[PL_STEM_MAX + 5u];
+            uint32_t n = 0;
+            while (pl_saved_stem[n] && n < PL_STEM_MAX) { want[n] = pl_saved_stem[n]; n++; }
+            want[n++] = '.'; want[n++] = 'm'; want[n++] = '3'; want[n++] = 'u';
+            want[n] = 0;
+            if (pl_open_into(PL_SLOT_ID, want)) pl_name_read();
+        }
+    }
+
     uint32_t len = pl_read_raw();
     if (!len && pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME)) {
         pl_name_read();
@@ -788,6 +847,7 @@ static void pl_load(void)
      * This point has genuine entropy: the playlist reads above walk the card's
      * cluster chain, whose timing varies run to run, so the cycle counter here
      * is not the fixed value it would be earlier in a deterministic boot. */
+    pl_remember();
     pl_rng = cycles() | 1u;
     pl_reorder();
 }

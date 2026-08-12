@@ -136,7 +136,7 @@ module mp3_soc #(
     input  wire [31:0]  dt_q,
 
     // Persistent settings words, published to / read from interact.json.
-    output reg  [2:0]   set_idx,
+    output reg  [3:0]   set_idx,
     output reg          set_wr,
     output reg  [31:0]  set_wdata,
     input  wire [31:0]  set_rdata
@@ -371,7 +371,7 @@ module mp3_soc #(
     // stale RTL. That has already happened three times here, each time looking
     // like a logic bug (dead peripheral, no audio, unresponsive buttons) rather
     // than what it was. BUMP THIS whenever the MMIO map changes.
-    localparam [31:0] CORE_VERSION = 32'h4D503314;   // "MP3" + rev 20 (interact settings)
+    localparam [31:0] CORE_VERSION = 32'h4D503315;   // "MP3" + rev 21 (16 setting slots)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -449,14 +449,14 @@ module mp3_soc #(
             // sound before firmware programs the real rate.
             pcm_rate <= 32'd3435974;   // 48 kHz at clk_sys = 60 MHz
             eq_preset <= 3'd0;         // FLAT: bypass until asked otherwise
-            set_idx <= 3'd0; set_wdata <= 32'd0;
+            set_idx <= 4'd0; set_wdata <= 32'd0;
         end else if (d_req & d_is_mmio & dWE) begin
             case (mmio_reg)
                 R_CONSOLE: begin con_char <= dDAT_MOSI[7:0]; con_wr <= 1'b1; end
                 R_AUDIO:   ;   /* handled by pcm_push -> pcm_fifo */
                 R_PCM_RATE: pcm_rate <= dDAT_MOSI;
                 R_EQ:       eq_preset <= dDAT_MOSI[2:0];
-                R_SET_IDX:  set_idx   <= dDAT_MOSI[2:0];
+                R_SET_IDX:  set_idx   <= dDAT_MOSI[3:0];
                 R_SET_DAT:  begin set_wdata <= dDAT_MOSI; set_wr <= 1'b1; end
                 R_PCM_ST:  ;   /* handled by pcm_flush -> pcm_fifo, above */
                 R_STAT0:   status0 <= dDAT_MOSI;
