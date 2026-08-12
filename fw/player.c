@@ -1049,6 +1049,19 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * does not move, so the area is the union and the rest is painted bed. */
 #define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
 #define EYE_GLOW_ROWS  56u        /* ...and how many rows it spans         */
+/* The GAP between the tubes is lit by BOTH of them, and leaving it dark was
+ * the one place the illusion broke: two lamps 10px apart cannot leave the
+ * space between them the darkest thing on the panel.
+ *
+ * It is a separate pass because it depends on both channels at once, where
+ * everything else here is per tube. Cheap -- one rect per row-strip, because
+ * across 10px the two falloffs very nearly cancel and the sum is flat, so a
+ * gradient across it would be invisible.
+ *
+ * It stops ABOVE the plinth. The gap sits over the middle of the base plate,
+ * and painting the bed there would chew a notch out of it -- the same fault
+ * the overhanging plinth had at its ends. */
+#define EYE_GAP_ROWS   50u        /* rows of the gap that are lit          */
 /* POSITION and BRIGHTNESS come from different places, and that split is the
  * point.
  *
@@ -1068,6 +1081,19 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * only when one of them actually steps. */
 static uint32_t eye_gl_l, eye_gl_r;        /* slow-smoothed level         */
 static uint8_t  eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;   /* step drawn   */
+static uint8_t  eye_gap_l  = 0xFFu, eye_gap_r  = 0xFFu;   /* ...for the gap */
+
+/* Half-width of the glow ellipse at a given distance from its centre row.
+ * Three callers now -- both pools and the gap -- so it stops being copied. */
+static uint32_t eye_glow_rx(uint32_t dy)
+{
+    if (dy >= EYE_GLOW_RY) return 0;
+    uint32_t q = 0;
+    while ((q + 1u) * (q + 1u) + dy * dy
+           <= EYE_GLOW_RY * EYE_GLOW_RY) q++;
+    return (EYE_GLOW_RX * q) / EYE_GLOW_RY;
+}
+
 
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
@@ -2742,7 +2768,13 @@ static void ui_draw_dynamic(void)
                  * erase -- and after a width change its coordinates would
                  * point at the previous layout. */
                 eye_cast_l  = eye_cast_r  = 0xFFu;
+                eye_gap_l   = eye_gap_r   = 0xFFu;
             }
+
+            /* Kept per channel so the gap pass below can evaluate BOTH
+             * pools at a row without recomputing either. */
+            uint32_t gcy_of[2], amt_of[2];
+            uint8_t  key_of[2];
 
             for (uint32_t ch = 0; ch < 2u; ch++) {
                 /* VU ballistics per channel -- the tubes are imitating the
@@ -2812,19 +2844,23 @@ static void ui_draw_dynamic(void)
                 uint32_t pos  = ((uint32_t)lit * EYE_GLOW_POS) / bh;
                 uint8_t  key  = (uint8_t)(step * 16u + pos);
                 uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
-                if (!eye_face || key != *cast) {
-                    /* Midpoint of the lit strip, held so the pool stays
-                     * inside its repaint band. */
-                    uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
-                    uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
-                    if (gcy < top + EYE_GLOW_RY) gcy = top + EYE_GLOW_RY;
-                    if (gcy + EYE_GLOW_RY > top + EYE_GLOW_ROWS)
-                        gcy = top + EYE_GLOW_ROWS - EYE_GLOW_RY;
 
+                /* Midpoint of the lit strip, held so the pool stays inside
+                 * its repaint band. Computed whether or not the pool is
+                 * redrawn -- the gap pass needs it either way. */
+                uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
+                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                if (gcy < top + EYE_GLOW_RY) gcy = top + EYE_GLOW_RY;
+                if (gcy + EYE_GLOW_RY > top + EYE_GLOW_ROWS)
+                    gcy = top + EYE_GLOW_ROWS - EYE_GLOW_RY;
+                uint32_t amt = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
+
+                gcy_of[ch] = gcy; amt_of[ch] = amt; key_of[ch] = key;
+
+                if (!eye_face || key != *cast) {
                     uint32_t bw   = EYE_GLOW_RX / EYE_GLOW_NB;
                     uint32_t base = ch ? (tx + EYE_TUBE_W)
                                        : (tx - EYE_GLOW_RX);
-                    uint32_t amt  = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
 
                     for (uint32_t k = 0; k < EYE_GLOW_ROWS; k += EYE_GLOW_S) {
                         uint32_t y   = top + k;
@@ -2832,17 +2868,10 @@ static void ui_draw_dynamic(void)
                         uint32_t dy  = (mid > gcy) ? (mid - gcy) : (gcy - mid);
                         uint16_t bg  = ui_grad_at(y);
 
-                        /* Half-width of the ellipse at this row, by the same
-                         * integer circle search the crown uses. Rows outside
-                         * the pool get rx 0 and fall straight through to the
-                         * bed fill, which is what erases the old position. */
-                        uint32_t rx = 0;
-                        if (dy < EYE_GLOW_RY) {
-                            uint32_t q = 0;
-                            while ((q + 1u) * (q + 1u) + dy * dy
-                                   <= EYE_GLOW_RY * EYE_GLOW_RY) q++;
-                            rx = (EYE_GLOW_RX * q) / EYE_GLOW_RY;
-                        }
+                        /* Rows outside the pool get rx 0 and fall straight
+                         * through to the bed fill, which is what erases the
+                         * old position. */
+                        uint32_t rx = eye_glow_rx(dy);
 
                         uint32_t nb = 0;
                         while (nb < EYE_GLOW_NB
@@ -2870,6 +2899,43 @@ static void ui_draw_dynamic(void)
                     }
                     *cast = key;
                 }
+            }
+
+            /* The gap, lit by BOTH tubes. See EYE_GAP_ROWS. */
+            if (!eye_face || key_of[0] != eye_gap_l
+                          || key_of[1] != eye_gap_r) {
+                uint32_t gx  = x0 + EYE_TUBE_W;
+                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                /* Distance from each tube's inner face to the middle of the
+                 * gap -- the same for both, which is why the sum is flat. */
+                uint32_t d = EYE_TUBE_G / 2u;
+
+                for (uint32_t k = 0; k < EYE_GAP_ROWS; k += EYE_GLOW_S) {
+                    uint32_t y = top + k;
+                    uint32_t h = EYE_GAP_ROWS - k;
+                    if (h > EYE_GLOW_S) h = EYE_GLOW_S;
+
+                    uint32_t wgt = 0;
+                    for (uint32_t ch = 0; ch < 2u; ch++) {
+                        uint32_t mid = y + h / 2u;
+                        uint32_t dy  = (mid > gcy_of[ch])
+                                     ? (mid - gcy_of[ch])
+                                     : (gcy_of[ch] - mid);
+                        uint32_t rx  = eye_glow_rx(dy);
+                        if (d < rx)
+                            wgt += (amt_of[ch] * (rx - d)) / EYE_GLOW_RX;
+                    }
+                    /* Two sources add, but not without limit -- past this the
+                     * gap stops reading as lit glass and starts reading as a
+                     * solid block between the tubes. */
+                    if (wgt > 40u) wgt = 40u;
+
+                    uint16_t bg = ui_grad_at(y);
+                    fb_rect(gx, y, EYE_TUBE_G, h,
+                            wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
+                }
+                eye_gap_l = key_of[0];
+                eye_gap_r = key_of[1];
             }
 
             eye_face   = 1;
