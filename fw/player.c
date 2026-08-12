@@ -1950,6 +1950,19 @@ static void ui_boot_note(const char *msg)
      * arrows, the EQ name -- and writing over it left the old glyphs showing
      * around the shorter new text. */
     fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
+
+    /* Retire any live toast. This row and the toast band are both "what is
+     * happening", and they must not disagree.
+     *
+     * Concretely: ui_draw_chrome() invalidates ui_toast_step so a toast
+     * survives a repaint, which also means the PREVIOUS load's toast gets
+     * redrawn for a frame as the next load completes -- seen as a quick flash
+     * of stale text on the toast line. Killing it here means the newer message
+     * is the only one making a claim. */
+    ui_toast_t0   = 0;
+    ui_toast_step = 0;
+    fb_rect(UI_MARGIN, UI_TOAST_Y, UI_INNER_W, UI_TOAST_H, ui_grad_at(UI_TOAST_Y));
+
     fb_set_color(UI_WHITE, ui_boot_bg());
     /* Left-aligned at UI_MARGIN, like every other row on this screen and on
      * the player it is imitating. An earlier version centred the label and its
