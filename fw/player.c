@@ -3065,67 +3065,23 @@ static void ui_draw_dynamic(void)
      * HOW TO USE IT: play a file that misbehaves, note T. Watch M and R at
      * 1.0x for ten seconds, hold A, watch them again. Compare, do not infer. */
 #if UI_SHOW_SPEED_DIAG
-    /* Resume row, above the speed row. W is the packed word as loaded, T its
-     * tag, C the tag of the file that actually opened -- if those two differ
-     * the guard rejected the point, and the two numbers say so directly. D is
-     * the latched branch code documented at resume_dbg. */
-    if (ui_sec != ui_last_spd) {
-        /* The packed word itself is NOT shown -- it is readable straight off
-         * the card in interact_persist.json, so the row spends its width on
-         * what only the running core knows: S the saved seconds, D which
-         * branch the restore took, Z the file size and Y the byte offset the
-         * resume wants, the last two being what D9 and D10 turn on. */
-        /* Both halves of the feature on one row, because the last failure was
-         * the SAVE and the row only described the restore:
-         *   S  seconds in the word the core currently holds
-         *   D  which branch the boot-time restore took
-         *   O  resume_on, as adopted from Core Settings
-         *   A  settings_adopted -- 0 means nothing may publish at all
-         *   V  how many times resume_pump has actually published a point
-         * V staying at 0 while music plays IS the save being dead. */
-        char r[64], *rq = r;
-        const char *rl = "RES S";
-        while (*rl) *rq++ = *rl++;
-        rq = ui_dec(rq, RS_SECS(resume_word));
-        *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
-        *rq++ = ' '; *rq++ = 'O'; rq = ui_dec(rq, resume_on);
-        *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, settings_adopted);
-        *rq++ = ' '; *rq++ = 'V'; rq = ui_dec(rq, resume_saves);
-        /* N = playlist notifications the RTL delivered, L = times pl_load()
-         * actually ran, A = gate currently armed, R = OR of every R_RELOAD
-         * word seen. If N stays put when you pick a playlist, the
-         * notification never arrived and nothing above it can be at fault. */
-        *rq++ = ' '; *rq++ = 'N'; rq = ui_dec(rq, pl_notify_n);
-        *rq++ = ' '; *rq++ = 'L'; rq = ui_dec(rq, pl_load_n);
-        *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, pl_reload_armed);
-        *rq++ = ' '; *rq++ = 'R'; rq = ui_dec(rq, pl_reload_seen);
-        /* P: was the saved point from the playlist. L: what settings_load()
-         * actually returned at boot -- 0 means it took the all-zero early exit
-         * and every setting is a firmware default regardless of what the card
-         * holds, which is the "everything reset" report. C: the accent index
-         * as adopted, a setting whose stored value is 3, so C3 proves the
-         * adopt worked and C0 proves it did not. */
-        *rq++ = ' '; *rq++ = 'P'; rq = ui_dec(rq, RS_PL(resume_word));
-        *rq++ = ' '; *rq++ = 'L'; rq = ui_dec(rq, settings_load_ok);
-        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, ui_pal_idx);
-        *rq = 0;
-        uint16_t rbg = ui_grad_at((FB_H - 42u));
-        fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
-        fb_set_color(UI_RED, rbg);
-        fb_text_clipped(UI_MARGIN, FB_H - 42u, r, TS_1X, TS_1X, UI_INNER_W);
-    }
+    /* ONE row, at y336..351.
+     *
+     * There were two, and the upper one sat at y318..333 against the toast
+     * band at y314..329 -- they repainted over each other every second, which
+     * is why a toast only ever showed as a hint. Anything added here must stay
+     * below y330.
+     *
+     * Only the open question is carried: N is playlist notifications the RTL
+     * delivered, L is times pl_load() actually ran. The seek and resume
+     * investigations are closed, so their fields are gone. */
     if (ui_sec != ui_last_spd) {
         ui_last_spd = ui_sec;
         char b[64], *q = b;
-        const char *sp = speed_fast ? "1.2x " : "1.0x ";
+        const char *sp = speed_fast ? "1.2x" : "1.0x";
         while (*sp) *q++ = *sp++;
-        *q++ = 'T'; q = ui_dec(q, track_secs);
-        *q++ = ' '; *q++ = 'M'; q = ui_dec(q, meas_rate);
-        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, ui_byte_rate());
-        /* ui_sec is NOT shown -- the elapsed clock above already is it, and the
-         * two extra fields pushed the worst-case line past the 360 px column,
-         * where fb_text_clipped would have silently eaten the last value. */
-        *q++ = ' '; *q++ = 'K'; q = ui_dec(q, file_pos >> 10);
+        *q++ = ' '; *q++ = 'N'; q = ui_dec(q, pl_notify_n);
+        *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
