@@ -636,6 +636,13 @@ static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
 static uint8_t  screen_blank;         /* the screen is currently black         */
+/* Set once the boot sequence is done and the player owns the screen.
+ *
+ * The loading TOASTS exist for picks made from the menu with the player up.
+ * During boot the splash already narrates itself on its own row -- LOADING
+ * PLAYLIST, then RESUMING TRACK -- so a toast underneath saying LOADING TRACK
+ * as well is the same news three times. */
+static uint8_t  boot_done;
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
 static uint32_t idle;                    /* nothing loaded: waiting on the user */
 static uint8_t  stopped;                 /* Start: at 0:00, not merely paused  */
@@ -4856,6 +4863,9 @@ int main(void)
                      : (const char *)0);
     }
 
+    /* The splash owns the screen until here. */
+    boot_done = 1u;
+
     for (;;) {
         poll_input();
 
@@ -4924,7 +4934,7 @@ int main(void)
             /* Same gap: this gate waits at least 1.5 s before the track even
              * opens. The splash carries LOADING TRACK from the idle screen,
              * but with the player up there was nothing at all. */
-            ui_toast_now("LOADING TRACK");
+            if (boot_done) ui_toast_now("LOADING TRACK");
 
             /* Say so NOW, not when the gate below finally opens. That wait is
              * at least 1.5 s and can reach 5 s, and with the screen unchanged
@@ -4979,7 +4989,7 @@ int main(void)
                 /* The indicator went up when the pick was detected, not here.
                  * was_idle only decides what to restore if the open fails. */
                 int was_idle = idle;
-                if (!was_idle) ui_toast_now("LOADING TRACK");  /* before we block */
+                if (!was_idle && boot_done) ui_toast_now("LOADING TRACK");
                 int opened   = load_track();
                 ui_boot_cancel();
 
@@ -5060,7 +5070,7 @@ int main(void)
              * the player still up and the old track still playing there is
              * otherwise nothing to show the pick registered. The boot row
              * cannot be used: UI_BOOT_Y is the live transport row. */
-            ui_toast_now("LOADING PLAYLIST");
+            if (boot_done) ui_toast_now("LOADING PLAYLIST");
             continue;
         }
 
@@ -5084,7 +5094,7 @@ int main(void)
                 if (changed || expired) {
                     pl_reload_armed = 0;
                     pl_load_n++;
-                    ui_toast_now("LOADING PLAYLIST");   /* before we block */
+                    if (boot_done) ui_toast_now("LOADING PLAYLIST");
                     /* Same cut as a skip: pl_load() blocks on slot-3 reads for
                      * longer than the FIFO holds, and picking a playlist means
                      * leaving the current track anyway. */
