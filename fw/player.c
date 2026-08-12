@@ -889,10 +889,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-/* TEMPORARY -- 1 only for a diagnostic build handed over to reproduce the
- * intermittent playlist double-load. MUST go back to 0 before anything
- * ships: no diagnostic is ever shown to users. */
-#define UI_SHOW_SPEED_DIAG 1
+#define UI_SHOW_SPEED_DIAG 0
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
