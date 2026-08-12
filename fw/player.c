@@ -999,11 +999,14 @@ static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 #define EYE_H2      0x0A89u       /* outer halo                            */
 #define EYE_H1      0x1DC3u       /* inner halo                            */
 #define EYE_LIT     0x57FCu       /* the phosphor itself                   */
-#define EYE_TUBE_W  34u
+#define EYE_TUBE_W  38u
 #define EYE_TUBE_G  10u           /* gap between the pair                  */
 #define EYE_BAR_W    6u           /* the strip core; halos add 4 each side */
 #define EYE_DOME     9u           /* rows the crown curves through         */
-#define EYE_TUBE_H  58u
+/* Sized to the last pixel of the meter box: pip on row 0, plinth ending on
+ * row 71 of 72. Growing either dimension again means taking it from the
+ * plinth or the dome, not from spare space -- there is none. */
+#define EYE_TUBE_H  62u
 static uint32_t eye_l, eye_r;     /* Q8 deflection, 0..255                 */
 static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
 static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
@@ -2668,10 +2671,12 @@ static void ui_draw_dynamic(void)
             if (wf || ww != eye_face_w) eye_face = 0;
 
             uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
-            uint32_t ty   = UI_WAVE_Y + 4u;
+            uint32_t ty   = UI_WAVE_Y + 3u;
             uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
             uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
-            uint32_t bh   = 34u;                     /* ...and its height   */
+            /* Grew with the envelope, so the taller tube is also a longer
+              * throw for the strip rather than just more glass. */
+             uint32_t bh   = 38u;                     /* ...and its height   */
             uint32_t basy = ty + EYE_TUBE_H + 1u;    /* plinth              */
             uint16_t basc = ui_mix(bed, ui_accent, 1u, 3u);
 
@@ -2694,8 +2699,8 @@ static void ui_draw_dynamic(void)
                         /* Specular streak left of centre, falling off faster
                          * to the right -- lit from the upper left, like the
                          * rest of the screen's shading. */
-                        uint32_t dl = (i < 8u) ? (8u - i) * 2u
-                                               : ((i - 8u) * 5u) / 4u;
+                        uint32_t dl = (i < 9u) ? (9u - i) * 2u
+                                               : ((i - 9u) * 5u) / 4u;
                         uint32_t lv = (dl < 28u) ? (31u - dl) : 3u;
                         fb_rect(tx + i, ty + off, 1, EYE_TUBE_H - off,
                                 ui_mix(EYE_GLASS_D, EYE_GLASS_L, lv, 31u));
