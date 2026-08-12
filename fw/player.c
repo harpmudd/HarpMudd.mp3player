@@ -694,6 +694,18 @@ static uint16_t pl_sw_hist[3];
  * and the TRACK open is what does not land -- which would leave the old song
  * playing and read as "the playlist did not switch". */
 static uint16_t pl_sw_tk;
+/* The TRACK loads that follow a switch, three deep. The playlist side has now
+ * read healthy three times running -- gate confirmed, no retry, playback
+ * taken, right list -- so the failure is downstream of it, and X says
+ * load_track() never came back empty. But opening SUCCESSFULLY is not the
+ * same as opening the RIGHT file: a stale MP3 slot would reopen the previous
+ * track, which sounds exactly like the playlist never switching.
+ *   G  1 the gate confirmed a new file id, 2 it fired on the cap
+ *   O  1 load_track() returned a track, 0 it did not
+ *   C  1 the filename CHANGED, 0 the SAME file was reopened
+ * C zero is the whole hypothesis. */
+static uint16_t tk_hist[3];
+static uint32_t tk_prev_name;     /* FNV of track_file before the load */
 static uint8_t  pl_reload_armed;
 static uint32_t pl_reload_at;        /* hard deadline: act regardless */
 static uint32_t pl_probe_at;         /* next slot-changed check */
@@ -3594,13 +3606,19 @@ static void ui_draw_dynamic(void)
          * digits, and N is already at 8. */
         *q++ = 'N'; q = ui_dec(q, pl_notify_n);
         *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
-        *q++ = ' '; *q++ = 'X'; q = ui_dec(q, pl_sw_tk);
         *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_sw_ct);
-        /* GRPF per switch, oldest first. */
+        /* The playlist side read 1010 three times running, so its history is
+         * spent -- one current copy is enough. The row's remaining width goes
+         * to the TRACK loads, which is where the fault now has to be. */
+        *q++ = ' ';
+        q = ui_hex2(q, (uint8_t)(pl_sw_hist[2] >> 8));
+        q = ui_hex2(q, (uint8_t)pl_sw_hist[2]);
+        *q++ = ' '; *q++ = 'K';
         for (uint32_t i = 0; i < 3u; i++) {
             *q++ = ' ';
-            q = ui_hex2(q, (uint8_t)(pl_sw_hist[i] >> 8));
-            q = ui_hex2(q, (uint8_t)pl_sw_hist[i]);
+            *q++ = (char)('0' + ((tk_hist[i] >> 8) & 0xFu));
+            *q++ = (char)('0' + ((tk_hist[i] >> 4) & 0xFu));
+            *q++ = (char)('0' + (tk_hist[i] & 0xFu));
         }
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
@@ -5481,6 +5499,8 @@ int main(void)
 
             if (ready || (int32_t)(cycles() - reload_at) >= 0) {
                 reload_armed = 0;
+                uint32_t tk_ge = ready ? 1u : 2u;
+                uint32_t tk_was = tk_prev_name;
 
                 /* The indicator went up when the pick was detected, not here.
                  * was_idle only decides what to restore if the open fails. */
@@ -5489,6 +5509,20 @@ int main(void)
                     ui_boot_note(resume_seek_req ? "RESUMING TRACK"
                                                  : "LOADING TRACK");
                 int opened   = load_track();
+                {   /* FNV over the filename APF reports for the slot. */
+                    uint32_t h = 2166136261u;
+                    for (uint32_t i = 0; i < sizeof(track_file)
+                                      && track_file[i]; i++) {
+                        h ^= (uint32_t)(uint8_t)track_file[i];
+                        h *= 16777619u;
+                    }
+                    tk_prev_name = h;
+                    tk_hist[0] = tk_hist[1];
+                    tk_hist[1] = tk_hist[2];
+                    tk_hist[2] = (uint16_t)((tk_ge << 8)
+                               | ((opened ? 1u : 0u) << 4)
+                               |  ((h != tk_was) ? 1u : 0u));
+                }
                 ui_boot_cancel();          /* chrome has repainted the row */
                 /* Icons and the PLAYING label are tracked separately, so a
                  * wiped row needs both invalidated or the label never returns. */
