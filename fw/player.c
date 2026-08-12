@@ -682,6 +682,18 @@ static uint32_t pl_reload_seen;   /* OR of every R_RELOAD word observed       */
  * amount of retrying the READ would ever fix. */
 static uint8_t  pl_sw_ge, pl_sw_rt, pl_sw_pp, pl_sw_fl;
 static uint16_t pl_sw_ct;
+/* ...and the last THREE of them, because a success overwrites the failure.
+ * The first capture showed N8 L8 G1 R0 P1 F0 T9 -- a perfectly healthy
+ * switch, which is exactly what the screen shows AFTER the attempt that
+ * finally works. Keeping a history means one photograph taken after a triple
+ * shows all three attempts, and whether the failures failed the same way.
+ * Packed G,R,P,F as hex nibbles, oldest on the left. */
+static uint16_t pl_sw_hist[3];
+/* Times load_track() came back empty. The playlist path looks healthy, so
+ * the next suspect is downstream: the list switches, track 1 is requested,
+ * and the TRACK open is what does not land -- which would leave the old song
+ * playing and read as "the playlist did not switch". */
+static uint16_t pl_sw_tk;
 static uint8_t  pl_reload_armed;
 static uint32_t pl_reload_at;        /* hard deadline: act regardless */
 static uint32_t pl_probe_at;         /* next slot-changed check */
@@ -3576,15 +3588,20 @@ static void ui_draw_dynamic(void)
     if (ui_sec != ui_last_spd) {
         ui_last_spd = ui_sec;
         char b[64], *q = b;
-        const char *sp = speed_fast ? "1.2x" : "1.0x";
-        while (*sp) *q++ = *sp++;
-        *q++ = ' '; *q++ = 'N'; q = ui_dec(q, pl_notify_n);
+        /* The speed prefix this row was built for is dropped while the
+         * playlist switch is under investigation: measured against the real
+         * font, the full line clips past 296px once the counters reach two
+         * digits, and N is already at 8. */
+        *q++ = 'N'; q = ui_dec(q, pl_notify_n);
         *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
-        *q++ = ' '; *q++ = 'G'; q = ui_dec(q, pl_sw_ge);
-        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, pl_sw_rt);
-        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, pl_sw_pp);
-        *q++ = ' '; *q++ = 'F'; q = ui_dec(q, pl_sw_fl);
+        *q++ = ' '; *q++ = 'X'; q = ui_dec(q, pl_sw_tk);
         *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_sw_ct);
+        /* GRPF per switch, oldest first. */
+        for (uint32_t i = 0; i < 3u; i++) {
+            *q++ = ' ';
+            q = ui_hex2(q, (uint8_t)(pl_sw_hist[i] >> 8));
+            q = ui_hex2(q, (uint8_t)pl_sw_hist[i]);
+        }
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -5508,7 +5525,7 @@ int main(void)
                       * behaviour -- the first track after launch loading
                       * paused, so music never starts the instant the core
                       * opens -- read as the player being stuck. */
-                } else if (!idle) ui_load_failed();
+                } else { pl_sw_tk++; if (!idle) ui_load_failed(); }
                 continue;
             }
         }
@@ -5670,6 +5687,12 @@ int main(void)
                                        | (reload_armed  ? 2u : 0u));
                     pl_sw_pp = (pl_count && !reload_pending && !reload_armed)
                              ? 1u : 0u;
+                    pl_sw_hist[0] = pl_sw_hist[1];
+                    pl_sw_hist[1] = pl_sw_hist[2];
+                    pl_sw_hist[2] = (uint16_t)(((uint32_t)pl_sw_ge << 12)
+                                             | ((uint32_t)pl_sw_rt << 8)
+                                             | ((uint32_t)pl_sw_pp << 4)
+                                             |  (uint32_t)pl_sw_fl);
                     if (pl_sw_pp) pl_play_at(0);
                     ui_mode_dirty = 1;
                     continue;
