@@ -1615,6 +1615,16 @@ static void ui_draw_chrome(void)
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
     ui_last_spd   = 0xFFFFFFFFu;   /* or the diag row dies on the first reload */
+    /* THIRD entry to be forgotten from this list, after ui_last_stall and the
+     * mode row. A toast is drawn only when its fade step CHANGES, so once
+     * chrome has painted over one, ui_toast_step still says "already drawn"
+     * and it never comes back.
+     *
+     * Every toast set around a track change was being erased: the LOADING
+     * PLAYLIST and LOADING TRACK indicators, and pl_report()'s "N TRACKS"
+     * summary too -- which is why picking from the menu showed nothing at all
+     * while the same toasts work fine from a button press. */
+    ui_toast_step = 0xFFFFFFFFu;
     ui_last_prog  = 0xFFFFFFFFu;
     /* The mode row -- repeat, shuffle, the EQ name, N-of-M. Missing from this
      * list until now, and the second entry to be forgotten from it after
