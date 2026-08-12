@@ -88,6 +88,20 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
  *      register-file slot via bridge_addr[4:2], so moving it changes which
  *      firmware variable the word feeds.
  *
+ *   6. ARRAY ORDER IS FREE, and it sets the Core Settings menu order.
+ *      MEASURED 2026-08-12: moving "Saved position" to the end of the
+ *      variables array moved it to the bottom of the menu and changed
+ *      nothing else -- every stored value survived, with only a colour the
+ *      user had pressed and a resume point that had advanced while playing.
+ *      Neither had returned to a default, which is what a reset looks like.
+ *
+ *      This matters more than tidiness. Storage words that must exist but
+ *      mean nothing to a user -- the saved position, and a playlist name if
+ *      one is ever stored -- can sit AFTER the real settings instead of
+ *      between Volume and EQ preset. There is no way to hide them (see the
+ *      ROADMAP entry on `enabled`), so ordering is the only control there is
+ *      over how much they intrude.
+ *
  * The persist file is plain JSON on the card at
  * /Settings/<core>/Interact/_core/interact_persist.json. It is readable, it is
  * authoritative, and it answers persistence questions with no hardware round
