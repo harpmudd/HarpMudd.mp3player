@@ -1009,6 +1009,24 @@ static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
 static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
 static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
 
+/* Light thrown onto the panel either side of each tube, tracking the tip of
+ * its own strip. The pair occupies 78 px of a box nearly four times that, and
+ * spill is what a bright tube in a dark case actually does with the space.
+ *
+ * A cone: five bands stepping outward, each shorter than the last, weighted by
+ * how far up the strip is. Only the OUTWARD side of each tube is lit -- the
+ * 10 px between them has no room for a falloff and would just look smudged.
+ *
+ * Quantised into 4-row strips. The bed is a dithered per-row gradient, so a
+ * flat rect over several rows would band; re-mixing per row instead costs five
+ * times the rects. Over four rows the ramp moves well under one level, so the
+ * quantisation is invisible while the banding would not have been. */
+#define EYE_CAST_N   5u           /* bands stepping outward               */
+#define EYE_CAST_W   7u           /* px per band                          */
+#define EYE_CAST_H  24u           /* rows tall at the innermost band      */
+#define EYE_CAST_S   4u           /* rows per quantised strip             */
+static uint8_t eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;  /* tip last cast for */
+
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
  * sweep, which is what a real VU movement travels. The first attempt built one
@@ -2658,6 +2676,10 @@ static void ui_draw_dynamic(void)
 
                 fb_round_rect(x0 - 8u, basy, pair + 16u, 5u, 2u, basc);
                 eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
+                /* The box was just cleared, so there is no old cone to
+                 * erase -- and after a width change its coordinates would
+                 * point at the previous layout. */
+                eye_cast_l  = eye_cast_r  = 0xFFu;
             }
 
             for (uint32_t ch = 0; ch < 2u; ch++) {
@@ -2703,6 +2725,61 @@ static void ui_draw_dynamic(void)
                     if (ly >= by + 2u) {
                         fb_rect(bx - 2u, ly - 1u, EYE_BAR_W + 4u, 1, EYE_H1);
                         fb_rect(bx - 1u, ly - 2u, EYE_BAR_W + 2u, 1, EYE_H2);
+                    }
+                }
+
+                /* Light thrown onto the panel beside the tube, following
+                 * the tip. See the EYE_CAST_* block.
+                 *
+                 * Erase the old cone before drawing the new one: it MOVES
+                 * vertically, so unlike the strip it never covers where it
+                 * was. One bounding box, in the same 4-row strips, since the
+                 * widest band is the innermost. */
+                {
+                    uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
+                    uint32_t reach = EYE_CAST_N * EYE_CAST_W;
+                    uint32_t cx0   = ch ? (tx + EYE_TUBE_W) : (tx - reach);
+
+                    for (uint32_t pass = 0; pass < 2u; pass++) {
+                        uint32_t tip;
+                        if (pass == 0) {
+                            if (*cast == 0xFFu) continue;      /* nothing yet */
+                            tip = UI_WAVE_Y + *cast;
+                        } else {
+                            tip = ly;
+                        }
+
+                        /* Clamp so a tip near either end of the window cannot
+                         * push the cone outside the meter box. */
+                        uint32_t top = (tip > UI_WAVE_Y + EYE_CAST_H / 2u)
+                                     ? (tip - EYE_CAST_H / 2u) : UI_WAVE_Y;
+                        if (top + EYE_CAST_H > UI_WAVE_Y + UI_WAVE_H)
+                            top = UI_WAVE_Y + UI_WAVE_H - EYE_CAST_H;
+
+                        if (pass == 0) {
+                            for (uint32_t k = 0; k < EYE_CAST_H;
+                                 k += EYE_CAST_S)
+                                fb_rect(cx0, top + k, reach, EYE_CAST_S,
+                                        ui_grad_at(top + k));
+                            continue;
+                        }
+
+                        uint32_t amt = (lit * 14u) / bh;
+                        for (uint32_t b = 0; b < EYE_CAST_N; b++) {
+                            uint32_t vh = EYE_CAST_H - b * EYE_CAST_S;
+                            uint32_t y  = top + (EYE_CAST_H - vh) / 2u;
+                            uint32_t bxo = ch ? (cx0 + b * EYE_CAST_W)
+                                              : (cx0 + (EYE_CAST_N - 1u - b)
+                                                       * EYE_CAST_W);
+                            uint32_t wgt = (amt * (EYE_CAST_N - b))
+                                         / EYE_CAST_N;
+                            if (!wgt) continue;
+                            for (uint32_t k = 0; k < vh; k += EYE_CAST_S)
+                                fb_rect(bxo, y + k, EYE_CAST_W, EYE_CAST_S,
+                                        ui_mix(ui_grad_at(y + k), EYE_LIT,
+                                               wgt, 64u));
+                        }
+                        *cast = (uint8_t)(ly - UI_WAVE_Y);
                     }
                 }
 
