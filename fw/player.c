@@ -847,7 +847,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-#define UI_SHOW_SPEED_DIAG 1
+#define UI_SHOW_SPEED_DIAG 0
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -1196,6 +1196,7 @@ static void ui_toast_set(const char *msg, uint32_t n, const char *suffix)
 
 /* Plain text, no trailing number. */
 static void ui_toast_msg(const char *msg) { ui_toast_set(msg, 0xFFFFFFFFu, 0); }
+
 
 /* Bytes per second of AUDIO, which is what both the duration and the seek
  * distance depend on.
@@ -3091,6 +3092,24 @@ static void ui_draw_dynamic(void)
 #endif
 }
 
+/* Set a toast AND paint it, right now.
+ *
+ * ui_toast_msg() only sets state; the pixels arrive on the next
+ * ui_draw_dynamic(). That is fine after a button press, but pl_load() and
+ * load_track() BLOCK the main loop for the whole of their work -- so a toast
+ * set before one of them does not appear until it has finished, which showed
+ * up as "LOADING TRACK flashes briefly at the end". Painting it here puts it
+ * on screen before the blocking call rather than after. */
+static void ui_toast_now(const char *msg)
+{
+    ui_toast_msg(msg);
+    /* Not while the screen is blanked -- ui_draw_dynamic() returns early
+     * there anyway, but being explicit keeps a load from being the one thing
+     * that lights the panel. (ui_dump_mode is declared further down and is a
+     * developer screen; it guards itself inside ui_draw_dynamic.) */
+    if (!screen_blank) ui_draw_dynamic();
+}
+
 /* cont1_key bit assignments (APF standard layout) */
 #define KEY_UP      (1u << 0)
 #define KEY_DOWN    (1u << 1)
@@ -4905,7 +4924,7 @@ int main(void)
             /* Same gap: this gate waits at least 1.5 s before the track even
              * opens. The splash carries LOADING TRACK from the idle screen,
              * but with the player up there was nothing at all. */
-            ui_toast_msg("LOADING TRACK");
+            ui_toast_now("LOADING TRACK");
 
             /* Say so NOW, not when the gate below finally opens. That wait is
              * at least 1.5 s and can reach 5 s, and with the screen unchanged
@@ -4960,6 +4979,7 @@ int main(void)
                 /* The indicator went up when the pick was detected, not here.
                  * was_idle only decides what to restore if the open fails. */
                 int was_idle = idle;
+                if (!was_idle) ui_toast_now("LOADING TRACK");  /* before we block */
                 int opened   = load_track();
                 ui_boot_cancel();
 
@@ -5040,7 +5060,7 @@ int main(void)
              * the player still up and the old track still playing there is
              * otherwise nothing to show the pick registered. The boot row
              * cannot be used: UI_BOOT_Y is the live transport row. */
-            ui_toast_msg("LOADING PLAYLIST");
+            ui_toast_now("LOADING PLAYLIST");
             continue;
         }
 
@@ -5064,6 +5084,7 @@ int main(void)
                 if (changed || expired) {
                     pl_reload_armed = 0;
                     pl_load_n++;
+                    ui_toast_now("LOADING PLAYLIST");   /* before we block */
                     /* Same cut as a skip: pl_load() blocks on slot-3 reads for
                      * longer than the FIFO holds, and picking a playlist means
                      * leaving the current track anyway. */
