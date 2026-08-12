@@ -68,46 +68,6 @@ The album art panel and the screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
 
-## Equalizer
-
-**Y** cycles eight presets. The current one is named in the mode row, dimmed
-on `FLAT`.
-
-| | |
-|---|---|
-| **FLAT** | true bypass — bit-identical to no EQ at all |
-| **BASS** | low shelf lift, gentle upper-mid dip |
-| **ROCK** | smile curve — lows and highs up, mids back |
-| **POP** | presence lift around 2–4 kHz |
-| **JAZZ** | warm lows, relaxed upper-mid |
-| **CLASSICAL** | gentle warmth, honest mids, eased upper mids, air |
-| **VOCAL** | mid forward, lows trimmed |
-| **TREBLE** | high shelf lift |
-
-Presets are loudness-matched, so switching changes the tone without changing how
-loud the music seems.
-
-### Playback speed
-
-Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
-rises with the speed, so music sounds wrong. Off every launch — it isn't
-remembered.
-
-1.2× is the whole range — that's the CPU, not a choice. Double speed means
-decoding twice as many frames a second, past what the 60 MHz can do.
-
-### Screen blanking
-
-**Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
-goes black after that long with no button pressed, and any button wakes it
-without doing anything else — reaching for a sleeping player shouldn't pause
-it. Playback carries on regardless, and nothing but a button press brings the
-screen back.
-
-It resets to off each launch, and it dims rather than powers down: a core can't
-reach the Pocket's backlight, so this is for a dark room rather than for saving
-battery.
-
 ## Playlists
 
 Make a plain text file with one track per line and save it as `playlist.m3u` in
@@ -155,6 +115,46 @@ not how many lines the file has.
 
 CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
 stereo.<br clear="right">
+
+## Equalizer
+
+**Y** cycles eight presets. The current one is named in the mode row, dimmed
+on `FLAT`.
+
+| | |
+|---|---|
+| **FLAT** | true bypass — bit-identical to no EQ at all |
+| **BASS** | low shelf lift, gentle upper-mid dip |
+| **ROCK** | smile curve — lows and highs up, mids back |
+| **POP** | presence lift around 2–4 kHz |
+| **JAZZ** | warm lows, relaxed upper-mid |
+| **CLASSICAL** | gentle warmth, honest mids, eased upper mids, air |
+| **VOCAL** | mid forward, lows trimmed |
+| **TREBLE** | high shelf lift |
+
+Presets are loudness-matched, so switching changes the tone without changing how
+loud the music seems.
+
+## Playback speed
+
+Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
+rises with the speed, so music sounds wrong. Off every launch — it isn't
+remembered.
+
+1.2× is the whole range — that's the CPU, not a choice. Double speed means
+decoding twice as many frames a second, past what the 60 MHz can do.
+
+## Screen blanking
+
+**Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
+goes black after that long with no button pressed, and any button wakes it
+without doing anything else — reaching for a sleeping player shouldn't pause
+it. Playback carries on regardless, and nothing but a button press brings the
+screen back.
+
+It resets to off each launch, and it dims rather than powers down: a core can't
+reach the Pocket's backlight, so this is for a dark room rather than for saving
+battery.
 
 ## How it works
 
