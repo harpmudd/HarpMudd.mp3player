@@ -1042,6 +1042,13 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
 #define EYE_GLOW_STEPS  6u        /* intensity steps                      */
 #define EYE_GLOW_PEAK  26u        /* strongest mix, out of 64             */
 #define EYE_GLOW_POS    8u        /* vertical positions across the travel */
+/* The band the pool is repainted over, FIXED, covering every position it can
+ * take. It has to be: the pool moves, and a redraw that only covered its own
+ * span left up to 54 rows of the previous position on screen -- seen as a
+ * faint line above the light. Self-erasing only works if the repainted area
+ * does not move, so the area is the union and the rest is painted bed. */
+#define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
+#define EYE_GLOW_ROWS  56u        /* ...and how many rows it spans         */
 /* POSITION and BRIGHTNESS come from different places, and that split is the
  * point.
  *
@@ -2725,7 +2732,11 @@ static void ui_draw_dynamic(void)
                                 2, 1, EYE_GETTER);
                 }
 
-                fb_round_rect(x0 - 8u, basy, pair + 16u, 5u, 2u, basc);
+                /* Exactly the width of the pair, not wider. Overhanging it
+                  * put 8px of plinth under each pool, and the pool repaints
+                  * that span with the bed -- which chewed the ends off the
+                  * base plate and read as a gap in the light. */
+                fb_round_rect(x0, basy, pair, 5u, 2u, basc);
                 eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
                 /* The box was just cleared, so there is no old cone to
                  * erase -- and after a width change its coordinates would
@@ -2802,42 +2813,60 @@ static void ui_draw_dynamic(void)
                 uint8_t  key  = (uint8_t)(step * 16u + pos);
                 uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
                 if (!eye_face || key != *cast) {
-                    /* Midpoint of the lit strip, then held inside the box
-                     * so a pool centred low cannot run off the bottom. */
+                    /* Midpoint of the lit strip, held so the pool stays
+                     * inside its repaint band. */
                     uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
-                    if (gcy < UI_WAVE_Y + EYE_GLOW_RY)
-                        gcy = UI_WAVE_Y + EYE_GLOW_RY;
-                    if (gcy + EYE_GLOW_RY > UI_WAVE_Y + UI_WAVE_H)
-                        gcy = UI_WAVE_Y + UI_WAVE_H - EYE_GLOW_RY;
+                    uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                    if (gcy < top + EYE_GLOW_RY) gcy = top + EYE_GLOW_RY;
+                    if (gcy + EYE_GLOW_RY > top + EYE_GLOW_ROWS)
+                        gcy = top + EYE_GLOW_ROWS - EYE_GLOW_RY;
+
                     uint32_t bw   = EYE_GLOW_RX / EYE_GLOW_NB;
                     uint32_t base = ch ? (tx + EYE_TUBE_W)
                                        : (tx - EYE_GLOW_RX);
                     uint32_t amt  = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
 
-                    for (uint32_t k = 0; k < 2u * EYE_GLOW_RY;
-                         k += EYE_GLOW_S) {
-                        uint32_t y  = gcy - EYE_GLOW_RY + k;
-                        uint32_t dy = (y + EYE_GLOW_S / 2u > gcy)
-                                    ? (y + EYE_GLOW_S / 2u - gcy)
-                                    : (gcy - y - EYE_GLOW_S / 2u);
-                        /* Half-width of the ellipse at this row, by the same
-                         * integer circle search the crown uses. */
-                        uint32_t yc = 0;
-                        while ((yc + 1u) * (yc + 1u) + dy * dy
-                               <= EYE_GLOW_RY * EYE_GLOW_RY) yc++;
-                        uint32_t rx = (EYE_GLOW_RX * yc) / EYE_GLOW_RY;
-                        uint16_t bg = ui_grad_at(y);
+                    for (uint32_t k = 0; k < EYE_GLOW_ROWS; k += EYE_GLOW_S) {
+                        uint32_t y   = top + k;
+                        uint32_t mid = y + EYE_GLOW_S / 2u;
+                        uint32_t dy  = (mid > gcy) ? (mid - gcy) : (gcy - mid);
+                        uint16_t bg  = ui_grad_at(y);
 
-                        for (uint32_t b = 0; b < EYE_GLOW_NB; b++) {
+                        /* Half-width of the ellipse at this row, by the same
+                         * integer circle search the crown uses. Rows outside
+                         * the pool get rx 0 and fall straight through to the
+                         * bed fill, which is what erases the old position. */
+                        uint32_t rx = 0;
+                        if (dy < EYE_GLOW_RY) {
+                            uint32_t q = 0;
+                            while ((q + 1u) * (q + 1u) + dy * dy
+                                   <= EYE_GLOW_RY * EYE_GLOW_RY) q++;
+                            rx = (EYE_GLOW_RX * q) / EYE_GLOW_RY;
+                        }
+
+                        uint32_t nb = 0;
+                        while (nb < EYE_GLOW_NB
+                               && (nb * bw + bw / 2u) < rx) nb++;
+
+                        for (uint32_t b = 0; b < nb; b++) {
                             uint32_t d   = b * bw + bw / 2u;   /* from tube */
-                            uint32_t wgt = (d < rx)
-                                         ? (amt * (rx - d)) / EYE_GLOW_RX : 0u;
+                            uint32_t wgt = (amt * (rx - d)) / EYE_GLOW_RX;
                             uint32_t gx  = ch
                                          ? (base + b * bw)
                                          : (base + (EYE_GLOW_NB - 1u - b) * bw);
                             fb_rect(gx, y, bw, EYE_GLOW_S,
                                     wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
                         }
+
+                        /* Everything the pool does not reach, in ONE rect --
+                         * so the whole band is repainted every time and the
+                         * pool cleans up after its own previous position,
+                         * without a separate erase pass. Bands are 8px and
+                         * tile the reach exactly, so the two tubes always
+                         * light identical areas. */
+                        if (nb < EYE_GLOW_NB)
+                            fb_rect(ch ? (base + nb * bw) : base, y,
+                                    (EYE_GLOW_NB - nb) * bw, EYE_GLOW_S, bg);
                     }
                     *cast = key;
                 }
