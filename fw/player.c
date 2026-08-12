@@ -906,8 +906,13 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * All three run off what the decoder already produces -- there are no frequency
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over
  * TIME, LEVELS shows the two channels right now. */
+/* APPEND ONLY -- never reorder, never insert.
+ *
+ * viz_mode is persisted as an INDEX, so moving an entry silently repoints
+ * every user's saved meter at a different one. Same rule as the interact.json
+ * ids. New modes go immediately before VIZ_COUNT. */
 enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
-       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_COUNT };
+       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_EYE, VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
  * the vertical -- the standard goniometer orientation, and the reason it reads
@@ -956,6 +961,32 @@ static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
 static uint8_t  vu_face;          /* the static face is on screen        */
 static uint16_t vu_face_w;        /* ...and the width it was drawn for   */
 static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
+
+/* ---- Magic eye (6E5 indicator tube) -----------------------------------
+ *
+ * A circular phosphor target with a dark wedge that CLOSES as the signal
+ * rises -- silence is a wide shadow, full scale is none. Shares the VU's
+ * ballistics deliberately: both are pretending to be the same era of gear,
+ * and two different feels would read as two different instruments.
+ *
+ * Drawn as ROW SPANS, not radial spokes. Spokes are the obvious way to fill
+ * a wedge and cost roughly 1200 fb_rect calls a frame, each one waiting on
+ * the hardware. A circle and a wedge are both row-shaped, so one span per
+ * scanline does the same job -- and once the disc is cached, only the few
+ * pixels the wedge edge actually moved are repainted.
+ *
+ * GREEN, not the accent. Everything else on this screen is a tone of
+ * ui_accent, on purpose (see the VU face). This one breaks that rule
+ * knowingly: a magic eye that is not that specific green is not a magic
+ * eye, it is a pie chart. */
+#define EYE_GREEN   0x37ECu       /* phosphor                              */
+#define EYE_DIM     0x1B26u       /* rim falloff: the envelope's edge      */
+#define EYE_SHADOW  0x0942u       /* the wedge -- dark, but still greenish */
+static uint32_t eye_v;            /* Q8 deflection, 0..255                 */
+static uint8_t  eye_face;         /* the static disc is on screen          */
+static uint16_t eye_face_w;       /* ...and the width it was drawn for     */
+static uint8_t  eye_shown;        /* deflection the wedge is drawn for     */
+static uint8_t  eye_hw[40];       /* circle half-width per row, by |dy|    */
 
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
@@ -2313,7 +2344,12 @@ static void ui_draw_dynamic(void)
      * meter that freezes mid-deflection looks broken, and the fall to zero is
      * the most characterful thing an analogue movement does. Every other mode
      * is genuinely static when paused and stays frozen. */
-    uint32_t vu_settling = (viz_mode == VIZ_VU) && (vu_l || vu_r);
+    /* The eye settles for the same reason the needles do: its shadow OPENING
+     * back to rest is the movement that makes it look like a tube rather than
+     * a graphic, and freezing it half-shut looks broken. eye_v counts DOWN to
+     * rest, so "not yet settled" is a non-zero deflection, same as the VU. */
+    uint32_t vu_settling = ((viz_mode == VIZ_VU)  && (vu_l || vu_r)) ||
+                           ((viz_mode == VIZ_EYE) && eye_v);
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
 
@@ -2537,6 +2573,117 @@ static void ui_draw_dynamic(void)
             }
             vu_face = 1;
             vu_face_w = (uint16_t)ww;
+            goto viz_done;
+        }
+
+        /* ---- MAGIC EYE ----------------------------------------------------
+         * See the EYE_* block for why this is drawn as row spans and why it
+         * is green. Two passes: a cached disc, then a wedge that repaints
+         * only the pixels its edge actually crossed. */
+        if (viz_mode == VIZ_EYE) {
+            if (wf || ww != eye_face_w) eye_face = 0;
+
+            /* Fit the box on whichever axis is tighter -- the width moves with
+             * the art panel, so a radius derived from height alone would run
+             * off the sides once the panel is hidden. */
+            uint32_t r = (UI_WAVE_H / 2u) - 2u;
+            uint32_t rw = (ww / 2u > 2u) ? (ww / 2u - 2u) : 1u;
+            if (r > rw) r = rw;
+            if (r > sizeof(eye_hw) - 1u) r = sizeof(eye_hw) - 1u;
+            uint32_t hub = r / 6u;                  /* the cathode shield */
+            uint32_t cx  = UI_MARGIN + ww / 2u;
+            uint32_t cy  = UI_WAVE_Y + UI_WAVE_H / 2u;
+
+            /* VU ballistics, on the loudest channel. peak_amp is already the
+             * max of the two, which is what a single-eye tube would show. */
+            uint32_t tgt = (peak_amp * 255u) / 32768u;
+            if (tgt > 255u) tgt = 255u;
+            if (paused) tgt = 0;
+            if (tgt > eye_v) { eye_v += VU_ATT; if (eye_v > tgt) eye_v = tgt; }
+            else             { eye_v = (eye_v > VU_DEC) ? (eye_v - VU_DEC) : 0u;
+                               if (eye_v < tgt) eye_v = tgt; }
+
+            if (!eye_face) {
+                fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+
+                /* Half-width per row by integer search, ONCE per geometry --
+                 * ~35 iterations total, against a sqrt per row per frame. */
+                for (uint32_t dy = 0; dy <= r; dy++) {
+                    uint32_t rem = r * r - dy * dy;
+                    uint32_t k = 0;
+                    while ((k + 1u) * (k + 1u) <= rem) k++;
+                    eye_hw[dy] = (uint8_t)k;
+
+                    /* Rim rows get the dimmer tone so the disc has an edge
+                     * rather than a hard cut against the gradient. */
+                    uint16_t c = (dy > r - 2u) ? EYE_DIM : EYE_GREEN;
+                    fb_rect(cx - k, cy - dy, 2u * k + 1u, 1, c);
+                    if (dy) fb_rect(cx - k, cy + dy, 2u * k + 1u, 1, c);
+                }
+
+                /* Hub last: the wedge converges on it, which is what makes
+                 * the shadow read as cast BY something. */
+                for (uint32_t dy = 0; dy <= hub; dy++) {
+                    uint32_t rem = hub * hub - dy * dy;
+                    uint32_t k = 0;
+                    while ((k + 1u) * (k + 1u) <= rem) k++;
+                    fb_rect(cx - k, cy - dy, 2u * k + 1u, 1, EYE_SHADOW);
+                    if (dy) fb_rect(cx - k, cy + dy, 2u * k + 1u, 1, EYE_SHADOW);
+                }
+
+                /* 255 == fully closed == no wedge on screen, which is exactly
+                 * what the disc we just drew shows. */
+                eye_shown = 255u;
+            }
+
+            uint8_t now = (uint8_t)eye_v;
+            if (eye_face && now == eye_shown) goto viz_done;   /* nothing moved */
+
+            /* Wedge half-width is linear in dy: w = dy * tan(theta). Reuse the
+             * VU's table -- index 8 is 0 degrees and 16 is +50, so mapping the
+             * INVERSE of the level onto 128..255 gives a wedge that is widest
+             * at silence and shut at full scale. One divide per frame, hoisted
+             * out of the row loop as a Q12 slope. */
+            int32_t sn, cs;
+            vu_angle(128u + (255u - now) / 2u, &sn, &cs);
+            int32_t slope = cs ? (sn * 4096) / cs : 0;
+
+            /* Repaint each row WHOLE -- shadow, then phosphor out to the rim
+             * on both sides -- rather than painting only the sliver the edge
+             * crossed.
+             *
+             * The sliver version was cheaper and WRONG, which tools/
+             * eye_preview.py showed before this ever reached hardware. Slivers
+             * make the wedge an even number of pixels wide, so it sits half a
+             * pixel off the axis; on every row where it should have covered
+             * the disc completely it left one lit pixel on the right rim, and
+             * those stack into a bright diagonal scar down the shadow.
+             *
+             * Whole rows are symmetric by construction: 2w+1 of shadow plus
+             * (hw-w) of phosphor each side is exactly the 2hw+1 the row has.
+             * Three rects a row, ~28 rows, and only when the level moved --
+             * the same order as the bars. No flicker either: every pixel goes
+             * straight from its old colour to its new one, where the VU's
+             * problem was clearing to the bed FIRST and being scanned out in
+             * between. */
+            for (uint32_t dy = hub + 1u; dy <= r; dy++) {
+                int32_t hw = (int32_t)eye_hw[dy];
+                int32_t w  = ((int32_t)dy * slope) >> 12;
+                if (w > hw) w = hw;
+
+                fb_rect(cx - (uint32_t)w, cy + dy,
+                        2u * (uint32_t)w + 1u, 1, EYE_SHADOW);
+                if (hw > w) {
+                    uint16_t ph = (dy > r - 2u) ? EYE_DIM : EYE_GREEN;
+                    uint32_t n  = (uint32_t)(hw - w);
+                    fb_rect(cx - (uint32_t)hw,     cy + dy, n, 1, ph);
+                    fb_rect(cx + (uint32_t)w + 1u, cy + dy, n, 1, ph);
+                }
+            }
+
+            eye_shown = now;
+            eye_face  = 1;
+            eye_face_w = (uint16_t)ww;
             goto viz_done;
         }
 
@@ -3347,7 +3494,7 @@ static void poll_input(void)
     }
     if (edge & KEY_X) {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
-         * modes wrap in nine taps, and every Select combo the user has to
+         * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
         viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
         ui_wave_clear();                 /* modes do not share a screen layout */
@@ -3364,7 +3511,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_VU     ? "METER: VU"
                    : viz_mode == VIZ_SCROLL ? "METER: WAVEFORM"
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
-                                            : "METER: PEAK DOTS");
+                   : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
+                                            : "METER: MAGIC EYE");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {

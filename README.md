@@ -43,7 +43,7 @@ and whatever you pick starts playing.
 | **Select** + **Left** / **Right** | Seek one second |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter (nine styles) |
+| **X** | Cycle the meter (ten styles) |
 | **Y** | Cycle the EQ preset (eight) |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
@@ -156,9 +156,10 @@ not how many lines the file has.
   files that carry nothing else.
 - **Album art** from the tag's embedded image — JPEG only; tracks without it
   don't show the panel.
-- **Nine meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
-  oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars and
-  peak dots.
+- **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
+  oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
+  peak dots and a magic eye — the 6E5 indicator tube, whose shadow closes as
+  the signal rises.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
