@@ -702,6 +702,36 @@ static int pl_advance_auto(void)
 
 /* Load (or reload) the playlist slot. Safe to call when no playlist file is
  * present -- pl_count stays 0 and every playlist control becomes a no-op. */
+/* The playlist slot's own filename, last component only, uppercased for the
+ * splash. Empty if APF has nothing there or will not answer.
+ *
+ * Doubles as the diagnostic for the multi-playlist defect: our code never
+ * names a playlist, it just reads whatever is in slot 3, so if resume behaves
+ * differently for audiobook.m3u than for playlist.m3u the difference has to be
+ * in what APF put there. Showing the name settles that in one boot. */
+static void pl_name_read(void)
+{
+    pl_name[0] = 0;
+    uint8_t buf[DT_WORDS * 4u];
+    uint32_t at = 0, len = pl_template(PL_SLOT_ID, buf, &at);
+    if (!len) return;
+
+    /* Last path component only -- the slot holds a full path. */
+    uint32_t start = at;
+    for (uint32_t i = at; i < at + len; i++)
+        /* 0x5C is a backslash; writing it as a char literal here kept
+         * getting mangled by the tooling that generated this file. */
+        if (buf[i] == '/' || buf[i] == 0x5Cu) start = i + 1u;
+
+    uint32_t n = 0;
+    for (uint32_t i = start; i < at + len && n < sizeof(pl_name) - 1u; i++) {
+        char c = (char)buf[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        pl_name[n++] = c;
+    }
+    pl_name[n] = 0;
+}
+
 static void pl_load(void)
 {
     pl_count = 0; pl_pos = 0; pl_status = PL_OK;
@@ -709,6 +739,7 @@ static void pl_load(void)
      * way back for a user who fixed a filename on the card -- re-picking the
      * playlist gives every entry another chance. */
     pl_dead_clear();
+    pl_name_read();
     uint32_t len = pl_read_raw();
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
     pl_parse(len);

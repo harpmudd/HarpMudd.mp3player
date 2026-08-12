@@ -636,6 +636,12 @@ static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
 static uint16_t pl_live_count(void);
 static uint16_t pl_live_ordinal(uint16_t pos);
+/* The loaded playlist's own filename, last component, uppercased. Filled by
+ * pl_name_read() in playlist.inc, which is included below -- declared here
+ * because the splash summary above it draws the name. Empty when APF will not
+ * say what is in the slot. */
+static char pl_name[24];
+
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
 /* Set by settings_load() once APF's stored values have been taken. Nothing may
@@ -1962,15 +1968,20 @@ static void ui_splash_summary(uint32_t n)
     b[i] = 0;
 
     uint16_t bg = ui_grad_at(UI_SPL_INFO_Y);
+    uint32_t w  = fb_text_width(b, TS_1X);   /* hoisted: the label clips to it */
     fb_set_color(UI_DIM, bg);
     /* A clipped list has to say so here too. The count alone is the one thing
      * that cannot reveal it -- a playlist cut to 128 looks exactly like a
      * playlist of 128. */
-    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y,
-                    pl_truncated ? "PLAYLIST CLIPPED" : "PLAYLIST",
-                    TS_1X, TS_1X, UI_INNER_W);
+    /* Name the playlist rather than saying "PLAYLIST", so a user running more
+     * than one can see which is loaded. Falls back to the generic word when
+     * APF will not say. */
+    const char *lbl = pl_truncated ? "PLAYLIST CLIPPED"
+                    : pl_name[0]   ? pl_name
+                    :                "PLAYLIST";
+    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y, lbl,
+                    TS_1X, TS_1X, UI_INNER_W - w - 12u);
     fb_set_color(ui_accent, bg);
-    uint32_t w = fb_text_width(b, TS_1X);
     fb_text_clipped(FB_W - UI_MARGIN - w, UI_SPL_INFO_Y, b, TS_1X, TS_1X, w);
 }
 

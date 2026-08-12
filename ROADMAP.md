@@ -17,7 +17,83 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-**None open.** The settings-persistence blocker is resolved — see Fixed.
+See the entry above.
+
+# Defects
+
+## Resume only works with the DEFAULT playlist — branch `resume-playlist-name`
+
+Reported by a user against v1.1.0. Resume restores track and position fine with
+`playlist.m3u`, but a user running `audiobook.m3u` does not get their place
+back. Multiple named playlists is a reasonable thing to do and the feature
+should support it.
+
+### What is already established, without a hardware round
+
+**The firmware never names a playlist.** `pl_load()` reads whatever APF has put
+in slot 3; nothing in `fw/` contains the string `playlist.m3u` outside a
+getting-started caption. So the behaviour CANNOT differ between two playlists
+because of our code -- the difference has to be in what APF puts in the slot.
+
+**And `data.json` is the only thing that distinguishes them:**
+
+| slot | declared `filename` | retained across launches? |
+|------|--------------------|---------------------------|
+| 2 MP3 | none | YES -- proven; resume depends on it |
+| 3 Playlist | `playlist.m3u` | reported NO |
+
+So the leading theory is that **a slot with a declared `filename` is reset to
+that file at core load, while a slot without one keeps the user's pick.** That
+fits both observations exactly and needs no new mechanism to explain.
+
+**NOT yet confirmed.** It is a deduction from one report plus the slot table.
+Confirm before building on it.
+
+### The confirmation, which is also a feature
+
+`pl_name_read()` asks 0190 for slot 3's filename and the splash summary now
+prints it in place of the word PLAYLIST -- `AUDIOBOOK.M3U  12 TRACKS`. Useful
+on its own for anyone running more than one list, and it settles the theory in
+a single boot:
+
+- launch after picking `audiobook.m3u`, and the splash says **PLAYLIST.M3U**
+  -> the slot was reset, theory confirmed
+- it says **AUDIOBOOK.M3U** -> the slot IS retained and the fault is elsewhere,
+  theory dead, look at the saved track index instead
+
+### The fix, if the theory holds
+
+**Remove `"filename": "playlist.m3u"` from slot 3**, so it retains the last
+pick like the MP3 slot does. That alone breaks first-run behaviour -- a card
+with `playlist.m3u` on it would no longer auto-load -- so pair it with: at
+boot, if the slot is empty, open `playlist.m3u` into it BY NAME with 0192.
+`pl_open_name()` already does that shape of open; it would need a variant
+targeting slot 3.
+
+Net effect: the default still loads for a new user, and a user who picks
+another list keeps it. **No settings slot, no RTL, no CORE_VERSION bump.**
+
+### Why NOT to store the playlist name in a setting
+
+The obvious alternative is saving the name alongside the resume point. It is
+much worse:
+
+- Settings words are 32-bit ints. A name needs four words for sixteen
+  characters, and **there are no free slots** -- widening the index means RTL,
+  a CORE_VERSION bump and a timing round.
+- APF has no directory listing, so a stored name only helps if we can reopen it
+  by name -- which is exactly what the cheap fix does anyway, without storing
+  anything.
+
+Only worth revisiting if the slot genuinely cannot be made to retain.
+
+### Version
+
+**v1.1.1.** It is a defect in a shipped feature, not new capability: resume is
+documented as remembering your place in a playlist and does not, for anyone
+not using the default name. Naming the playlist on the splash is a small
+visible addition riding along, which is a patch-release judgement call rather
+than a minor bump.
 
 # Enhancements
 
