@@ -666,6 +666,23 @@ static uint8_t pl_restore_pending = 1u;
 
 /* Gate for a playlist-slot reload, mirroring the one the MP3 slot already has.
  * 008A means the user PICKED a file, not that the slot is readable yet. */
+/* Belt and braces for a notification that never arrives.
+ *
+ * The user reproduced a pick that produced NOTHING -- no LOADING message, no
+ * load, however long they waited -- on a build where the transport row can no
+ * longer paint over that message. So 008A for slot 3 had not reached firmware
+ * at all, and nothing downstream of it can help: every retry, gate and cache
+ * flush added so far is waiting on an event that is not coming.
+ *
+ * So stop depending on it being delivered. The pick can only happen in the
+ * Analogue menu, and the core is told when that closes -- so ASK the slot what
+ * it holds at exactly that moment. One 0190 per menu close, at a point where
+ * playback is already interrupted, against a notification that is sometimes
+ * simply absent. */
+static uint8_t  pl_check_req;     /* menu just closed: ask slot 3 what it holds */
+static uint8_t  pl_skip_gate;     /* 0190 already proved it changed             */
+static uint32_t pl_fb_at;         /* when the fallback last loaded              */
+static char     pl_cur_name[24];  /* the playlist that is actually loaded       */
 static uint16_t pl_notify_n;      /* playlist notifications seen from the RTL */
 static uint16_t pl_load_n;        /* times pl_load() actually ran             */
 static uint32_t pl_reload_seen;   /* OR of every R_RELOAD word observed       */
@@ -4084,7 +4101,11 @@ static void poll_input(void)
      * be left, so a pending settings write goes out now rather than waiting
      * out its quiet window that may never elapse. */
     if (in & IN_MENU) { if (!(paused & 2u)) set_flush_now = 1u; paused |= 2u; }
-    else paused &= ~2u;
+    else {
+        /* CLOSING edge: the moment a Load Playlist pick has just been made. */
+        if (paused & 2u) pl_check_req = 1u;
+        paused &= ~2u;
+    }
 
     /* Only SET the flag here. This runs from inside the sample-push wait,
      * which is where the CPU spends most of its time when keeping up, so a
@@ -5599,9 +5620,45 @@ int main(void)
          *
          * Record what we are leaving, then wait for 0190 to report something
          * else. Positive confirmation, not a blind delay. */
+        /* Menu just closed. Ask slot 3 what it holds; if it is not what we
+         * loaded, the notification for it never arrived, so raise the same
+         * request it would have. Costs one 0190 at a moment when playback is
+         * already interrupted -- a metadata query, not a slot READ, so it does
+         * not drag the MP3 slot's fragment cache down with it the way a
+         * periodic poll of slot 3 would. */
+        if (pl_check_req) {
+            pl_check_req = 0;
+            pl_name_read();
+            int differs = 0;
+            for (uint32_t i = 0; i < sizeof(pl_cur_name); i++) {
+                if (pl_name_raw[i] != pl_cur_name[i]) { differs = 1; break; }
+                if (!pl_cur_name[i]) break;
+            }
+            /* Only when the slot names something. An empty answer means APF
+             * would not say, which is not evidence of a change. */
+            if (differs && pl_name_raw[0]) {
+                pl_fb_at = cycles();
+                pl_reload_pending = 1u;
+                /* 0190 has ALREADY proved the slot switched, so the gate has
+                 * nothing left to wait for -- without this it would sit out
+                 * its full five seconds and expire. */
+                pl_skip_gate = 1u;
+            }
+            continue;
+        }
+
         if (pl_reload_pending) {
             pl_reload_pending = 0;
             REG(R_RELOAD) = RL_PL_RELOAD;            /* ack just this bit */
+            /* A notification that lands just AFTER the menu-close fallback
+             * already loaded this pick is the same event twice. Without this
+             * it re-arms, finds the name unchanged, sits out the full five
+             * seconds and then reloads the list it is already playing --
+             * turning a dropped 008A into a worse fault than the one being
+             * worked around. Three seconds only, so a deliberate re-pick of
+             * the same list still reloads it. */
+            if (pl_fb_at && (uint32_t)(cycles() - pl_fb_at) < CLK_HZ * 3u)
+                continue;
             for (uint32_t i = 0; i < sizeof(pl_leaving); i++)
                 pl_leaving[i] = pl_name_raw[i];
             pl_reload_armed = 1u;
@@ -5632,7 +5689,13 @@ int main(void)
                     if (!pl_leaving[i]) break;
                 }
 
-                if (changed || expired) {
+                if (changed || expired || pl_skip_gate) {
+                    /* The fallback set pl_leaving from a name 0190 had
+                     * ALREADY refreshed, so the "did it really change" retry
+                     * below would compare the new name against itself, call
+                     * it unchanged and load a second time. It has nothing to
+                     * check here -- 0190 is the evidence. */
+                    if (pl_skip_gate) { pl_skip_gate = 0; pl_retry = 0; }
                     pl_reload_armed = 0;
                     pl_load_n++;
                     pl_sw_ge = changed ? 1u : 2u;

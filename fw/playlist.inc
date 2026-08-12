@@ -876,6 +876,8 @@ static void pl_load(void)
      * cluster chain, whose timing varies run to run, so the cycle counter here
      * is not the fixed value it would be earlier in a deterministic boot. */
     pl_remember();
+    for (uint32_t i = 0; i < sizeof(pl_cur_name); i++)
+        pl_cur_name[i] = pl_name_raw[i];
     pl_rng = cycles() | 1u;
     pl_reorder();
 }
