@@ -145,7 +145,7 @@ not how many lines the file has.
   don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
   oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
-  peak dots and a magic eye — a pair of EM84 tubes, one per channel.
+  peak dots and a magic eye.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
