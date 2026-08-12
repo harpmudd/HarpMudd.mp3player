@@ -656,6 +656,10 @@ static uint16_t pl_live_ordinal(uint16_t pos);
  * say what is in the slot. */
 static char pl_name[24];
 static char pl_name_raw[24];      /* same, in the card's own spelling */
+/* Fingerprint of the .m3u TEXT last parsed, so "did the slot actually switch"
+ * can be answered from the bytes rather than from the name APF reports. Zero
+ * when nothing has parsed. */
+static uint32_t pl_sig;
 /* The remembered list is reopened at BOOT only. pl_load() also runs whenever
  * the user picks a playlist, and restoring there would override the pick. */
 static uint8_t pl_restore_pending = 1u;
@@ -4970,10 +4974,10 @@ int main(void)
             if ((int32_t)(cycles() - reload_settle)   >= 0 &&
                 (int32_t)(cycles() - reload_probe_at) >= 0) {
                 reload_probe_at = cycles() + CLK_HZ / 10u;
-                /* Refreshed each probe: a toast holds ~1 s then dissolves, and
-                 * this gate waits at least 1.5 s, so without this it fades out
-                 * mid-load and reads as nothing happening. */
-                ui_toast_msg("LOADING TRACK");
+                /* No toast here. The boot row went up when the pick was
+                 * detected and holds by itself until ui_boot_cancel(); a toast
+                 * refreshed alongside it put the SAME words on a second line,
+                 * which is the duplicate that kept being reported. */
                 uint32_t id = slot_file_id();
                 if (id != 0u && id != stale_ref_file_id) ready = 1;
             }
@@ -5083,9 +5087,7 @@ int main(void)
             if (due || expired) {
                 pl_probe_at = cycles() + CLK_HZ / 10u;
                 pl_name_read();
-                /* Refreshed each probe: a toast holds ~1 s then dissolves, so
-                 * a slow switch would fade it out mid-load. */
-                ui_toast_msg("LOADING PLAYLIST");
+                /* No toast: the boot row is already showing this. */
 
                 int changed = 0;
                 for (uint32_t i = 0; i < sizeof(pl_leaving); i++) {
@@ -5103,6 +5105,7 @@ int main(void)
                     pcm_flush();
                     refill_drain();
                     ring_fill = 0; ring_rd = 0;
+                    uint32_t sig_was = pl_sig;
                     pl_load();
 
                     /* Did the switch actually happen?
@@ -5125,10 +5128,43 @@ int main(void)
                             if (pl_name_raw[i] != pl_leaving[i]) { same = 0; break; }
                             if (!pl_leaving[i]) break;
                         }
-                        if (same) {
+
+                        /* The name check alone was NOT enough, and the report
+                         * that it still happens is what shows why.
+                         *
+                         * There are two stale things here, not one. 0190 can
+                         * still name the old file -- that is `same`, and it is
+                         * caught. But 0190 can ALSO report the new name while
+                         * the reads keep coming out of APF's fragment cache,
+                         * so the bytes are the old list under the new name.
+                         * The name check passes, no retry fires, and the old
+                         * playlist plays: exactly the surviving symptom.
+                         *
+                         * The text answers it directly. Two different lists
+                         * hashing the same means they hold identical bytes, in
+                         * which case reloading costs one wasted attempt and
+                         * changes nothing the user hears. */
+                        int stale = (!same && pl_sig && pl_sig == sig_was);
+
+                        if (same || stale) {
                             pl_retry        = 0;
+                            /* Reopening the slot by the name APF is NOW
+                             * reporting makes it re-resolve the file, which is
+                             * what drops the fragment cache. Waiting alone does
+                             * not: the cache has no timeout. */
+                            if (stale) {
+                                char again[sizeof(pl_name_raw)];
+                                for (uint32_t i = 0; i < sizeof(again); i++)
+                                    again[i] = pl_name_raw[i];
+                                pl_open_into(PL_SLOT_ID, again);
+                            }
                             pl_reload_armed = 1u;
-                            pl_probe_at     = cycles() + CLK_HZ / 10u;
+                            /* A stale read has already changed name, so its
+                             * probe fires at once -- this delay IS the settle.
+                             * The `same` case is still waiting on the name, so
+                             * it keeps the fast poll. */
+                            pl_probe_at     = cycles() +
+                                              (stale ? CLK_HZ / 2u : CLK_HZ / 10u);
                             pl_reload_at    = cycles() + CLK_HZ * 5u;
                             continue;        /* indicator stays up across it */
                         }

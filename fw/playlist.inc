@@ -850,6 +850,17 @@ static void pl_load(void)
         len = pl_read_raw();
     }
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
+
+    /* FNV-1a over the raw text, before parsing touches anything. */
+    {
+        uint32_t h = 2166136261u;
+        for (uint32_t i = 0; i < len; i++) {
+            h ^= (uint32_t)(uint8_t)pl_text[i];
+            h *= 16777619u;
+        }
+        pl_sig = h ? h : 1u;               /* 0 is reserved for "none" */
+    }
+
     pl_parse(len);
     if (!pl_count) { pl_status = PL_ERR_EMPTY; return; }
 
