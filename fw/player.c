@@ -1032,11 +1032,20 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * so bands past the current reach are painted with the bed itself and there is
  * no separate erase pass. Quantised into 4-row strips: the bed is a dithered
  * per-row gradient, and over four rows the ramp moves well under one level. */
-#define EYE_GLOW_RX    40u        /* how far the light reaches outward    */
+#define EYE_GLOW_RX    56u        /* how far the light reaches outward    */
 #define EYE_GLOW_RY    24u        /* ...and half how tall the pool is     */
-#define EYE_GLOW_NB     5u        /* bands across that reach              */
+#define EYE_GLOW_NB     7u        /* bands across that reach -- 8px each  */
 #define EYE_GLOW_S      4u        /* rows per quantised strip             */
 #define EYE_GLOW_STEPS  6u        /* intensity steps; redrawn on a change */
+#define EYE_GLOW_PEAK  26u        /* strongest mix, out of 64             */
+/* The pool RIDES a little with the strip -- not tracking its tip, which put
+ * the light down at the socket, but drifting a few pixels up as the level
+ * rises. Anchoring it dead still read as a lamp behind the tube rather than
+ * as the tube's own glow; a small sympathetic movement is what ties them
+ * together. Quantised like the intensity, so it costs redraws only when it
+ * actually shifts. */
+#define EYE_GLOW_TRAV   6u        /* half the total drift, in rows        */
+#define EYE_GLOW_POS    6u        /* positions across that drift          */
 static uint32_t eye_gl_l, eye_gl_r;        /* slow-smoothed level         */
 static uint8_t  eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;   /* step drawn   */
 
@@ -1238,6 +1247,20 @@ static void ui_art_bg_range(uint32_t x, uint32_t w)
         fb_rect(x, y, w, 1, ui_grad_at(y));
 }
 
+/* Every meter that CACHES part of itself on screen has to be listed here, and
+ * anything that erases the meter band must call this.
+ *
+ * Twice now a cached face has been wiped and never come back while the moving
+ * part carried on repainting itself: the VU's arc when the album art slid over
+ * it, and the magic eye's envelope on a track change. Both were one missing
+ * assignment at a site that already cleared the OTHER meter. A list of one
+ * invites that; a list with a name is at least the place to look. */
+static void ui_meter_faces_invalidate(void)
+{
+    vu_face  = 0;
+    eye_face = 0;
+}
+
 /* Blit the stash to the current position, clipped at the right edge. The panel
  * enters from the right, so only its leftmost columns are on screen at first --
  * and an unclipped copy would run past column 400 into the memory the NEXT
@@ -1248,7 +1271,7 @@ static void ui_art_draw(void)
      * over a cached VU face -- which is how hiding the art left the right
      * meter's arc erased for good: the width changed once, the face was
      * redrawn once, and then the slide wiped it again. */
-    vu_face = 0;
+    ui_meter_faces_invalidate();
 
     if (!art_ready || art_x >= FB_W) return;
     uint32_t w = FB_W - art_x;
@@ -1435,7 +1458,7 @@ static void ui_wave_clear(void)
      * ticks and labels are wiped and never come back, while the needle
      * carries on repainting itself. Hiding the album art did exactly
      * that. */
-    vu_face = 0;
+    ui_meter_faces_invalidate();
 
     for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
@@ -2759,13 +2782,17 @@ static void ui_draw_dynamic(void)
                  * block: fixed centre, elliptical, slow, and only touched
                  * when its quantised level actually changes. */
                 uint8_t  step = (uint8_t)((*g * EYE_GLOW_STEPS) / 256u);
+                uint32_t pos  = (*g * EYE_GLOW_POS) / 256u;
+                uint8_t  key  = (uint8_t)(step * 8u + pos);
                 uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
-                if (!eye_face || step != *cast) {
-                    uint32_t gcy  = ty + EYE_TUBE_H / 2u;
+                if (!eye_face || key != *cast) {
+                    uint32_t gcy  = ty + EYE_TUBE_H / 2u + EYE_GLOW_TRAV
+                                  - (pos * 2u * EYE_GLOW_TRAV)
+                                    / (EYE_GLOW_POS - 1u);
                     uint32_t bw   = EYE_GLOW_RX / EYE_GLOW_NB;
                     uint32_t base = ch ? (tx + EYE_TUBE_W)
                                        : (tx - EYE_GLOW_RX);
-                    uint32_t amt  = (step * 18u) / EYE_GLOW_STEPS;
+                    uint32_t amt  = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
 
                     for (uint32_t k = 0; k < 2u * EYE_GLOW_RY;
                          k += EYE_GLOW_S) {
@@ -2792,7 +2819,7 @@ static void ui_draw_dynamic(void)
                                     wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
                         }
                     }
-                    *cast = step;
+                    *cast = key;
                 }
             }
 
