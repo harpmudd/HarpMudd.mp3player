@@ -17,10 +17,6 @@ the reasoning, not the status.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-See the entry above.
-
-# Defects
-
 ## Resume only works with the DEFAULT playlist — branch `resume-playlist-name`
 
 Reported by a user against v1.1.0. Resume restores track and position fine with
