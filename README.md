@@ -178,7 +178,7 @@ framework bugs that had to be found first — is in
   comes first, which allows about 128 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
 - **Occasionally a playlist pick doesn't take.** Pick it again and it loads.
-  Only seen when switching from one playlist to another.
+  Seen when switching from one playlist to another.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
