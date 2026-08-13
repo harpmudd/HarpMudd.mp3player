@@ -394,23 +394,57 @@ a fraction of the work, and against MP3 files that already play.
 
 ## Track changes take too long — user report 2026-08-12
 
-"Skipping titles needs a bit long time." Real, and measured rather than
-guessed: the load path is already instrumented as `ld_head`, `ld_size`,
-`ld_art`, `ld_pre` and `ld_total`. **Read those before optimising anything** --
-two earlier attempts to reason about this were wrong, and the numbers are
-already there.
+"Skipping titles needs a bit long time." Real, and the load path is already
+instrumented: `ld_head`, `ld_size`, `ld_art`, `ld_pre`, `ld_total`, all live,
+all one flag away (`UI_SHOW_DIAG 1`).
 
-Artwork decode dominates. The known levers, in order:
+### MEASURE FIRST — and there is a live disagreement to settle
+
+This entry used to assert "artwork decode dominates". The comment on the size
+probe in `load_track()` asserts the opposite: *"~20 blocking reads -- measured
+at 480 ms ... which is most of the hiccup."* **Both are guesses in the same
+codebase pointing at different culprits**, and the timers settle it in one
+hardware session. Do not optimise before reading them.
+
+The diag-row workflow proved itself on the playlist investigation: flip the
+flag, do the thing, photograph the row. Cheap.
+
+What each answer would mean:
+
+- **`ld_size` dominates** — the size probe. Already incremental in the main
+  loop, but a 0192-opened track raises no 008A, so `R_SLOT_SZ` is stale,
+  `force_size_probe` is set, and the BLOCKING fallback runs on every playlist
+  track change. That is the case to attack, and it is not the artwork.
+- **`ld_art` dominates** — the levers below.
+- **`ld_head` or `ld_pre` dominate** — neither, and this entry needs rewriting.
+
+### Levers, if the artwork really is the cost
 
 1. **`_tag_size` is 4 KB**, so an 847 KB cover costs ~207 target reads. Raising
    it is a one-line change, but a read larger than 4 KB is UNPROVEN on this
-   hardware -- prove the read first, in isolation.
+   hardware -- prove the read first, in isolation. Cheapest thing to try.
 2. **A scaled IDCT inside picojpeg.** Half scale is roughly quarter cost. The
    reduce path already skips this for covers over 736 px, so the win is on
    SMALL covers, which are the ones taking the full decode.
-3. Art is decoded before the first note plays. Decoding it AFTER playback
-   starts would hide the cost entirely, at the price of a panel that appears a
-   moment late. Probably the biggest perceived win for the least work.
+3. **Decode the art AFTER playback starts.** This entry previously called it
+   "the biggest perceived win for the least work". **The second half is wrong**
+   -- corrected 2026-08-13 after actually reading the path.
+
+   `art_decode()` is one blocking pull-parser and the core is single-threaded,
+   so nothing decodes MP3 while it runs; the PCM FIFO holds ~46 ms against an
+   artwork decode of hundreds. Calling it later just moves the underrun.
+
+   Doing it properly means making the decode RESUMABLE: N MCUs per main-loop
+   pass, yielding to refill between slices. In its favour, the MCU loop is ours
+   (`art.inc`) and `pjpeg_decode_mcu()` is already one MCU at a time, so no
+   fork of picojpeg. Against it: ~12 locals plus `pjpeg_image_info_t` become
+   persistent state, the two-pass reduce/full init rewinds the stream, a track
+   change mid-decode has to abort cleanly, and `art_need_bytes` can still block
+   for a 4 KB read INSIDE a slice -- which has to be measured against the 46 ms
+   FIFO before any of this is worth starting.
+
+   Still the biggest perceived win. Not the least work — it lands in the audio
+   continuity path that took longest to stabilise.
 
 ## Hold-A for 1.2x is too easy to trigger by accident
 
