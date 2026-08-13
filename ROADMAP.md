@@ -306,6 +306,51 @@ could use.
 Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
 risk), then FLAC (one measurement decides it), then AAC.
 
+## Raise the 128-track playlist cap — requested 2026-08-13
+
+### The budget, measured
+
+`_heap_start` (end of BSS) is 0x2ACC0 and `_tag_start` — the first reserved DMA
+buffer, which the linker ASSERTs the image must stay below — is 0x33000. So
+**33,600 bytes are free**, and the link fails rather than silently overlapping
+if that is exceeded.
+
+**Do not use build.sh's "% of usable RAM" to judge this.** It compares the ROM
+(text + data) against a flat 176 KB and ignores BSS entirely, so it currently
+reports 74.6% while the real headroom is 33.6 KB of 256 KB. Playlist storage is
+almost all BSS, which is exactly what that figure cannot see.
+
+### What a track costs
+
+4 bytes of index (`pl_off` + `pl_order`, `uint16` each), an eighth of a byte in
+the `pl_dead` bitmap — and the `.m3u` TEXT, which dominates everything else.
+
+| cap | text | total | vs today | fits in 33,600? |
+|---|---|---|---|---|
+| 128 | 16 KB | 16,912 B | — | current |
+| 256 | 24 KB | 25,632 B | +8,720 B | yes, comfortably |
+| 256 | 32 KB | 33,824 B | +16,912 B | yes, ~16 KB left |
+| 512 | 64 KB | 67,648 B | +50,736 B | **no** |
+
+So **256 is affordable and 512 is not**, without freeing something first.
+
+**Raise PL_MAX and PL_TEXT_MAX TOGETHER.** Already learned once and written on
+PL_TEXT_MAX: at 8 KB the buffer ran out around 74 tracks while the docs
+promised 128, so the cap was a lie in the other direction. A real playlist here
+averages ~110 bytes a line.
+
+### The structural answer, if 512+ is ever wanted
+
+Stop holding the text at all. `pl_text` exists so a name can be resolved
+without touching the card, but names are only needed when a track is opened —
+not to count the list or to shuffle it. Keeping a byte offset into the FILE
+instead of into a RAM buffer makes the per-track cost 4-6 bytes flat and
+decouples the cap from RAM almost entirely.
+
+The cost is one extra slot read per track change, on a path that already does
+several and is already the slow part — see the load-speed entry. Worth pricing
+against that work rather than doing both separately.
+
 ## Audiobooks: `.m4b` — requested 2026-08-13
 
 Wanted because this core already suits long-form listening: it has resume, and
