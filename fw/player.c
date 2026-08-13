@@ -1081,6 +1081,12 @@ static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
  * row 71 of 72. Growing either dimension again means taking it from the
  * plinth or the dome, not from spare space -- there is none. */
 #define EYE_TUBE_H  62u
+/* The plinth. Overlaps the tube's last row on purpose -- those rows are socket
+ * shadow, so the glass reads as seated IN the base rather than balanced on it,
+ * which is how the photographed pair sits. Wider than the tubes now that the
+ * glow stops above it. */
+#define EYE_BASE_H   8u
+#define EYE_BASE_PAD 8u           /* overhang each side                     */
 static uint32_t eye_l, eye_r;     /* Q8 deflection, 0..255                 */
 static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
 static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
@@ -1122,7 +1128,11 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * faint line above the light. Self-erasing only works if the repainted area
  * does not move, so the area is the union and the rest is painted bed. */
 #define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
-#define EYE_GLOW_ROWS  56u        /* ...and how many rows it spans         */
+/* Stops ABOVE the plinth, which is what lets the plinth be wider and taller
+ * than the tubes: the band repaints its whole reach every time, so anything
+ * of the base inside it gets painted over with background. Light stopping at
+ * the chassis is also what light does. */
+#define EYE_GLOW_ROWS  48u        /* rows 16..63; the base owns 64..71      */
 /* The GAP between the tubes is lit by BOTH of them, and leaving it dark was
  * the one place the illusion broke: two lamps 10px apart cannot leave the
  * space between them the darkest thing on the panel.
@@ -1135,7 +1145,7 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * It stops ABOVE the plinth. The gap sits over the middle of the base plate,
  * and painting the bed there would chew a notch out of it -- the same fault
  * the overhanging plinth had at its ends. */
-#define EYE_GAP_ROWS   50u        /* rows of the gap that are lit          */
+#define EYE_GAP_ROWS   48u        /* rows of the gap that are lit          */
 /* POSITION and BRIGHTNESS come from different places, and that split is the
  * point.
  *
@@ -2806,8 +2816,8 @@ static void ui_draw_dynamic(void)
             /* Grew with the envelope, so the taller tube is also a longer
               * throw for the strip rather than just more glass. */
              uint32_t bh   = 38u;                     /* ...and its height   */
-            uint32_t basy = ty + EYE_TUBE_H + 1u;    /* plinth              */
-            uint16_t basc = ui_mix(ui_grad_at(ty + EYE_TUBE_H + 1u),
+            uint32_t basy = ty + EYE_TUBE_H - 1u;    /* plinth              */
+            uint16_t basc = ui_mix(ui_grad_at(ty + EYE_TUBE_H - 1u),
                                    ui_accent, 1u, 3u);
 
             if (!eye_face) {
@@ -2884,10 +2894,13 @@ static void ui_draw_dynamic(void)
                   * shaded: a lit top edge and a shadowed underside turn a flat
                   * bar into a slab with thickness. Six rows, which is every
                   * one left between the socket and the bottom of the box. */
-                fb_round_rect(x0, basy, pair, 6u, 2u, basc);
-                fb_rect(x0 + 2u, basy, pair - 4u, 1,
+                fb_round_rect(x0 - EYE_BASE_PAD, basy,
+                              pair + 2u * EYE_BASE_PAD, EYE_BASE_H, 2u, basc);
+                fb_rect(x0 - EYE_BASE_PAD + 2u, basy,
+                        pair + 2u * EYE_BASE_PAD - 4u, 1,
                         ui_mix(basc, UI_WHITE, 1u, 4u));
-                fb_rect(x0 + 2u, basy + 5u, pair - 4u, 1,
+                fb_rect(x0 - EYE_BASE_PAD + 2u, basy + EYE_BASE_H - 1u,
+                        pair + 2u * EYE_BASE_PAD - 4u, 1,
                         ui_mix(basc, 0x0000u, 1u, 2u));
                 eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
                 /* The box was just cleared, so there is no old cone to
@@ -2977,8 +2990,12 @@ static void ui_draw_dynamic(void)
                 uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
                 uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
                 if (gcy < top + EYE_GLOW_RY) gcy = top + EYE_GLOW_RY;
-                if (gcy + EYE_GLOW_RY > top + EYE_GLOW_ROWS)
-                    gcy = top + EYE_GLOW_ROWS - EYE_GLOW_RY;
+                /* No upper clamp. The pool is allowed to sit low and be CUT by
+                 * the band's bottom edge, which is the top of the plinth --
+                 * light stopping at the chassis. Clamping it back up instead
+                 * would drag the light away from the strip it is following,
+                 * and with the band shortened to make room for the base that
+                 * would have cost most of the travel. */
                 uint32_t amt = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
 
                 gcy_of[ch] = gcy; amt_of[ch] = amt; key_of[ch] = key;
