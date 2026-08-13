@@ -2990,13 +2990,13 @@ static void ui_draw_dynamic(void)
                  * redrawn -- the gap pass needs it either way. */
                 uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
                 uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                /* Both ends. The upper clamp was dropped while the band was
+                 * temporarily shortened and not restored with it, which let
+                 * the pool sit five rows lower than intended and run into the
+                 * bottom of the box. */
                 if (gcy < top + EYE_GLOW_RY) gcy = top + EYE_GLOW_RY;
-                /* No upper clamp. The pool is allowed to sit low and be CUT by
-                 * the band's bottom edge, which is the top of the plinth --
-                 * light stopping at the chassis. Clamping it back up instead
-                 * would drag the light away from the strip it is following,
-                 * and with the band shortened to make room for the base that
-                 * would have cost most of the travel. */
+                if (gcy + EYE_GLOW_RY > top + EYE_GLOW_ROWS)
+                    gcy = top + EYE_GLOW_ROWS - EYE_GLOW_RY;
                 uint32_t amt = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
 
                 gcy_of[ch] = gcy; amt_of[ch] = amt; key_of[ch] = key;
@@ -3049,10 +3049,26 @@ static void ui_draw_dynamic(void)
                          * without a separate erase pass. Bands are 8px and
                          * tile the reach exactly, so the two tubes always
                          * light identical areas. */
+                        /* PER ROW, unlike the lit bands above.
+                         *
+                         * This span is pure background -- it is what makes the
+                         * meter continuous with the screen -- so it has to be
+                         * the exact ramp, dither and all. Painting it in 4-row
+                         * strips like the lit bands gave every strip its top
+                         * row's colour, which reads as horizontal stepping
+                         * against the smoothly dithered box around it, worst
+                         * near the bottom where the ramp is darkest.
+                         *
+                         * The lit bands can stay quantised: the cyan mixed
+                         * into them dominates, and any step is invisible under
+                         * it. Costs ~42 extra rects a channel on a redraw. */
                         uint32_t r0 = (nb > b0) ? nb : b0;
-                        if (r0 < EYE_GLOW_NB)
-                            fb_rect(ch ? (base + r0 * bw) : base, y,
-                                    (EYE_GLOW_NB - r0) * bw, EYE_GLOW_S, bg);
+                        if (r0 < EYE_GLOW_NB) {
+                            uint32_t rx0 = ch ? (base + r0 * bw) : base;
+                            uint32_t rw  = (EYE_GLOW_NB - r0) * bw;
+                            for (uint32_t r = 0; r < EYE_GLOW_S; r++)
+                                fb_rect(rx0, y + r, rw, 1, ui_grad_at(y + r));
+                        }
                     }
                     *cast = key;
                 }
