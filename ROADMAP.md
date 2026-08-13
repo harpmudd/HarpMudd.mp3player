@@ -251,8 +251,8 @@ mp3tag displaying the cover is not evidence against this.
 What the core accepts, for reference:
 
 - baseline JPEG, 8-bit, greyscale or YCbCr; no progressive, CMYK or arithmetic
-- ID3v2.3 / v2.4 `APIC`. **ID3v2.2's 3-character `PIC` is not read** -- worth
-  fixing if anyone reports it, it is a second frame-id comparison
+- ID3v2.3 / v2.4 `APIC`. **ID3v2.2 is not read at all** -- see its own entry
+  below; it is NOT the one-line change this line first claimed
 - MIME containing `jp[eg]`, case-insensitive; picture TYPE is not checked
 - up to `ART_MAX_BYTES` (2 MB)
 - under 736 px on either axis -> full decode, both must be <= 1024;
@@ -263,6 +263,36 @@ What the core accepts, for reference:
 are >= 736 and full decode is capped at 1024. Nothing tells the user which
 branch they are in. Allowing reduce on a per-axis basis, or raising
 ART_FULL_MAX, would make the rule "up to 2560" flat.
+
+## ID3v2.2 tags are not read at all — NOT planned, scoped 2026-08-13
+
+Raised while helping a user whose cover would not show. Recording the real
+shape of it, because this entry first described it as "a second frame-id
+comparison", which is wrong and would have made it look free.
+
+**v2.2 is a different container, not v2.3 with shorter names:**
+
+| | v2.2 | v2.3 / v2.4 |
+|---|---|---|
+| frame id | 3 chars (`PIC`, `TT2`, `TP1`, `TAL`) | 4 chars (`APIC`, `TIT2`...) |
+| frame header | 6 bytes | 10 bytes |
+| size field | 3 bytes, plain | 4 bytes, plain (2.3) or syncsafe (2.4) |
+| picture frame | 3-char format field, `JPG` / `PNG` | NUL-terminated MIME string |
+
+So it needs a parallel walk in BOTH readers -- `art_find_apic()` and the text
+frame reader, which currently share `p += 10u + fsize` and a table of
+4-character names. Call it 60-100 lines, plus a v2.2 file to test against,
+which we do not have.
+
+**Who has these:** iTunes wrote v2.2 by default for years, so old ripped
+libraries carry it -- and old material is exactly what gets converted into
+audiobooks, which is how this came up.
+
+**Not planned, and the trigger is evidence.** One user with a cover problem is
+not yet a v2.2 report: their tag version has not been checked, and a
+progressive JPEG explains the same symptom. If v2.2 files actually turn up,
+this moves up; until then the failure is at least not silent -- an untagged or
+unreadable file now shows its filename rather than nothing.
 
 ## PNG album art — MEASURED AND DEPRIORITIZED
 
