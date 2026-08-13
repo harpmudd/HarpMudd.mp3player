@@ -723,6 +723,8 @@ static uint8_t pl_restore_pending = 1u;
  * load_track() ends with paused = 0, so a successful switch clears it; the
  * completion branch clears it too, for the paths that never get that far. */
 #define PAUSE_LOAD 4u
+static uint8_t  menu_was;         /* the OS menu was open on the last poll      */
+static uint32_t pl_poll_at;       /* next periodic slot-3 identity check         */
 static uint8_t  pl_check_req;     /* menu just closed: ask slot 3 what it holds */
 static uint8_t  pl_skip_gate;     /* 0190 already proved it changed             */
 static uint32_t pl_fb_at;         /* when the fallback last loaded              */
@@ -4279,17 +4281,27 @@ static void poll_input(void)
     /* Opening the OS menu is the strongest signal that the core is about to
      * be left, so a pending settings write goes out now rather than waiting
      * out its quiet window that may never elapse. */
-    if (in & IN_MENU) { if (!(paused & 2u)) set_flush_now = 1u; paused |= 2u; }
-    else {
+    /* The open/closed memory is its OWN flag, not paused's menu bit.
+     * load_track() ends with `paused = 0`, which clears that bit wholesale --
+     * so any load running while the menu was open erased the evidence and the
+     * closing edge below never fired. */
+    if (in & IN_MENU) {
+        if (!menu_was) { set_flush_now = 1u; menu_was = 1u; }
+        paused |= 2u;
+    } else {
         /* CLOSING edge: the moment a Load Playlist pick has just been made. */
-        if (paused & 2u) pl_check_req = 1u;
+        if (menu_was) { pl_check_req = 1u; menu_was = 0u; }
         paused &= ~2u;
     }
 
     /* Only SET the flag here. This runs from inside the sample-push wait,
      * which is where the CPU spends most of its time when keeping up, so a
      * reload is noticed immediately instead of after the current frame. */
-    if (REG(R_RELOAD) & RL_PENDING) reload_pending = 1u;
+    /* An MP3-slot notification also re-checks the PLAYLIST slot. The RTL
+     * decides which slot an 008A belongs to by comparing a slot id that
+     * crosses clock domains beside the toggle carrying the event, so a
+     * mis-attributed update would be delivered as the wrong slot's and lost. */
+    if (REG(R_RELOAD) & RL_PENDING) { reload_pending = 1u; pl_check_req = 1u; }
     {
         uint32_t rl = REG(R_RELOAD);
         /* Count the EDGE. The bit is sticky until acked and poll_input runs
@@ -5821,6 +5833,28 @@ int main(void)
          * already interrupted -- a metadata query, not a slot READ, so it does
          * not drag the MP3 slot's fragment cache down with it the way a
          * periodic poll of slot 3 would. */
+        /* PERIODIC identity check on slot 3, depending on NOTHING.
+         *
+         * The notification can be dropped and the menu-close edge can be
+         * missed. This asks, every few seconds, whether the slot still holds
+         * what we loaded -- so a pick lost anywhere upstream heals itself
+         * within one interval instead of waiting for the user to retry.
+         *
+         * A 0190 getfile, not a slot READ. That is what makes it affordable:
+         * the warning against polling slot 3 is about reads walking the
+         * cluster chain, and a metadata query does not. If it costs anything
+         * it will be audible as a tic every three seconds -- about as
+         * diagnosable as a symptom gets -- and one constant backs it out.
+         *
+         * Held off while anything is mid-flight so it cannot race a load. */
+        if (!idle && pl_count && !pl_check_req
+            && !pl_reload_pending && !pl_reload_armed
+            && !reload_pending    && !reload_armed
+            && (int32_t)(cycles() - pl_poll_at) >= 0) {
+            pl_poll_at   = cycles() + CLK_HZ * 3u;
+            pl_check_req = 1u;              /* same comparison path as below */
+        }
+
         if (pl_check_req) {
             pl_check_req = 0;
             pl_name_read();
