@@ -3,7 +3,8 @@
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
 decodes and plays it straight off the SD card, with album art, ID3 tags, ten
 switchable meters, an eight-preset equalizer, a progress bar, settings
-persistence and resume — it remembers where you were in a playlist.
+persistence and optional resume — it can pick up where you left off in a
+playlist.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
@@ -27,7 +28,7 @@ start without it.
 
 At launch the core loads **`playlist.m3u`** — that name specifically, not any
 playlist it finds. Pick another once with **Load Playlist** and that becomes
-the one that loads from then on, picking up where you left off.
+the one that loads from then on.
 
 With no `playlist.m3u` and nothing remembered you get a getting-started screen;
 press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
@@ -104,8 +105,8 @@ not how many lines the file has.
 - **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
   files that carry nothing else. A file with no readable tag shows its
   filename, which is usually the song name anyway.
-- **Album art** from the tag's embedded image — JPEG only; tracks without it
-  don't show the panel.
+- **Album art** from the tag's embedded image — baseline JPEG only; tracks
+  without it don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
   oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
   peak dots and a magic eye.

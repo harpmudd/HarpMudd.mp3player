@@ -5,13 +5,15 @@ What changed in each release, newest first.
 ## v1.2.0
 
 - Resume now works with **any** playlist, not just `playlist.m3u` — it
-  remembers which list you were in.
+  remembers which list you were in. Switch it on in Core Settings.
 - New meter: a **magic eye**, a pair of EM84 tubes that light the panel. Press
   **X** to reach it.
 - Files with no ID3 tag show their **filename** instead of a placeholder.
-- Switching playlists now shows a loading indicator and pauses while it
-  works, so a slow load no longer looks like a failed one.
+- Switching playlists shows a loading indicator and pauses while it works, so a
+  slow load no longer looks like a failed one — and a pick the core misses now
+  recovers on its own within a few seconds.
 - Fixed: long titles painted through the info panel's border.
+- Fixed: the meters sat on a flat panel instead of the background gradient.
 - Fixed: the startup screen flickered.
 
 ## v1.1.0 — 11 August 2026
