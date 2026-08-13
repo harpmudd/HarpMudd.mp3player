@@ -306,6 +306,47 @@ could use.
 Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
 risk), then FLAC (one measurement decides it), then AAC.
 
+## Audiobooks: `.m4b` — requested 2026-08-13
+
+Wanted because this core already suits long-form listening: it has resume, and
+the README points audiobook users at playlists. `.m4b` is the format that
+material actually ships in.
+
+**It is [[AAC]] plus chapters, not a separate job.** `.m4b` is an MP4 container
+with the audiobook extension by convention — same atoms as `.m4a`, almost
+always AAC-LC inside. So it inherits the whole AAC entry above: the Helix
+fixed-point AAC decoder is the easy part, CPU headroom is a real question at
+60 MHz, and the MP4 container is the actual cost, because atom parsing and
+sample tables mean random access and random access is the expensive operation
+here.
+
+Do not treat this as a smaller ask than AAC. It is AAC with more on top.
+
+### What `.m4b` adds beyond AAC
+
+- **Chapters**, which are the point of the format. Two encodings in the wild
+  and both appear: a Nero-style `chpl` atom in `moov/udta`, and QuickTime text
+  tracks referenced by `chap`. Supporting one and not the other means half of
+  real files show nothing.
+- **A UI that does not exist.** Chapters need listing and seeking-to; the
+  transport is built around tracks, and a playlist position is not a chapter
+  position.
+- **Bookmarks per book.** The saved point is currently ONE, and audiobook
+  listeners keep several going. See the one-bookmark scope note under the
+  playlist work — per-book positions need a stem plus a point EACH, which is
+  another settings-register widen.
+- **Durations of hours**, against songs of minutes. Worth checking the elapsed
+  and total fields, the progress bar's arithmetic and the seek step scaling
+  hold up at 10+ hours before assuming they do.
+
+### Cheaper thing that helps the same user today
+
+Nothing in the ask needs a new format: a long MP3 in a one-line `.m3u` already
+resumes, which is what the README recommends. The gap `.m4b` closes is chapters
+and having several books on the go — so if this is ever picked up and AAC is
+too expensive, **per-book bookmarks alone would deliver most of the value** for
+a fraction of the work, and against MP3 files that already play.
+
 ## The persisted-settings register file is FULL
 
 `mp3_soc.v` takes the settings index as `set_idx <= dDAT_MOSI[2:0]`. Three bits,
