@@ -208,6 +208,20 @@ bug in it was total. There are four now, failing independently -- 008A tagged
 for slot 3, 008A tagged for slot 2 (the RTL can mis-attribute), the menu-close
 edge, and a 3 s identity poll that depends on neither notification nor edge.
 
+### CONFIRMED WORKING 2026-08-13
+
+The user watched a switch fail to register, **waited instead of re-picking, and
+the poll loaded it**. First direct evidence any of these mitigations does
+anything -- and it is the one that depends on neither the notification nor the
+menu edge, so it covers the case where everything upstream is lost.
+
+The user-facing workaround changes with it: wait a few seconds, rather than
+pick again. README and CHANGELOG updated to say so.
+
+Still not a claim the fault is gone. The poll recovers a pick that APF DID
+assign but never told us about; it cannot help if APF never made the
+assignment, which remains the unexplained case.
+
 **Measured, and it corrects a standing claim:** a 0190 getfile on slot 3 every
 3 s while streaming produces NO audible tic. The warning against polling slot 3
 applies to slot READS walking the cluster chain, not to a metadata query. The

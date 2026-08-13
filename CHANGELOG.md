@@ -10,8 +10,8 @@ What changed in each release, newest first.
   **X** to reach it.
 - Files with no ID3 tag show their **filename** instead of a placeholder.
 - Switching playlists shows a loading indicator and pauses while it works, so a
-  slow load no longer looks like a failed one — and a pick the core misses now
-  recovers on its own within a few seconds.
+  slow load no longer looks like a failed one — and a pick the core misses
+  recovers on its own within a few seconds instead of needing a retry.
 - Fixed: long titles painted through the info panel's border.
 - Fixed: the meters sat on a flat panel instead of the background gradient.
 - Fixed: the startup screen flickered.
