@@ -2750,7 +2750,13 @@ static void ui_draw_dynamic(void)
              * stale even if nothing erased it. */
             if (wf || ww != vu_face_w) vu_face = 0;
 
-            if (!vu_face) fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            /* Per ROW. Same fault the magic eye exposed: the box was filled
+             * with `bed`, the gradient sampled once at its top row, which is a
+             * flat slab on a ramp that falls to 62% of that value by the
+             * bottom. The needles leave most of the box empty, so it shows. */
+            if (!vu_face)
+                for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+                    fb_rect(UI_MARGIN, yy, ww, 1, ui_grad_at(yy));
 
             for (int ch = 0; ch < 2; ch++) {
                 uint32_t half = ww / 2u;
@@ -2790,7 +2796,8 @@ static void ui_draw_dynamic(void)
                          * "the loud end" in any palette. */
                         fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
                                 (t >= 60u) ? ui_accent
-                                           : ui_mix(bed, ui_accent, 2u, 5u));
+                                           : ui_mix(ui_grad_at((uint32_t)ay),
+                                                    ui_accent, 2u, 5u));
                     }
                     for (uint32_t t = 0; t <= 4u; t++) {
                         uint32_t i = t * 4u;
@@ -2801,10 +2808,11 @@ static void ui_draw_dynamic(void)
                             if (ay < (int32_t)UI_WAVE_Y) continue;
                             fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
                                     (t >= 3u) ? ui_accent
-                                              : ui_mix(bed, ui_accent, 3u, 5u));
+                                              : ui_mix(ui_grad_at((uint32_t)ay),
+                                                       ui_accent, 3u, 5u));
                         }
                     }
-                    fb_set_color(ui_accent, bed);
+                    fb_set_color(ui_accent, ui_grad_at(UI_WAVE_Y + 2u));
                     fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
                                     TS_1X, TS_1X, 16u);
                 }
@@ -2823,7 +2831,12 @@ static void ui_draw_dynamic(void)
                     /* One colour throughout its travel. Flashing at the top drew the eye
                      * to the loudest moments, which is the opposite of what a
                      * meter is for -- the scale already marks the peak zone. */
-                    uint16_t col = pass ? ui_accent : bed;
+                    /* The erase pass repaints the needle's own footprint in
+                     * the BACKGROUND colour, so with a ramp behind it that
+                     * colour has to be sampled per segment -- a flat `bed`
+                     * would leave a lighter trail down the lower half of the
+                     * sweep, exactly where the needle spends most of its
+                     * time. */
                     for (uint32_t k = 2; k <= VU_STEPS; k++) {
                         int32_t rr = ((int32_t)nlen * (int32_t)k) / (int32_t)VU_STEPS;
                         int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
@@ -2831,11 +2844,15 @@ static void ui_draw_dynamic(void)
                         if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
                         if (ny < (int32_t)UI_WAVE_Y) continue;
                         uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;
-                        fb_rect((uint32_t)nx, (uint32_t)ny, th, th, col);
+                        fb_rect((uint32_t)nx, (uint32_t)ny, th, th,
+                                pass ? ui_accent
+                                     : ui_grad_at((uint32_t)ny));
                     }
                 }
                 fb_rect(pivx - 2u, pivy - 2u, 5, 5, ui_accent);
-                fb_rect(pivx - 1u, pivy - 1u, 3, 3, bed);
+                for (uint32_t r = 0; r < 3u; r++)
+                    fb_rect(pivx - 1u, pivy - 1u + r, 3, 1,
+                            ui_grad_at(pivy - 1u + r));
 
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
             }
