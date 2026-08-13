@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.2.0
+## v1.2.0 — 13 August 2026
 
 - Resume now works with **any** playlist, not just `playlist.m3u` — it
   remembers which list you were in. Switch it on in Core Settings.

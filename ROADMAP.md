@@ -42,7 +42,7 @@ until a version is actually tagged.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-## Resume only works with the DEFAULT playlist — FIXED in v1.2.0, awaiting final QA
+## Resume only works with the DEFAULT playlist — SHIPPED in v1.2.0
 
 Reported against v1.1.0: resume restored track and position with
 `playlist.m3u`, but a user running `audiobook.m3u` never got their place back.
@@ -80,7 +80,7 @@ function runs for a menu choice as well as at boot; and storing the stem
 uppercased asked APF for `SHENANIGANS.m3u` against a card holding
 `Shenanigans.m3u`.
 
-### SCOPE, and it must be in the README before release
+### SCOPE, stated in the README under Playing
 
 **One remembered playlist and one position, not one per playlist.** There is a
 single saved stem and a single packed point, so switching lists overwrites what
@@ -99,17 +99,15 @@ Wording for the README, roughly: "The core remembers the last playlist you used
 and your place in it. Switching to another playlist replaces what it was
 holding, so it is one bookmark rather than one per list."
 
-### Still open
+### Closed out at release
 
-- **Intermittent double-load when switching playlists.** A reload gate was
-  added -- record the name being left, poll 0190 until it differs -- and it has
-  behaved since, but nothing proves it. `UI_SHOW_SPEED_DIAG 1` brings back the
-  N and L counters: N is notifications delivered, L is loads performed, and one
-  moving without the other names the layer.
-- **Full QA pass.** This is the first bitstream change in months, and the
-  drawing paths were reworked throughout.
-- **Version is v1.2.0**, not the v1.1.1 first estimated: the fix needed new
-  RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
+QA passed and the branch merged 2026-08-13. The double-load bullet that used to
+sit here is superseded: that investigation ran to ground and has its own entry
+below, where the conclusion is recorded properly rather than as a hopeful note
+that the gate "has behaved since".
+
+Shipped as **v1.2.0**, not the v1.1.1 first estimated -- the fix needed new
+RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
 
 ## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
 
