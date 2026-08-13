@@ -539,6 +539,32 @@ anything derived per-sample costs only the arithmetic, not the traversal.
 Available today: peak L, peak R, the `wave[]` history, the scope sample spread,
 and elapsed/total.
 
+### Before building any meter with EMPTY areas — learned the hard way
+
+Every meter fills the box with `bed`, the gradient sampled ONCE at the box's
+top row. The screen behind it is a per-row gradient that falls from 16.1/31 at
+the top of the box to 9.9/31 at the bottom. So the box is a flat slab sitting
+on a ramp, and every meter built so far got away with it because its content
+covers the box.
+
+The magic eye was the first with large empty areas and it showed immediately:
+a visible rectangle, stopping at the box edge, obvious on a dock and worst on
+the accent colours with the steepest ramp. **Any meter that leaves background
+showing must paint the real ramp itself** — `ui_grad_at(y)` per row, 72 rects,
+cached with the rest of its face.
+
+Two follow-on traps from the same episode:
+
+- **Background must be painted PER ROW, not in strips.** The eye paints its
+  glow in 4-row strips to keep the rect count down; doing the same to the
+  UNLIT remainder gave each strip its top row's colour, which reads as
+  horizontal stepping against the dithered surround. Lit pixels can be
+  quantised — the colour mixed in dominates. Background cannot.
+- **When a change regresses something already fixed, diff against the
+  known-good commit.** Two rounds of re-reasoning here both missed a clamp
+  that had been deleted during an experiment and never restored; the diff
+  found it in one look.
+
 ### Buildable from what exists
 
 - **L/R isometric cube stacks** -- user's idea. Discrete blocks in fake-3D with
