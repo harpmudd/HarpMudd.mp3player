@@ -88,6 +88,20 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
  *      register-file slot via bridge_addr[4:2], so moving it changes which
  *      firmware variable the word feeds.
  *
+ *   6. ARRAY ORDER IS FREE, and it sets the Core Settings menu order.
+ *      MEASURED 2026-08-12: moving "Saved position" to the end of the
+ *      variables array moved it to the bottom of the menu and changed
+ *      nothing else -- every stored value survived, with only a colour the
+ *      user had pressed and a resume point that had advanced while playing.
+ *      Neither had returned to a default, which is what a reset looks like.
+ *
+ *      This matters more than tidiness. Storage words that must exist but
+ *      mean nothing to a user -- the saved position, and a playlist name if
+ *      one is ever stored -- can sit AFTER the real settings instead of
+ *      between Volume and EQ preset. There is no way to hide them (see the
+ *      ROADMAP entry on `enabled`), so ordering is the only control there is
+ *      over how much they intrude.
+ *
  * The persist file is plain JSON on the card at
  * /Settings/<core>/Interact/_core/interact_persist.json. It is readable, it is
  * authoritative, and it answers persistence questions with no hardware round
@@ -103,7 +117,12 @@ static void settings_mark_dirty(void) { set_dirty_at = cycles() | 1u; }
  * The ADDRESSES of the six survivors are unchanged, deliberately: renumbering
  * would have scrambled every already-saved setting on every card. */
 enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_RESUME, SW_VIZ, SW_EQ,
-       SW_RESUMEON, SW_N };
+       SW_RESUMEON,
+       /* rev 21 widened the index to 4 bits; these are the first slots that
+        * were never available before. Three words carry twelve characters of
+        * the playlist's stem. */
+       SW_PLN0, SW_PLN1, SW_PLN2,
+       SW_N };
 
 /* What we last published. Initialised to a value APF can never write for
  * these ranges, so the FIRST poll always counts as a change and adopts
@@ -111,7 +130,8 @@ enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_RESUME, SW_VIZ, SW_EQ,
  * would overwrite the persisted values on the way past. */
 static uint32_t set_pub[SW_N] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                  0xFFFFFFFFu, 0xFFFFFFFFu };
+                                  0xFFFFFFFFu, 0xFFFFFFFFu,
+                                  0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
 
 static uint32_t set_rd(uint32_t w) { REG(R_SET_IDX) = w; return REG(R_SET_DAT); }
 static void     set_wr(uint32_t w, uint32_t v)
@@ -133,6 +153,16 @@ static int settings_store(void)
     set_wr(SW_VIZ,  viz_mode);
     set_wr(SW_EQ,   eq_idx);
     set_wr(SW_RESUMEON, resume_on ? 1u : 0u);
+    for (uint32_t k = 0; k < 3u; k++) {
+        uint32_t w = 0;
+        for (uint32_t j = 0; j < 4u; j++) {
+            uint32_t i = k * 4u + j;
+            /* Bit 31 must stay clear -- APF stores these SIGNED, and a word
+             * that looks negative is clamped. Four 7-bit chars fit exactly. */
+            w |= ((uint32_t)(pl_saved_stem[i] & 0x7Fu)) << (j * 7u);
+        }
+        set_wr(SW_PLN0 + k, w);
+    }
     return 1;
 }
 
@@ -165,6 +195,15 @@ static int settings_load(void)
     v = set_rd(SW_EQ);    if (v < EQ_COUNT)      { eq_idx = (uint8_t)v;
                                                    REG(R_EQ) = eq_idx; }
     v = set_rd(SW_RESUMEON); resume_on = v ? 1u : 0u;
+    for (uint32_t k = 0; k < 3u; k++) {
+        uint32_t w = set_rd(SW_PLN0 + k);
+        for (uint32_t j = 0; j < 4u; j++) {
+            char c = (char)((w >> (j * 7u)) & 0x7Fu);
+            /* Anything the font cannot show is not a filename we wrote. */
+            pl_saved_stem[k * 4u + j] = (c >= 0x20 && c < 0x7F) ? c : 0;
+        }
+    }
+    pl_saved_stem[PL_STEM_MAX] = 0;
     settings_adopted = 1u;
     return 1;
 }

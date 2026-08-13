@@ -12,14 +12,299 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
+# Releasing
+
+**Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
+running list and stays flat, one line an item. A GitHub release body carries
+the same content grouped under **New** / **Changed** / **Fixed**, which earns
+its place there because a release is read once, on its own, by someone
+deciding whether to update.
+
+Same facts either way. If they disagree, the changelog is right.
+
+**Edit release bodies IN PLACE:**
+
+```
+PATCH /repos/{owner}/{repo}/releases/{id}   {"body": "..."}
+```
+
+Auth is the cached git credential (`git credential fill`); there is no gh CLI
+here. **Never delete and recreate a release to change its text** — the Pocket
+core updaters poll constantly, so that zeroes the asset's download count and
+briefly removes the file they are fetching. Delete only when the attached zip
+itself has to change.
+
+Also at release time: add the date to the changelog entry, which is left off
+until a version is actually tagged.
+
 # Defects
 
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
-**None open.** The settings-persistence blocker is resolved — see Fixed.
+## Resume only works with the DEFAULT playlist — SHIPPED in v1.2.0
+
+Reported against v1.1.0: resume restored track and position with
+`playlist.m3u`, but a user running `audiobook.m3u` never got their place back.
+
+### The theory that was wrong, and how it was killed
+
+The firmware never names a playlist -- `pl_load()` reads whatever APF put in
+slot 3 -- so the behaviour could only differ because of what APF put there.
+`data.json` declared `filename: playlist.m3u` on slot 3 and nothing on slot 2,
+and slot 2 is the one proven to retain a pick. The natural conclusion was that
+a declared filename resets the slot.
+
+Half right. Removing the declaration was tested on hardware and made it WORSE:
+APF then prompted for a playlist at every boot, and a picked list still did not
+come back. **Slot 3 is not retained either way** -- reset to the declared file
+with one, empty and prompting without. There is no arrangement of `data.json`
+that remembers a pick, which is what forced the real fix.
+
+### What actually shipped
+
+Storing the name, because APF cannot enumerate a directory and `0192` can only
+open something already held. That needed slots, and all eight were used:
+
+- **RTL:** settings index 3 bits -> 4, register file 8 words -> 16,
+  `CORE_VERSION` -> rev 21. Timing closed at 1.029 ns on the 100 MHz domain,
+  down from 1.270 but positive; RAM blocks unchanged at 300/308 because
+  `ramstyle = "logic"` keeps the file in fabric.
+- **Firmware:** three words hold twelve characters of the playlist STEM, four
+  7-bit chars per word with bit 31 clear (APF stores these signed). `.m3u` is
+  implied. `pl_load()` reopens the remembered stem by name, at boot only.
+
+Two faults found on the way, both worth keeping in mind for anything similar:
+restoring on EVERY `pl_load()` overrode the user's own pick, because that
+function runs for a menu choice as well as at boot; and storing the stem
+uppercased asked APF for `SHENANIGANS.m3u` against a card holding
+`Shenanigans.m3u`.
+
+### SCOPE, stated in the README under Playing
+
+**One remembered playlist and one position, not one per playlist.** There is a
+single saved stem and a single packed point, so switching lists overwrites what
+was held for the previous one.
+
+The consequence a user will hit: partway through `audiobook.m3u`, switch to
+`music.m3u`, and the audiobook's place is gone -- returning to it starts at
+track 1. "It remembers where you were" reads as a per-book bookmark, and that
+is not what this is.
+
+Per-playlist positions would need a stem plus a point each, four words apiece
+against five slots free after this release -- a second one needs another
+register widen. Not worth it unless someone asks.
+
+Wording for the README, roughly: "The core remembers the last playlist you used
+and your place in it. Switching to another playlist replaces what it was
+holding, so it is one bookmark rather than one per list."
+
+### Closed out at release
+
+QA passed and the branch merged 2026-08-13. The double-load bullet that used to
+sit here is superseded: that investigation ran to ground and has its own entry
+below, where the conclusion is recorded properly rather than as a hopeful note
+that the gate "has behaved since".
+
+Shipped as **v1.2.0**, not the v1.1.1 first estimated -- the fix needed new
+RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
+
+## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
+
+Intermittent. The user corrected an earlier "rare" framing on 2026-08-13,
+having twice needed three attempts -- **but that estimate predates 03adc3d**,
+which found the menu-close fallback had never once completed a load (a
+self-cancelling dedupe, and a closing edge that could not fire). Expect the
+frequency to be lower than anything measured before that commit; nothing yet
+measures how much lower.
+
+The README wording was softened to match on the same day, at the user's call.
+Put it back if reports say otherwise -- the frequency claim there is the least
+evidenced thing in that file. Picking a playlist from the
+Core menu sometimes has no effect at all: no LOADING message, no load, and
+waiting does not help. Picking again works.
+
+User decision 2026-08-12: **not a deal breaker** -- the natural user response
+(pick again) is also the workaround. That still stands; the frequency does not
+change the decision, only how it is described to users.
+
+### What the instrumentation actually proved
+
+A diagnostic build recorded every switch (`UI_SHOW_SPEED_DIAG`, plus
+`pl_sw_*`/`tk_hist` — all still in the source, one flag away):
+
+- `N` always equalled `L`: every notification that arrived produced a load.
+- Every recorded switch read `G1 R0 P1 F0` — gate confirmed the name change,
+  no retry needed, playback taken, nothing blocking, right track count.
+- `X` stayed 0: `load_track()` never came back empty.
+
+**There was never a failed load.** The failures are picks that never reach the
+core at all, so nothing downstream of the notification can see them — which is
+why three separate firmware fixes changed nothing.
+
+### Two theories killed on the way
+
+- **"Slow load, no feedback."** Plausible and wrong. UI_BOOT_Y and
+  UI_TRANSPORT_Y are both row 262, so the transport repainted over
+  LOADING PLAYLIST during the wait and the user re-picked out of impatience.
+  That was a REAL bug and is fixed — but the fault survived the fix.
+- **"Playback was blocked by an armed reload."** `P1 F0` killed it outright.
+
+### Where it points now
+
+`0190` says the slot still holds the OLD playlist, so APF appears not to have
+performed the assignment — not a dropped message, a pick that did not take.
+The core-side CDC was read and is correct: `dataslot_update` is a one-cycle
+`clk_74a` pulse converted to a toggle with the ID latched in the same cycle,
+which is the right idiom (see [[apf-target-commands]]).
+
+### The one test that would settle it
+
+Count EVERY `dataslot_update` pulse in `clk_74a`, ignoring the slot ID, and
+expose the counter. Raw count moves on a dead pick -> ours. Does not move ->
+Analogue's. Costs an RTL change and a Quartus rebuild, then waiting on a fault
+that takes many attempts to hit, which is why it has not been done.
+
+Cheap corroboration if it ever comes up in the wild: whether other cores with
+user-reloadable slots show the same thing. No compile needed.
+
+### Mitigations that ARE shipped
+
+Three, and after them the user could no longer reproduce it. None is PROVEN
+to be the fix — the fault took many attempts to hit, so absence is weak
+evidence — but all three earn their place on other grounds.
+
+1. **Row 262 has one owner.** UI_BOOT_Y and UI_TRANSPORT_Y are the same line,
+   so the transport repainted over LOADING PLAYLIST during the wait. A switch
+   can legitimately take seconds, and a garbled row during it reads as a dead
+   pick — so the user picks again. This alone removes a large part of the
+   reported behaviour whatever the root cause is.
+2. **`pl_check_req`** — on the Analogue menu CLOSING, ask slot 3 what it holds
+   and raise the load ourselves if it is not what is loaded. One 0190 at a
+   moment where playback is already interrupted; a metadata query, not a slot
+   read, so it does not cost the MP3 slot its fragment cache. Helps if the
+   notification was dropped; cannot help if APF never made the assignment.
+3. **`PAUSE_LOAD`** (the user's idea) — pause the outgoing track for the
+   duration of the switch. Takes the core's 0180 refill traffic off the bus
+   while APF is reassigning slot 3, which is the contention the user
+   suspected; and silence during the wait reads as WORKING, where music
+   continuing reads as nothing happening.
+
+If it ever returns it clears all three at once, leaving "APF never made the
+assignment" as the only surviving explanation.
+
+### 2026-08-13: it did return, and the mitigations were not running
+
+Two bugs, either sufficient alone, meant the menu-close fallback had **never
+once completed a load** since it was added: it set the dedupe timestamp at the
+same moment it raised its own request, so the notification handler discarded
+that request one iteration later; and the open/closed memory was paused's menu
+bit, which `load_track()` clears wholesale.
+
+The design fault underneath: noticing a pick had exactly ONE route, so every
+bug in it was total. There are four now, failing independently -- 008A tagged
+for slot 3, 008A tagged for slot 2 (the RTL can mis-attribute), the menu-close
+edge, and a 3 s identity poll that depends on neither notification nor edge.
+
+### CONFIRMED WORKING 2026-08-13
+
+The user watched a switch fail to register, **waited instead of re-picking, and
+the poll loaded it**. First direct evidence any of these mitigations does
+anything -- and it is the one that depends on neither the notification nor the
+menu edge, so it covers the case where everything upstream is lost.
+
+The user-facing workaround changes with it: wait a few seconds, rather than
+pick again. README and CHANGELOG updated to say so.
+
+Still not a claim the fault is gone. The poll recovers a pick that APF DID
+assign but never told us about; it cannot help if APF never made the
+assignment, which remains the unexplained case.
+
+**Measured, and it corrects a standing claim:** a 0190 getfile on slot 3 every
+3 s while streaming produces NO audible tic. The warning against polling slot 3
+applies to slot READS walking the cluster chain, not to a metadata query. The
+RTL comment that stated it absolutely has been corrected.
+
+Documented in the README as a known limitation, so a user who does hit it
+knows to pick again rather than assuming the core is broken.
+
+## Headerless VBR still estimates the total time — dropped from the README
+
+Removed from Known limitations 2026-08-12 as too narrow to be worth a user's
+attention, and recorded here so it is not simply forgotten.
+
+Still true: a VBR file with no Xing/Info/VBRI header has no frame count and no
+fixed byte rate, so the total is derived from a drifting estimate and reads
+wrong. CBR without a header is exact — that was the 1.2x seek fix, which
+computes the rate from the first frame.
+
+Near-unreachable in practice: LAME and every mainstream VBR encoder write a
+Xing header, so this needs a file from an unusual encoder or one that has had
+its header stripped. `tools/xing_check.py` reports which files in a folder
+carry one, if evidence is ever wanted.
+
+Restore the README line if anyone reports a wrong duration — the symptom is
+otherwise baffling, and the cause is a property of their file rather than
+anything they can see.
 
 # Enhancements
+
+## Progressive JPEG covers are silently skipped — user report 2026-08-13
+
+picojpeg is baseline only: `case M_SOF2: return PJPG_UNSUPPORTED_MODE`. A
+progressive JPEG is rejected whatever its size, which is exactly how it was
+reported -- "even a 100x100 3 KB jpeg does not work", after the user had
+correctly ruled size out. Desktop taggers show progressive files fine, so
+mp3tag displaying the cover is not evidence against this.
+
+**The README now says baseline**, which is the fix for the next person. It said
+"JPEG album art only", and the user did everything right against that.
+
+What the core accepts, for reference:
+
+- baseline JPEG, 8-bit, greyscale or YCbCr; no progressive, CMYK or arithmetic
+- ID3v2.3 / v2.4 `APIC`. **ID3v2.2 is not read at all** -- see its own entry
+  below; it is NOT the one-line change this line first claimed
+- MIME containing `jp[eg]`, case-insensitive; picture TYPE is not checked
+- up to `ART_MAX_BYTES` (2 MB)
+- under 736 px on either axis -> full decode, both must be <= 1024;
+  736+ on both -> reduce path, up to 2560
+
+**That size rule is a trap worth removing.** A 900x900 cover works and a
+1200x600 one does not, because the reduce path is only chosen when BOTH axes
+are >= 736 and full decode is capped at 1024. Nothing tells the user which
+branch they are in. Allowing reduce on a per-axis basis, or raising
+ART_FULL_MAX, would make the rule "up to 2560" flat.
+
+## ID3v2.2 tags are not read at all — NOT planned, scoped 2026-08-13
+
+Raised while helping a user whose cover would not show. Recording the real
+shape of it, because this entry first described it as "a second frame-id
+comparison", which is wrong and would have made it look free.
+
+**v2.2 is a different container, not v2.3 with shorter names:**
+
+| | v2.2 | v2.3 / v2.4 |
+|---|---|---|
+| frame id | 3 chars (`PIC`, `TT2`, `TP1`, `TAL`) | 4 chars (`APIC`, `TIT2`...) |
+| frame header | 6 bytes | 10 bytes |
+| size field | 3 bytes, plain | 4 bytes, plain (2.3) or syncsafe (2.4) |
+| picture frame | 3-char format field, `JPG` / `PNG` | NUL-terminated MIME string |
+
+So it needs a parallel walk in BOTH readers -- `art_find_apic()` and the text
+frame reader, which currently share `p += 10u + fsize` and a table of
+4-character names. Call it 60-100 lines, plus a v2.2 file to test against,
+which we do not have.
+
+**Who has these:** iTunes wrote v2.2 by default for years, so old ripped
+libraries carry it -- and old material is exactly what gets converted into
+audiobooks, which is how this came up.
+
+**Not planned, and the trigger is evidence.** One user with a cover problem is
+not yet a v2.2 report: their tag version has not been checked, and a
+progressive JPEG explains the same symptom. If v2.2 files actually turn up,
+this moves up; until then the failure is at least not silent -- an untagged or
+unreadable file now shows its filename rather than nothing.
 
 ## PNG album art — MEASURED AND DEPRIORITIZED
 
@@ -145,23 +430,362 @@ could use.
 Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
 risk), then FLAC (one measurement decides it), then AAC.
 
-## The persisted-settings register file is FULL
+## Raise the 128-track playlist cap — requested 2026-08-13
 
-`mp3_soc.v` takes the settings index as `set_idx <= dDAT_MOSI[2:0]`. Three bits,
-eight slots, and all eight are spoken for: volume, accent, repeat, shuffle, art,
-meter, EQ, blank. **Any new remembered setting needs that widened to 4 bits.**
+### The budget, measured
 
-The edit itself is one line plus the `set_reg` array bound. What it costs is the
-iteration model: everything since rev 20 has been firmware-only, rebuilt in
-seconds, and this drops back to a full Quartus compile, a `CORE_VERSION` bump
-and a timing-closure round. So widen it ONCE, to 16 slots, and land anything
-that needs a slot in the same pass rather than paying that twice.
+`_heap_start` (end of BSS) is 0x2ACC0 and `_tag_start` — the first reserved DMA
+buffer, which the linker ASSERTs the image must stay below — is 0x33000. So
+**33,600 bytes are free**, and the link fails rather than silently overlapping
+if that is exceeded.
 
-Currently blocks resume-position below. **Variable speed deliberately avoids it
-by not persisting** — see that entry; deciding a setting does not need to be
-remembered is the cheapest way past this.
+**Do not use build.sh's "% of usable RAM" to judge this.** It compares the ROM
+(text + data) against a flat 176 KB and ignores BSS entirely, so it currently
+reports 74.6% while the real headroom is 33.6 KB of 256 KB. Playlist storage is
+almost all BSS, which is exactly what that figure cannot see.
 
-## Resume where you left off (requested 2026-08-10)
+### What a track costs
+
+4 bytes of index (`pl_off` + `pl_order`, `uint16` each), an eighth of a byte in
+the `pl_dead` bitmap — and the `.m3u` TEXT, which dominates everything else.
+
+| cap | text | total | vs today | fits in 33,600? |
+|---|---|---|---|---|
+| 128 | 16 KB | 16,912 B | — | current |
+| 256 | 24 KB | 25,632 B | +8,720 B | yes, comfortably |
+| 256 | 32 KB | 33,824 B | +16,912 B | yes, ~16 KB left |
+| 512 | 64 KB | 67,648 B | +50,736 B | **no** |
+
+So **256 is affordable and 512 is not**, without freeing something first.
+
+**Raise PL_MAX and PL_TEXT_MAX TOGETHER.** Already learned once and written on
+PL_TEXT_MAX: at 8 KB the buffer ran out around 74 tracks while the docs
+promised 128, so the cap was a lie in the other direction. A real playlist here
+averages ~110 bytes a line.
+
+### The structural answer, if 512+ is ever wanted
+
+Stop holding the text at all. `pl_text` exists so a name can be resolved
+without touching the card, but names are only needed when a track is opened —
+not to count the list or to shuffle it. Keeping a byte offset into the FILE
+instead of into a RAM buffer makes the per-track cost 4-6 bytes flat and
+decouples the cap from RAM almost entirely.
+
+The cost is one extra slot read per track change, on a path that already does
+several and is already the slow part — see the load-speed entry. Worth pricing
+against that work rather than doing both separately.
+
+## Audiobooks: `.m4b` — requested 2026-08-13
+
+Wanted because this core already suits long-form listening: it has resume, and
+the README points audiobook users at playlists. `.m4b` is the format that
+material actually ships in.
+
+**It is [[AAC]] plus chapters, not a separate job.** `.m4b` is an MP4 container
+with the audiobook extension by convention — same atoms as `.m4a`, almost
+always AAC-LC inside. So it inherits the whole AAC entry above: the Helix
+fixed-point AAC decoder is the easy part, CPU headroom is a real question at
+60 MHz, and the MP4 container is the actual cost, because atom parsing and
+sample tables mean random access and random access is the expensive operation
+here.
+
+Do not treat this as a smaller ask than AAC. It is AAC with more on top.
+
+### What `.m4b` adds beyond AAC
+
+- **Chapters**, which are the point of the format. Two encodings in the wild
+  and both appear: a Nero-style `chpl` atom in `moov/udta`, and QuickTime text
+  tracks referenced by `chap`. Supporting one and not the other means half of
+  real files show nothing.
+- **A UI that does not exist.** Chapters need listing and seeking-to; the
+  transport is built around tracks, and a playlist position is not a chapter
+  position.
+- **Bookmarks per book.** The saved point is currently ONE, and audiobook
+  listeners keep several going. See the one-bookmark scope note under the
+  playlist work — per-book positions need a stem plus a point EACH, which is
+  another settings-register widen.
+- **Durations of hours**, against songs of minutes. Worth checking the elapsed
+  and total fields, the progress bar's arithmetic and the seek step scaling
+  hold up at 10+ hours before assuming they do.
+
+### Cheaper thing that helps the same user today
+
+Nothing in the ask needs a new format: a long MP3 in a one-line `.m3u` already
+resumes, which is what the README recommends. The gap `.m4b` closes is chapters
+and having several books on the go — so if this is ever picked up and AAC is
+too expensive, **per-book bookmarks alone would deliver most of the value** for
+a fraction of the work, and against MP3 files that already play.
+
+## Track changes take too long — user report 2026-08-12
+
+"Skipping titles needs a bit long time." Real, and the load path is already
+instrumented: `ld_head`, `ld_size`, `ld_art`, `ld_pre`, `ld_total`, all live,
+all one flag away (`UI_SHOW_DIAG 1`).
+
+### MEASURE FIRST — and there is a live disagreement to settle
+
+This entry used to assert "artwork decode dominates". The comment on the size
+probe in `load_track()` asserts the opposite: *"~20 blocking reads -- measured
+at 480 ms ... which is most of the hiccup."* **Both are guesses in the same
+codebase pointing at different culprits**, and the timers settle it in one
+hardware session. Do not optimise before reading them.
+
+The diag-row workflow proved itself on the playlist investigation: flip the
+flag, do the thing, photograph the row. Cheap.
+
+What each answer would mean:
+
+- **`ld_size` dominates** — the size probe. Already incremental in the main
+  loop, but a 0192-opened track raises no 008A, so `R_SLOT_SZ` is stale,
+  `force_size_probe` is set, and the BLOCKING fallback runs on every playlist
+  track change. That is the case to attack, and it is not the artwork.
+- **`ld_art` dominates** — the levers below.
+- **`ld_head` or `ld_pre` dominate** — neither, and this entry needs rewriting.
+
+### Levers, if the artwork really is the cost
+
+1. **`_tag_size` is 4 KB**, so an 847 KB cover costs ~207 target reads. Raising
+   it is a one-line change, but a read larger than 4 KB is UNPROVEN on this
+   hardware -- prove the read first, in isolation. Cheapest thing to try.
+2. **A scaled IDCT inside picojpeg.** Half scale is roughly quarter cost. The
+   reduce path already skips this for covers over 736 px, so the win is on
+   SMALL covers, which are the ones taking the full decode.
+3. **Decode the art AFTER playback starts.** This entry previously called it
+   "the biggest perceived win for the least work". **The second half is wrong**
+   -- corrected 2026-08-13 after actually reading the path.
+
+   `art_decode()` is one blocking pull-parser and the core is single-threaded,
+   so nothing decodes MP3 while it runs; the PCM FIFO holds ~46 ms against an
+   artwork decode of hundreds. Calling it later just moves the underrun.
+
+   Doing it properly means making the decode RESUMABLE: N MCUs per main-loop
+   pass, yielding to refill between slices. In its favour, the MCU loop is ours
+   (`art.inc`) and `pjpeg_decode_mcu()` is already one MCU at a time, so no
+   fork of picojpeg. Against it: ~12 locals plus `pjpeg_image_info_t` become
+   persistent state, the two-pass reduce/full init rewinds the stream, a track
+   change mid-decode has to abort cleanly, and `art_need_bytes` can still block
+   for a 4 KB read INSIDE a slice -- which has to be measured against the 46 ms
+   FIFO before any of this is worth starting.
+
+   Still the biggest perceived win. Not the least work — it lands in the audio
+   continuity path that took longest to stabilise.
+
+## Hold-A for 1.2x is too easy to trigger by accident
+
+A user reported a track playing at "double speed". The likely cause is not a
+decode fault at all -- it is hold-A engaging 1.2x when they meant to pause.
+
+**PL_HOLD_MS is 400 ms**, shared with the Left/Right scrub. That is a sensible
+threshold for a deliberate scrub and a short one for a button whose tap action
+is PAUSE: pressing pause with any deliberation crosses it. The toast says
+SPEED 1.2x, but a user who was not looking at the screen just hears the music
+speed up for no reason.
+
+Options, cheapest first: a longer threshold for A alone (say 800 ms, since
+nothing about speed needs to be quick); require Select+A; or drop the gesture
+and put speed in Core Settings, which costs a slot but cannot be hit by
+accident. Confirm the cause before changing anything -- the user was asked and
+has not answered yet.
+
+## Scrobble log (.scrobbler.log) — requested by a user 2026-08-11
+
+"Could the core write played tracks to a log file like Rockbox does, so I can
+feed it to a last.fm scrobbler?" Rockbox writes `.scrobbler.log`: a header plus
+one tab-separated line per track (artist, album, title, track number, length, a
+listened/skipped flag, and a Unix timestamp). Check the format against
+Rockbox's own docs before writing any of it — do not reconstruct it from
+memory.
+
+**The timestamp problem is already solved, which was the surprise.** The Pocket
+exposes a real-time clock and the frozen shell already carries it:
+`rtc_epoch_seconds`, `rtc_date_bcd`, `rtc_time_bcd` and `rtc_valid` are wires in
+`core_top.v`, connected to `apf_top` and used by nothing here. A Unix epoch
+second is exactly what the format wants. Routing it to the SoC is one more MMIO
+register — an RTL change, so it should ride along with the settings-register
+widen rather than pay for its own compile.
+
+Everything else about the feature is easy. **The write is not.**
+
+### The blocker is 0184, and it is a POLICY decision, not an engineering one
+
+There is exactly one way for a Pocket core to write a file: the `0184` dataslot
+write. **That is the mechanism that destroyed the user's music library three
+times**, and it is off permanently by their decision. Read the forensics under
+Fixed before going near this.
+
+The root cause WAS found and fixed — this core was writing its 0190 response
+struct over APF's dataslot ID/size table at word 0, so APF read a garbage size
+and applied it to whatever file occupied the MP3 slot. So the path is not
+inherently unsafe any more. But "we understand why it broke last time" is not
+the same as "it is safe to point at the user's library again", and that call
+belongs to the user, not to whoever picks this ticket up.
+
+If it is ever attempted:
+
+- **APF cannot CREATE a file.** A placeholder `scrobbler.log` has to ship in
+  `Assets/mp3player/common/` and be declared as its own slot. Design for that;
+  do not assume create-on-first-write.
+- **Never point the write at the MP3 slot.** A separate slot, and assert the
+  slot id at the call site rather than trusting a variable.
+- **A write drops APF's fragment cache** for the MP3 slot, so the next refill
+  re-walks the cluster chain — an audible tic. Defer writes to paused, stopped
+  or menu-open, exactly as the settings code learned to.
+- **Test against a throwaway card with copied music**, never the real library.
+
+A safer half-measure worth considering first: keep the log in RAM and show it on
+screen, so the feature can be proven end to end — timestamps, track identity,
+the listened/skipped rule — with nothing written to the card at all. Only the
+final step needs 0184.
+
+## Gapless playback
+
+Track changes currently have a short silence — the new file has to be opened,
+its tag read and its art decoded before a note plays. Removing it means
+decoding the next track's opening frames *while* the current one is still
+playing, which needs a second decoder instance (~34 KB heap) and a second ring.
+Memory is the constraint, not logic.
+
+## More meters — idea bank (user, 2026-08-12)
+
+"I'd occasionally like to slip a new one in every once in a while." So this is
+a standing list, not a task. Nine exist: bars, waterfall, L/R levels, phase
+scope, oscilloscope, VU needles, scrolling waveform, mirrored bars, peak dots.
+
+**APPEND to the `VIZ_*` enum, never reorder it.** `viz_mode` persists as an
+INDEX, so inserting a meter in the middle silently repoints every user's saved
+preference at a different one. Same rule as the interact.json ids. Adding one
+is otherwise self-contained: an enum entry, a draw block in `ui_draw_dynamic`,
+and a name in the toast chain.
+
+**What a new meter can read for free.** The per-frame loop at the `peak_l`/
+`peak_r` computation already visits EVERY sample of every decoded frame, so
+anything derived per-sample costs only the arithmetic, not the traversal.
+Available today: peak L, peak R, the `wave[]` history, the scope sample spread,
+and elapsed/total.
+
+### Before building any meter with EMPTY areas — learned the hard way
+
+Every meter fills the box with `bed`, the gradient sampled ONCE at the box's
+top row. The screen behind it is a per-row gradient that falls from 16.1/31 at
+the top of the box to 9.9/31 at the bottom. So the box is a flat slab sitting
+on a ramp, and every meter built so far got away with it because its content
+covers the box.
+
+The magic eye was the first with large empty areas and it showed immediately:
+a visible rectangle, stopping at the box edge, obvious on a dock and worst on
+the accent colours with the steepest ramp. **Any meter that leaves background
+showing must paint the real ramp itself** — `ui_grad_at(y)` per row, 72 rects,
+cached with the rest of its face.
+
+Two follow-on traps from the same episode:
+
+- **Background must be painted PER ROW, not in strips.** The eye paints its
+  glow in 4-row strips to keep the rect count down; doing the same to the
+  UNLIT remainder gave each strip its top row's colour, which reads as
+  horizontal stepping against the dithered surround. Lit pixels can be
+  quantised — the colour mixed in dominates. Background cannot.
+- **When a change regresses something already fixed, diff against the
+  known-good commit.** Two rounds of re-reasoning here both missed a clamp
+  that had been deleted during an experiment and never restored; the diff
+  found it in one look.
+
+### Buildable from what exists
+
+- **L/R isometric cube stacks** -- user's idea. Discrete blocks in fake-3D with
+  peak-hold caps; the isometric projection is what keeps it distinct from the
+  mirrored bars.
+- **Vinyl platter and tonearm** -- platter spins, arm creeps inward with track
+  progress, highlight pulses with level. Uses elapsed/total, which no current
+  meter visualises.
+- **Tape reels** -- same data. The supply reel speeding up as it empties is the
+  detail that sells it.
+- **Radar sweep** -- a line sweeps a circle painting level as radius, with a
+  decaying trail. Polar version of the scrolling waveform.
+
+### Needs one enabler: a bass proxy
+
+A **one-pole lowpass in the existing per-sample loop** -- a shift and an add.
+Unlocks:
+
+- **Beating speaker cone** -- user's idea, and it NEEDS this. Driven by overall
+  level it wobbles on everything and reads wrong; driven by bass energy it
+  thumps on kicks.
+- **Ferrofluid spikes**, and **pressure rings** emitted on each kick.
+
+### The one that unlocks the most: an RTL filter bank
+
+[[Spectrum display]] below says the decoder exposes no frequency bins. True,
+and beside the point -- what is needed is a filter bank, and **the EQ is
+already biquads in hardware**. An analysis bank in RTL costs LOGIC, not BRAM
+(the resource at 97%), and zero CPU. Retires the known limitation and unlocks
+true spectrum bars, a real spectrogram waterfall, and a graphic-EQ display.
+
+In firmware instead: possible on a decimated signal, but decode leaves roughly
+14 MHz of the 60 at 1x (derived from the measured 54.8 MHz at 1.2x, not
+measured directly) and nothing at 1.2x.
+
+## Spectrum display
+
+The decoder doesn't expose frequency bins, so every meter shows loudness,
+waveform or stereo. Real frequency content needs either an FFT or a few
+one-pole IIR filters over the PCM buffer to split bass/mid/treble. The filter
+bank is affordable (a few hundred MACs a frame, subsampled) but lands in the
+budget that keeps the decoder fed — the one item on this list that could bring
+audio tics back. Prototype behind a compile-time flag.
+
+## MPEG-2 / 2.5 and Layer I/II
+
+Helix decodes them; the core rejects them. Mostly a matter of not assuming
+MPEG-1 Layer III in the frame-size arithmetic (`144 * bitrate / samplerate`),
+the duration estimate and the oscilloscope's trigger window. Low risk, low
+excitement, widens the library.
+
+## Playlist browsing on screen
+
+`0192` opens a file by name and works. The missing piece is showing the list:
+the names are already parsed into `pl_text[]`, so this is a UI job — a
+scrollable list, and a decision about whether it overlays the now-playing
+screen or replaces it.
+
+## Tune the EQ presets by ear
+
+The only item on this list that needs a person rather than a change. The curves
+are numerically verified and each shape matches the name it carries, but nobody
+has judged whether ROCK actually *sounds* like rock. Expect to adjust the gains
+in `tools/gen_eq_coeffs.py` and regenerate; the engine itself should not need
+touching.
+
+## Cleanup: retire what the click hunt left behind
+
+Fixing the track-change click took many attempts, and several mechanisms
+survive that may no longer earn their place — the decoder reservoir warm-up and
+the async EOF discovery are the likeliest candidates, now that every cold load
+finishes through the reposition body. Others are load-bearing: the FIFO
+glide/fade pair, the cut-at-press transition, and the confirmed-EOF guard all
+fix real faults. Worth a pass, one at a time, each verified on hardware —
+not a bulk tidy.
+
+## The persisted-settings register file — 5 of 16 slots free
+
+**Was "FULL", and is no longer.** rev 21 widened `set_idx` from 3 bits to 4 in
+`mp3_soc.v`, taking the file from 8 slots to 16. Eleven are spoken for: volume,
+accent, repeat, shuffle, resume point, meter, EQ, resume on/off, and three
+words carrying twelve characters of the playlist stem.
+
+**Five are free**, so the next remembered setting costs nothing but an
+`interact.json` entry. The one after five more needs another widen — and the
+register file is `ramstyle = "logic"`, kept in fabric because BRAM is at 97%,
+so each slot is real LUTs rather than free memory.
+
+Anything stored here is read back through `interact.json`, so see the id rules
+at the top of `fw/settings.inc` before adding one: ids are never renumbered, a
+slider's `max` has to cover the new range, and array order sets the menu order.
+
+# Fixed
+
+Kept for the reasoning, not the status. Nothing here is outstanding.
+
+## Resume where you left off — SHIPPED v1.1.0, extended in v1.2.0
 
 Restore the playlist position, and optionally the offset within the track, on
 next launch. The better of the two requests from that day: it works exactly as
@@ -191,7 +815,11 @@ Three things to design around:
 
 Roughly 5-8 hours plus the compile: two hardware sessions.
 
-## Variable playback speed — 1.2x is reachable, 2x is NOT (requested 2026-08-10)
+**Shipped.** v1.1.0 restored the track and position; v1.2.0 added the
+playlist NAME, so it survives using a list other than playlist.m3u. Scope is
+one bookmark — see the note under the v1.2.0 defect.
+
+## Variable playback speed — SHIPPED, hold A for 1.2x
 
 The mechanism already exists. `R_PCM_RATE` sets the FIFO drain rate and the
 firmware already computes it per file, so scaling it is one line. That buys
@@ -308,108 +936,40 @@ below is about.
 
 Roughly 2 hours, one hardware test.
 
-## Scrobble log (.scrobbler.log) — requested by a user 2026-08-11
+**Shipped.** Hold A toggles 1.2x, off every launch, documented in the README
+along with the distortion it can cause. Still open, separately: the 400 ms
+hold threshold is shared with the seek and may be too easy to hit by
+accident — see its own entry.
 
-"Could the core write played tracks to a log file like Rockbox does, so I can
-feed it to a last.fm scrobbler?" Rockbox writes `.scrobbler.log`: a header plus
-one tab-separated line per track (artist, album, title, track number, length, a
-listened/skipped flag, and a Unix timestamp). Check the format against
-Rockbox's own docs before writing any of it — do not reconstruct it from
-memory.
 
-**The timestamp problem is already solved, which was the surprise.** The Pocket
-exposes a real-time clock and the frozen shell already carries it:
-`rtc_epoch_seconds`, `rtc_date_bcd`, `rtc_time_bcd` and `rtc_valid` are wires in
-`core_top.v`, connected to `apf_top` and used by nothing here. A Unix epoch
-second is exactly what the format wants. Routing it to the SoC is one more MMIO
-register — an RTL change, so it should ride along with the settings-register
-widen rather than pay for its own compile.
+## No internals on screen, and the filename when a file has no tag — 2026-08-12
 
-Everything else about the feature is easy. **The write is not.**
+Two places put debugging output in front of users, and both shipped.
 
-### The blocker is 0184, and it is a POLICY decision, not an engineering one
+**The title row.** A file with no readable ID3 tag displayed
+`NOTAG FFFB9064 R04` -- a status word, the file's first four bytes, and the
+reload status. That string was built to tell three failure modes apart during
+the reload hunt and it earned its place then. On a shipped player it captioned
+a file that was playing perfectly well with a hex dump.
 
-There is exactly one way for a Pocket core to write a file: the `0184` dataslot
-write. **That is the mechanism that destroyed the user's music library three
-times**, and it is off permanently by their decision. Read the forensics under
-Fixed before going near this.
+Now shows the FILENAME, which is almost always the song name: last path
+component, extension trimmed only when the dot looks like one (`Blur - 13.mp3`
+must keep its number). Falls back to `UNKNOWN TRACK` when APF reports no name
+either. This also retires the `UNICODE TAG` caption -- the same mistake in
+words. A tag encoding the parser declines is our limitation to state in the
+README, not a label for someone's music, and those files have filenames too.
 
-The root cause WAS found and fixed — this core was writing its 0190 response
-struct over APF's dataslot ID/size table at word 0, so APF read a garbage size
-and applied it to whatever file occupied the MP3 slot. So the path is not
-inherently unsafe any more. But "we understand why it broke last time" is not
-the same as "it is safe to point at the user's library again", and that call
-belongs to the user, not to whoever picks this ticket up.
+**The LOAD FAILED screen.** Printed `HEAD FFFB9064` under the heading: a hex
+dump on the one screen a user sees when something has already gone wrong. Now
+says `THE FILE COULD NOT BE READ`.
 
-If it is ever attempted:
+Left alone deliberately: `! FILE SIZE WRONG - CHECK SD CARD` is plain and
+tells the user what to do about it. The Select+A / Select+B struct dumps are
+behind `#if DEBUG_DIAG`, which is 0, so a release build cannot reach them.
 
-- **APF cannot CREATE a file.** A placeholder `scrobbler.log` has to ship in
-  `Assets/mp3player/common/` and be declared as its own slot. Design for that;
-  do not assume create-on-first-write.
-- **Never point the write at the MP3 slot.** A separate slot, and assert the
-  slot id at the call site rather than trusting a variable.
-- **A write drops APF's fragment cache** for the MP3 slot, so the next refill
-  re-walks the cluster chain — an audible tic. Defer writes to paused, stopped
-  or menu-open, exactly as the settings code learned to.
-- **Test against a throwaway card with copied music**, never the real library.
-
-A safer half-measure worth considering first: keep the log in RAM and show it on
-screen, so the feature can be proven end to end — timestamps, track identity,
-the listened/skipped rule — with nothing written to the card at all. Only the
-final step needs 0184.
-
-## Gapless playback
-
-Track changes currently have a short silence — the new file has to be opened,
-its tag read and its art decoded before a note plays. Removing it means
-decoding the next track's opening frames *while* the current one is still
-playing, which needs a second decoder instance (~34 KB heap) and a second ring.
-Memory is the constraint, not logic.
-
-## Spectrum display
-
-The decoder doesn't expose frequency bins, so every meter shows loudness,
-waveform or stereo. Real frequency content needs either an FFT or a few
-one-pole IIR filters over the PCM buffer to split bass/mid/treble. The filter
-bank is affordable (a few hundred MACs a frame, subsampled) but lands in the
-budget that keeps the decoder fed — the one item on this list that could bring
-audio tics back. Prototype behind a compile-time flag.
-
-## MPEG-2 / 2.5 and Layer I/II
-
-Helix decodes them; the core rejects them. Mostly a matter of not assuming
-MPEG-1 Layer III in the frame-size arithmetic (`144 * bitrate / samplerate`),
-the duration estimate and the oscilloscope's trigger window. Low risk, low
-excitement, widens the library.
-
-## Playlist browsing on screen
-
-`0192` opens a file by name and works. The missing piece is showing the list:
-the names are already parsed into `pl_text[]`, so this is a UI job — a
-scrollable list, and a decision about whether it overlays the now-playing
-screen or replaces it.
-
-## Tune the EQ presets by ear
-
-The only item on this list that needs a person rather than a change. The curves
-are numerically verified and each shape matches the name it carries, but nobody
-has judged whether ROCK actually *sounds* like rock. Expect to adjust the gains
-in `tools/gen_eq_coeffs.py` and regenerate; the engine itself should not need
-touching.
-
-## Cleanup: retire what the click hunt left behind
-
-Fixing the track-change click took many attempts, and several mechanisms
-survive that may no longer earn their place — the decoder reservoir warm-up and
-the async EOF discovery are the likeliest candidates, now that every cold load
-finishes through the reposition body. Others are load-bearing: the FIFO
-glide/fade pair, the cut-at-press transition, and the confirmed-EOF guard all
-fix real faults. Worth a pass, one at a time, each verified on hardware —
-not a bulk tidy.
-
-# Fixed
-
-Kept for the reasoning, not the status. Nothing here is outstanding.
+**Standing rule from the user: no diagnostic is ever shown to users.** Debug
+output goes behind a compile-time flag from the start, not "temporarily" into
+a live screen.
 
 ## Shuffle produced the same order every boot — FIXED 2026-08-10
 

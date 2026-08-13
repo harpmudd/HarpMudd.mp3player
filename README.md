@@ -1,11 +1,14 @@
 # MP3 Player — Analogue Pocket
 
 An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, ID3 tags, nine
+decodes and plays it straight off the SD card, with album art, ID3 tags, ten
 switchable meters, an eight-preset equalizer, a progress bar, settings
-persistence and resume — it remembers where you were in a playlist.
+persistence and optional resume — it can pick up where you left off in a
+playlist.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
+
+Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Installing
 
@@ -17,21 +20,19 @@ files into:
 /Assets/mp3player/common/
 ```
 
-They can live anywhere on the card; keeping them there makes them quick to find
-in the browser.
-
-`mp3player.rom` is the firmware — the core won't start without it. That, your
-music and a `playlist.m3u` if you want one are all that belong there.
-
-The Pocket lists the core as **MP3 Player**; open that to launch it.
+They can live anywhere on the card; that folder is just where the browser
+starts. `mp3player.rom` is the firmware and has to stay there — the core won't
+start without it.
 
 ## Playing
 
-If a playlist is on the card, the core starts playing its first track at launch.
+At launch the core loads **`playlist.m3u`** — that name specifically, not any
+playlist it finds. Pick another once with **Load Playlist** and that becomes
+the one that loads from then on.
 
-Otherwise you get a short getting-started screen; press **Analogue** and choose
-**Load MP3** or **Load Playlist**. The same menu switches either at any time,
-and whatever you pick starts playing.
+With no `playlist.m3u` and nothing remembered you get a getting-started screen;
+press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
+switches either at any time, and whatever you pick starts playing.
 
 | Pocket | Action |
 |---|---|
@@ -43,7 +44,7 @@ and whatever you pick starts playing.
 | **Select** + **Left** / **Right** | Seek one second |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter (nine styles) |
+| **X** | Cycle the meter (ten styles) |
 | **Y** | Cycle the EQ preset (eight) |
 | **Select** | Show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
@@ -51,29 +52,73 @@ and whatever you pick starts playing.
 | **Select** + **R** | Shuffle on / off |
 | **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
 
-The Pocket's own **Controls** screen names every button too, so you don't have
-to keep this table to hand.
-
 Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset are
 remembered between sessions, and the controls and **Core Settings** stay in
-step. **Where you were in a playlist is remembered too** — the track and your
-position in it, so a long listen picks up where it stopped. Turn that off with
-**Resume playback** in Core Settings.
+step. **Where you were in a playlist can be remembered too** — the track and
+your position in it. That one is off until you ask for it: switch on **Resume
+playback** in Core Settings.
 
-That applies to playlist playback only. A file opened with **Load MP3** plays
-without recording a position, which also means a quick listen to something else
-won't cost you your place. For an audiobook, put it in a playlist — a one-line
-`.m3u` is enough.
+Only one place is remembered, for the last playlist you used. Switch to another
+list and the first one starts over next time.
 
-The album art panel and the screen-blank timeout are *not* remembered; both
-reset each launch and are set with buttons.
+**Load MP3** records no position at all, so for an audiobook use a playlist — a
+one-line `.m3u` is enough.
 
-The Pocket keeps all of this under `/Settings/HarpMudd.Mp3Player/` on the card;
-delete that folder to reset. Nothing is written to your music folder.
+The album art panel and the screen-blank timeout reset each launch. Everything
+saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
+Nothing is written to your music folder.
+
+## Playlists
+
+Make a plain text file with one track per line and save it as `playlist.m3u` in
+`/Assets/mp3player/common/`:
+
+```text
+Feel Good Inc.mp3
+Rhinestone Eyes.mp3
+/Music/Albums/Demon Days/01 Intro.mp3
+```
+
+Bare names are relative to that folder; a leading `/` is from the card root.
+Lines starting with `#` are ignored, so exported playlists work as-is.
+
+Any other name is picked with **Load Playlist**, and becomes the one that loads
+at launch from then on.
+
+Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
+*one* repeats the current track. **Shuffle** plays in a random order and never
+repeats a track until the rest have played; with **Repeat all**, each pass round
+the list is freshly shuffled.
+
+A misspelled or missing filename costs that one track — the core steps over it
+and says how many it skipped. The count on screen is what will actually play,
+not how many lines the file has.
+
+## What it shows
+
+<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
+
+- **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
+  files that carry nothing else. A file with no readable tag shows its
+  filename, which is usually the song name anyway.
+- **Album art** from the tag's embedded image — baseline JPEG only; tracks
+  without it don't show the panel.
+- **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
+  oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
+  peak dots and a magic eye.
+- **Elapsed and total time**, with a progress bar.
+- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
+  **EQ preset name**, and the position in the playlist.
+- **The encoder that made the file**, beside the bitrate and sample rate —
+  `128 kbps - 44.1 kHz - LAME3.100`. Files without a LAME tag just show the
+  format.
+
+CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
+stereo.<br clear="right">
 
 ## Equalizer
 
@@ -91,81 +136,29 @@ on `FLAT`.
 | **VOCAL** | mid forward, lows trimmed |
 | **TREBLE** | high shelf lift |
 
-It works while paused; there is just nothing to hear until you press play.
-
 Presets are loudness-matched, so switching changes the tone without changing how
 loud the music seems.
 
-### Playback speed
+## Playback speed
 
 Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
 rises with the speed, so music sounds wrong. Off every launch — it isn't
 remembered.
 
-1.2× is the whole range, and that's the CPU rather than a choice. Playing at
-double speed means decoding twice as many frames per second, which needs more
-than the 60 MHz available at any bitrate.
+1.2× is the whole range — that's the CPU, not a choice. Double speed means
+decoding twice as many frames a second, past what the 60 MHz can do.
 
-### Screen blanking
+## Screen blanking
 
 **Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
-goes black after that long with no button pressed. Any button wakes it, and
-that press does nothing else — reaching for a sleeping player to see what's on
-shouldn't pause it.
+goes black after that long with no button pressed, and any button wakes it
+without doing anything else — reaching for a sleeping player shouldn't pause
+it. Playback carries on regardless, and nothing but a button press brings the
+screen back.
 
-Playback carries on while the screen is black, and nothing else brings it
-back — track changes, meters and toasts all stay dark until you press
-something.
-
-It resets to off each launch, and it dims rather than powers down: the Pocket's
-screen is a backlit LCD and a core can't reach the backlight, so this is for
-a dark room rather than for saving battery.
-
-## Playlists
-
-Make a plain text file with one track per line and save it as `playlist.m3u` in
-`/Assets/mp3player/common/`:
-
-```text
-Feel Good Inc.mp3
-Rhinestone Eyes.mp3
-/Music/Albums/Demon Days/01 Intro.mp3
-```
-
-Bare names are relative to that folder; a leading `/` is from the card root.
-Lines starting with `#` are ignored, so exported playlists work as-is.
-
-`playlist.m3u` loads at boot; any other name loads from **Load Playlist**.
-
-Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
-*one* repeats the current track. **Shuffle** plays in a random order and never
-repeats a track until the rest have played; with **Repeat all**, each pass round
-the list is freshly shuffled.
-
-A misspelled or missing filename costs that one track — the core steps over it
-and says how many it skipped. The count on screen is what will actually play,
-not how many lines the file has.
-
-## What it shows
-
-<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
-
-- **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
-  files that carry nothing else.
-- **Album art** from the tag's embedded image — JPEG only; tracks without it
-  don't show the panel.
-- **Nine meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
-  oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars and
-  peak dots.
-- **Elapsed and total time**, with a progress bar.
-- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
-  **EQ preset name**, and the position in the playlist.
-- **The encoder that made the file**, beside the bitrate and sample rate —
-  `128 kbps - 44.1 kHz - LAME3.100`. Files without a LAME tag just show the
-  format.
-
-CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
-stereo.<br clear="right">
+It resets to off each launch, and it dims rather than powers down: a core can't
+reach the Pocket's backlight, so this is for a dark room rather than for saving
+battery.
 
 ## How it works
 
@@ -179,17 +172,16 @@ framework bugs that had to be found first — is in
 
 ## Known limitations
 
-- **Total time is approximate on a VBR file with no Xing/Info/VBRI header** —
-  an unusual combination, since VBR encoders normally write one. Everything
-  else is exact.
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
-- **JPEG album art only.** PNG covers are skipped rather than shown wrong —
-  see [ROADMAP.md](ROADMAP.md).
+- **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
+  skipped rather than shown wrong — re-save as baseline if a cover doesn't
+  appear. See [ROADMAP.md](ROADMAP.md).
 - **Playlists are capped at 128 tracks**, or 16 KB of `.m3u` text — whichever
   comes first, which allows about 128 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **No spectrum display.** The decoder doesn't expose frequency bins, so the
-  meters show loudness, waveform and stereo instead.
+- **Sometimes a playlist pick doesn't register straight away.** It loads on
+  its own a few seconds later; if it doesn't, pick it again. Seen when
+  switching from one playlist to another.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.

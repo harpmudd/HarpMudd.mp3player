@@ -42,9 +42,8 @@
  * this BRAM as {slot_id, size} pairs -- measured, see core_game.vh. The
  * response struct used to sit at word 0 and APF overwrote the table with it on
  * every 0190. */
-#define DT_RESP_W   64u     /* response struct  (APF writes) */
-#define DT_PARAM_W  128u    /* parameter struct (APF reads)  */
-#define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window */
+/* DT_RESP_W / DT_PARAM_W / DT_WORDS are defined in player.c, above
+ * slot_file_id() -- which needs them and is compiled before this file. */
 
 static inline void dt_write(uint32_t word, uint32_t val)
 {
@@ -99,6 +98,8 @@ static uint8_t pl_open_timeout;      /* 0192 never answered; errcode is stale  *
  * code that justifies giving up on an entry for good. */
 #define PL_ERRCODE_NOFILE 4u
 
+static int pl_open_name(const char *name);   /* -> pl_open_into(MP3 slot) */
+
 /* Fetch a template descriptor into `buf`. Returns the length of the printable
  * path it contains, or 0.
  *
@@ -131,7 +132,10 @@ static uint32_t pl_template(uint32_t slot, uint8_t *buf, uint32_t *name_at)
     return best_len;
 }
 
-static int pl_open_name(const char *name)
+/* Open `name` into ANY slot. The target used to be hardwired to the MP3 slot;
+ * slot 3 needs it too now that the playlist slot no longer declares a default
+ * filename and has to be filled by the core on a fresh card. */
+static int pl_open_into(uint32_t slot, const char *name)
 {
     pl_open_err = PLO_OK; pl_open_errcode = 0; pl_open_timeout = 0;
 
@@ -201,7 +205,7 @@ static int pl_open_name(const char *name)
     /* This switches the slot but raises NO 008A -- that notification is for a
      * file the USER picked from the menu, not one the core opened. The caller
      * therefore has to drive the load itself; see pl_play_at(). */
-    if (!pl_cmd(TGT_OPENFILE, MP3_SLOT_ID, CLK_HZ * 3u)) {
+    if (!pl_cmd(TGT_OPENFILE, slot, CLK_HZ * 3u)) {
         pl_open_err     = PLO_OPEN;
         pl_open_timeout = pl_cmd_timedout;
         pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
@@ -702,6 +706,90 @@ static int pl_advance_auto(void)
 
 /* Load (or reload) the playlist slot. Safe to call when no playlist file is
  * present -- pl_count stays 0 and every playlist control becomes a no-op. */
+/* The playlist slot's own filename, last component only, uppercased for the
+ * splash. Empty if APF has nothing there or will not answer.
+ *
+ * Doubles as the diagnostic for the multi-playlist defect: our code never
+ * names a playlist, it just reads whatever is in slot 3, so if resume behaves
+ * differently for audiobook.m3u than for playlist.m3u the difference has to be
+ * in what APF put there. Showing the name settles that in one boot. */
+static void pl_name_read(void)
+{
+    pl_name[0] = 0; pl_name_raw[0] = 0;
+    uint8_t buf[DT_WORDS * 4u];
+    uint32_t at = 0, len = pl_template(PL_SLOT_ID, buf, &at);
+    if (!len) return;
+
+    /* Last path component only -- the slot holds a full path. */
+    uint32_t start = at;
+    for (uint32_t i = at; i < at + len; i++)
+        /* 0x5C is a backslash; writing it as a char literal here kept
+         * getting mangled by the tooling that generated this file. */
+        if (buf[i] == '/' || buf[i] == 0x5Cu) start = i + 1u;
+
+    uint32_t n = 0;
+    for (uint32_t i = start; i < at + len && n < sizeof(pl_name) - 1u; i++) {
+        char c = (char)buf[i];
+        /* Raw case is kept as well as the uppercased display form. The stored
+         * stem is reopened BY NAME later, and uppercasing it would ask APF for
+         * SHENANIGANS.m3u when the card holds Shenanigans.m3u -- fine on FAT,
+         * not something to rely on. */
+        pl_name_raw[n] = c;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        pl_name[n++] = c;
+    }
+    pl_name[n] = 0;
+    pl_name_raw[n] = 0;
+}
+
+/* The name the core falls back to. Only used when APF has nothing in the
+ * playlist slot -- once the user picks a list, that pick is what persists. */
+#define PL_DEFAULT_NAME "playlist.m3u"
+
+static int pl_open_name(const char *name)
+{
+    return pl_open_into(MP3_SLOT_ID, name);
+}
+
+/* Reduce pl_name ("SHENANIGANS.M3U") to the stem we store ("SHENANIGANS").
+ * Uppercase throughout: pl_name is already uppercased for the splash, and
+ * comparing case-insensitively is what lets a stored stem match a slot whose
+ * path APF reports in whatever case it likes. */
+static void pl_stem_of(const char *name, char *out)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; name[i] && n < PL_STEM_MAX; i++) {
+        if (name[i] == '.') break;                 /* stop at the extension */
+        out[n++] = name[i];                        /* CASE PRESERVED */
+    }
+    out[n] = 0;
+}
+
+static char pl_upper(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
+
+/* Case-insensitive: the two sides come from different places and only the
+ * card's own spelling is authoritative. */
+static int pl_stem_eq(const char *a, const char *b)
+{
+    for (uint32_t i = 0; i <= PL_STEM_MAX; i++) {
+        if (pl_upper(a[i]) != pl_upper(b[i])) return 0;
+        if (!a[i]) return 1;
+    }
+    return 1;
+}
+
+/* Remember whichever list is loaded, so the next boot can reopen it. Called
+ * once a playlist has actually parsed -- an unreadable file must not overwrite
+ * a good remembered name. */
+static void pl_remember(void)
+{
+    char stem[PL_STEM_MAX + 1u];
+    pl_stem_of(pl_name_raw, stem);
+    if (!stem[0] || pl_stem_eq(stem, pl_saved_stem)) return;
+    for (uint32_t i = 0; i <= PL_STEM_MAX; i++) pl_saved_stem[i] = stem[i];
+    settings_mark_dirty();
+}
+
 static void pl_load(void)
 {
     pl_count = 0; pl_pos = 0; pl_status = PL_OK;
@@ -709,8 +797,73 @@ static void pl_load(void)
      * way back for a user who fixed a filename on the card -- re-picking the
      * playlist gives every entry another chance. */
     pl_dead_clear();
+    pl_name_read();
+
+    /* Ask by READING, not by asking what is in the slot.
+     *
+     * The first version tested pl_name[0] for emptiness and skipped the
+     * fallback whenever it looked non-empty -- but pl_name comes from the 0190
+     * response struct, which holds RESIDUE from whatever getfile ran last. So
+     * it read as full when the slot was empty, the fallback never fired, and
+     * no playlist loaded at all. The only trustworthy test of "is there a
+     * playlist here" is trying to read one.
+     *
+     * STALE COMMENT CORRECTED: data.json DOES declare "playlist.m3u" for slot
+     * 3. Removing it was tried, on the theory that APF resetting the slot at
+     * every core load was throwing away the user's chosen list -- and it was
+     * reverted, because slot 3 does not retain the pick either way. So APF
+     * puts playlist.m3u in the slot at every launch and the remembered list
+     * is reopened by name below, which is what actually makes multi-playlist
+     * work. This open-by-name is the belt to that braces: it also covers a
+     * slot APF left empty. */
+    /* If a different list is remembered, reopen it BEFORE reading.
+     *
+     * The slot cannot remember anything itself -- with a filename declared in
+     * data.json APF resets it to that file every core load, and without one it
+     * comes up empty. Both measured. So the core reopens the remembered stem
+     * by name, which is the only mechanism the platform offers.
+     *
+     * Skipped when the slot already holds the right list, so the ordinary
+     * case costs nothing and picking a new list mid-session is untouched. */
+    /* ONLY on the first load of the session.
+     *
+     * pl_load() runs at boot AND every time the user picks a list, and the
+     * first version did not distinguish them -- so choosing Shenanigans.m3u
+     * made this see a name differing from the remembered one and helpfully
+     * "restore" the remembered one over the top. It fought the user's pick
+     * every single time, which is exactly how it was reported. */
+    if (pl_restore_pending && pl_saved_stem[0]) {
+        char cur[PL_STEM_MAX + 1u];
+        pl_stem_of(pl_name_raw, cur);
+        if (!pl_stem_eq(cur, pl_saved_stem)) {
+            char want[PL_STEM_MAX + 5u];
+            uint32_t n = 0;
+            while (pl_saved_stem[n] && n < PL_STEM_MAX) { want[n] = pl_saved_stem[n]; n++; }
+            want[n++] = '.'; want[n++] = 'm'; want[n++] = '3'; want[n++] = 'u';
+            want[n] = 0;
+            if (pl_open_into(PL_SLOT_ID, want)) pl_name_read();
+        }
+    }
+
+    pl_restore_pending = 0;
+
     uint32_t len = pl_read_raw();
+    if (!len && pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME)) {
+        pl_name_read();
+        len = pl_read_raw();
+    }
     if (!len) { pl_status = PL_ERR_NOFILE; return; }
+
+    /* FNV-1a over the raw text, before parsing touches anything. */
+    {
+        uint32_t h = 2166136261u;
+        for (uint32_t i = 0; i < len; i++) {
+            h ^= (uint32_t)(uint8_t)pl_text[i];
+            h *= 16777619u;
+        }
+        pl_sig = h ? h : 1u;               /* 0 is reserved for "none" */
+    }
+
     pl_parse(len);
     if (!pl_count) { pl_status = PL_ERR_EMPTY; return; }
 
@@ -725,6 +878,9 @@ static void pl_load(void)
      * This point has genuine entropy: the playlist reads above walk the card's
      * cluster chain, whose timing varies run to run, so the cycle counter here
      * is not the fixed value it would be earlier in a deterministic boot. */
+    pl_remember();
+    for (uint32_t i = 0; i < sizeof(pl_cur_name); i++)
+        pl_cur_name[i] = pl_name_raw[i];
     pl_rng = cycles() | 1u;
     pl_reorder();
 }

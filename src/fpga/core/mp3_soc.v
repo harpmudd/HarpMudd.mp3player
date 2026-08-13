@@ -136,7 +136,7 @@ module mp3_soc #(
     input  wire [31:0]  dt_q,
 
     // Persistent settings words, published to / read from interact.json.
-    output reg  [2:0]   set_idx,
+    output reg  [3:0]   set_idx,
     output reg          set_wr,
     output reg  [31:0]  set_wdata,
     input  wire [31:0]  set_rdata
@@ -298,9 +298,16 @@ module mp3_soc #(
 
     // The playlist slot raises 008A exactly as the MP3 slot does, but the edge
     // above is gated on the MP3 id -- so without this a "Load Playlist" pick is
-    // invisible to firmware and silently does nothing. Polling slot 3 instead is
-    // NOT an option: touching a different slot makes APF drop its fragment cache
-    // for the MP3 slot, and every refill then re-walks the FAT cluster chain.
+    // invisible to firmware and silently does nothing.
+    //
+    // This comment used to add that polling slot 3 was NOT an option, because
+    // touching another slot makes APF drop its fragment cache for the MP3 slot
+    // and every refill then re-walks the FAT cluster chain. That is true of a
+    // slot READ (0180) and was measured. It is NOT true of a 0190 getfile:
+    // firmware polls slot 3's identity every 3 s while streaming and no tic is
+    // audible (measured 2026-08-13). A metadata query does not walk the chain.
+    // The distinction matters -- the poll is the only recovery route that
+    // depends on neither this notification nor a menu edge.
     wire pl_reload_edge = (upd_sync[2] ^ upd_sync[1]) && (upd_id_74 == PL_SLOT_ID);
 
     reg mp3_reloaded, pl_reloaded;
@@ -371,7 +378,7 @@ module mp3_soc #(
     // stale RTL. That has already happened three times here, each time looking
     // like a logic bug (dead peripheral, no audio, unresponsive buttons) rather
     // than what it was. BUMP THIS whenever the MMIO map changes.
-    localparam [31:0] CORE_VERSION = 32'h4D503314;   // "MP3" + rev 20 (interact settings)
+    localparam [31:0] CORE_VERSION = 32'h4D503315;   // "MP3" + rev 21 (16 setting slots)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -449,14 +456,14 @@ module mp3_soc #(
             // sound before firmware programs the real rate.
             pcm_rate <= 32'd3435974;   // 48 kHz at clk_sys = 60 MHz
             eq_preset <= 3'd0;         // FLAT: bypass until asked otherwise
-            set_idx <= 3'd0; set_wdata <= 32'd0;
+            set_idx <= 4'd0; set_wdata <= 32'd0;
         end else if (d_req & d_is_mmio & dWE) begin
             case (mmio_reg)
                 R_CONSOLE: begin con_char <= dDAT_MOSI[7:0]; con_wr <= 1'b1; end
                 R_AUDIO:   ;   /* handled by pcm_push -> pcm_fifo */
                 R_PCM_RATE: pcm_rate <= dDAT_MOSI;
                 R_EQ:       eq_preset <= dDAT_MOSI[2:0];
-                R_SET_IDX:  set_idx   <= dDAT_MOSI[2:0];
+                R_SET_IDX:  set_idx   <= dDAT_MOSI[3:0];
                 R_SET_DAT:  begin set_wdata <= dDAT_MOSI; set_wr <= 1'b1; end
                 R_PCM_ST:  ;   /* handled by pcm_flush -> pcm_fifo, above */
                 R_STAT0:   status0 <= dDAT_MOSI;

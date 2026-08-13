@@ -101,7 +101,7 @@ wire [7:0]  soc_con_char;
 
 wire        soc_tgt_go;
 wire [1:0]  soc_tgt_cmd_sel;
-wire [2:0]  soc_set_idx;
+wire [3:0]  soc_set_idx;
 wire        soc_set_wr;
 wire [31:0] soc_set_wdata;
 wire [31:0] soc_set_rdata;
@@ -389,9 +389,16 @@ sound_i2s #(.CHANNEL_WIDTH(16), .SIGNED_INPUT(1)) u_sound_i2s (
 // CPU reads are asynchronous and quasi-static -- these words change on a button
 // press, not continuously -- which is the same argument tgt_cmd.v makes for its
 // parameter registers.
-(* ramstyle = "logic" *) reg [31:0] set_reg [0:7];
+/* SIXTEEN words, was eight. The eighth was the last one free and a playlist
+ * name needs three, so the index went from 3 bits to 4.
+ *
+ * Still ramstyle=logic: at 16x32 this is 512 flip-flops out of ~7000, and
+ * block RAM is the binding resource on this device at 97%. Letting Quartus
+ * infer an M10K here would spend one of the eight remaining blocks on
+ * something that fits comfortably in fabric. */
+(* ramstyle = "logic" *) reg [31:0] set_reg [0:15];
 
-reg  [2:0]  cpu_set_idx;
+reg  [3:0]  cpu_set_idx;
 reg  [31:0] cpu_set_dat;
 reg         cpu_set_tgl = 1'b0;
 
@@ -407,7 +414,10 @@ reg [2:0] cpu_set_sync = 3'b0;
 always @(posedge clk_74a) cpu_set_sync <= {cpu_set_sync[1:0], cpu_set_tgl};
 wire cpu_set_wr_74 = cpu_set_sync[2] ^ cpu_set_sync[1];
 
-wire [2:0] set_widx = bridge_addr[4:2];
+/* One more address bit. With [4:2] the ninth variable at 0x20000020 wrapped
+ * onto slot 0 and silently overwrote Volume -- no error, just a corrupted
+ * setting, which is why this had to move in step with the depth above. */
+wire [3:0] set_widx = bridge_addr[5:2];
 
 always @(posedge clk_74a) begin
     if (cpu_set_wr_74)

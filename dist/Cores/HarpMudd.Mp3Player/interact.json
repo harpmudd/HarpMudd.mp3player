@@ -61,22 +61,6 @@
                 "value": 1
             },
             {
-                "name": "Saved position",
-                "id": 18,
-                "type": "slider_u32",
-                "enabled": true,
-                "persist": true,
-                "address": "0x20000010",
-                "defaultval": 0,
-                "graphical": {
-                    "signed": false,
-                    "min": 0,
-                    "max": 2147483647,
-                    "adjust_small": 1,
-                    "adjust_large": 1
-                }
-            },
-            {
                 "name": "Meter",
                 "id": 15,
                 "type": "slider_u32",
@@ -87,7 +71,7 @@
                 "graphical": {
                     "signed": false,
                     "min": 0,
-                    "max": 8,
+                    "max": 9,
                     "adjust_small": 1,
                     "adjust_large": 1
                 }
@@ -117,6 +101,70 @@
                 "address": "0x2000001C",
                 "defaultval": 0,
                 "value": 1
+            },
+            {
+                "name": "Saved position",
+                "id": 18,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000010",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 2147483647,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
+                "name": "(internal) list 1",
+                "id": 20,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000020",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 2147483647,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
+                "name": "(internal) list 2",
+                "id": 21,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000024",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 2147483647,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
+                "name": "(internal) list 3",
+                "id": 22,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000028",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 2147483647,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
             }
         ],
         "messages": []

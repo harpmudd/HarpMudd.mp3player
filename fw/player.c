@@ -138,12 +138,12 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503314u   /* rev 20: interact settings         */
+#define EXPECT_VERSION 0x4D503315u   /* rev 21: 16 setting slots          */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.1.0"
+#define APP_VER "1.2.0"
 
 /* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
  * Select+A (APF slot table, boot vs live), Select+B (the framework's file
@@ -176,6 +176,21 @@ static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
+/* The one place a byte becomes a glyph index. The atlas holds 0x20..0x7E and
+ * nothing else, so everything outside that is a space.
+ *
+ * This exists because the width path and the DRAW path disagreed. fb_adv()
+ * substituted a space for an out-of-range byte while fb_char() masked with
+ * 0x7F and sent the result to the engine -- so the first UTF-8 byte of an
+ * accented or symbol character (0xE2, say) was drawn as 'b' while being
+ * measured as a space. Wrong glyphs AND overlapping spacing, from one title
+ * containing a character the font cannot show. Both now ask this. */
+static uint32_t fb_glyph(char ch)
+{
+    uint32_t c = (unsigned char)ch;
+    return (c < FONT_FIRST || c > FONT_LAST) ? (uint32_t)' ' : c;
+}
+
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
@@ -183,8 +198,7 @@ static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
 static uint32_t fb_adv(char ch, uint32_t sx)
 {
     unsigned char c = (unsigned char)ch;
-    if (c < FONT_FIRST || c > FONT_LAST) c = ' ';
-    return ((uint32_t)font_adv[c - FONT_FIRST] * ts_half[sx]) / 2u;
+    return ((uint32_t)font_adv[fb_glyph(c) - FONT_FIRST] * ts_half[sx]) / 2u;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -280,7 +294,7 @@ static void fb_char(uint32_t x, uint32_t y, char ch, uint32_t sx, uint32_t sy)
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
     REG(R_FB_GO)   = FB_OP_CHAR
-                   | (((uint32_t)(unsigned char)ch & 0x7Fu) << 3)
+                   | ((fb_glyph(ch) & 0x7Fu) << 3)
                    | (sx << 10)
                    | (sy << 12);
 }
@@ -329,6 +343,35 @@ static uint32_t fb_text_width(const char *s, uint32_t sx)
  * The screen edge is enforced here rather than trusted to max_w, because
  * max_w is a budget measured from x and every caller would otherwise have to
  * subtract its own x correctly to stay safe. Returns where the text ended. */
+/* As fb_text_clipped, plus a hard right edge the painted CELL may not cross.
+ *
+ * Needed because the two limits below are genuinely different sizes: max_w
+ * budgets ADVANCES, but fb_char paints a whole cell, so the final glyph can
+ * reach (cell - advance) px past the budget -- 12px at TS_1X and 24px at
+ * TS_2X. On the info card that ran the title through the panel's right border,
+ * and left the marquee painting outside the strip it erases, so the overspill
+ * was never cleaned up and accumulated as it scrolled.
+ *
+ * The card has 8px of padding on the left and had none on the right. Passing
+ * its inner edge here makes it symmetric. */
+static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
+                              uint32_t sx, uint32_t sy, uint32_t max_w,
+                              uint32_t paint_r)
+{
+    uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
+    uint32_t limit = x + max_w;
+    if (paint_r > FB_W) paint_r = FB_W;
+    while (*s) {
+        uint32_t a = fb_adv(*s, sx);
+        if (x + a > limit)   break;        /* out of layout budget */
+        if (x + cell > paint_r) break;     /* would paint past the box */
+        fb_char(x, y, *s, sx, sy);
+        x += a;
+        s++;
+    }
+    return x;
+}
+
 static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
                                 uint32_t sx, uint32_t sy, uint32_t max_w)
 {
@@ -636,6 +679,117 @@ static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
 static uint16_t pl_live_count(void);
 static uint16_t pl_live_ordinal(uint16_t pos);
+/* The loaded playlist's own filename, last component, uppercased. Filled by
+ * pl_name_read() in playlist.inc, which is included below -- declared here
+ * because the splash summary above it draws the name. Empty when APF will not
+ * say what is in the slot. */
+static char pl_name[24];
+static char pl_name_raw[24];      /* same, in the card's own spelling */
+/* Fingerprint of the .m3u TEXT last parsed, so "did the slot actually switch"
+ * can be answered from the bytes rather than from the name APF reports. Zero
+ * when nothing has parsed. */
+static uint32_t pl_sig;
+/* The remembered list is reopened at BOOT only. pl_load() also runs whenever
+ * the user picks a playlist, and restoring there would override the pick. */
+static uint8_t pl_restore_pending = 1u;
+
+/* Gate for a playlist-slot reload, mirroring the one the MP3 slot already has.
+ * 008A means the user PICKED a file, not that the slot is readable yet. */
+/* Belt and braces for a notification that never arrives.
+ *
+ * The user reproduced a pick that produced NOTHING -- no LOADING message, no
+ * load, however long they waited -- on a build where the transport row can no
+ * longer paint over that message. So 008A for slot 3 had not reached firmware
+ * at all, and nothing downstream of it can help: every retry, gate and cache
+ * flush added so far is waiting on an event that is not coming.
+ *
+ * So stop depending on it being delivered. The pick can only happen in the
+ * Analogue menu, and the core is told when that closes -- so ASK the slot what
+ * it holds at exactly that moment. One 0190 per menu close, at a point where
+ * playback is already interrupted, against a notification that is sometimes
+ * simply absent. */
+/* paused is a bitmask: 1 the user, 2 the OS menu, 4 a playlist switch in
+ * progress. The switch bit exists for two reasons, and the second is probably
+ * the bigger one:
+ *
+ *   - it takes the core's 0180 refill traffic off the bus while APF is trying
+ *     to reassign slot 3, which is the collision the user suspects is behind
+ *     the occasional pick that does nothing;
+ *   - the old track used to keep playing throughout the wait, which can run to
+ *     five seconds. Music continuing while the screen says LOADING PLAYLIST
+ *     reads as NOTHING HAPPENING, and that is what makes a user pick again.
+ *     Silence reads as working.
+ *
+ * load_track() ends with paused = 0, so a successful switch clears it; the
+ * completion branch clears it too, for the paths that never get that far. */
+#define PAUSE_LOAD 4u
+static uint8_t  menu_was;         /* the OS menu was open on the last poll      */
+static uint32_t pl_poll_at;       /* next periodic slot-3 identity check         */
+static uint8_t  pl_check_req;     /* menu just closed: ask slot 3 what it holds */
+static uint8_t  pl_skip_gate;     /* 0190 already proved it changed             */
+static uint32_t pl_fb_at;         /* when the fallback last loaded              */
+static char     pl_cur_name[24];  /* the playlist that is actually loaded       */
+static uint16_t pl_notify_n;      /* playlist notifications seen from the RTL */
+static uint16_t pl_load_n;        /* times pl_load() actually ran             */
+static uint32_t pl_reload_seen;   /* OR of every R_RELOAD word observed       */
+/* Last playlist SWITCH, recorded so the failure can be read off the screen
+ * instead of reasoned about. Two blind fixes have already been wrong about
+ * this one; these five fields separate every remaining explanation.
+ *   G  1 the gate saw the name change, 2 it gave up and fired on the cap
+ *   R  0 no retry, 1 retried on an unchanged name, 2 on unchanged CONTENT
+ *   P  1 pl_play_at(0) ran, 0 it was skipped
+ *   F  reload_pending | reload_armed<<1 at the moment P was decided
+ *   T  pl_count after the load
+ * L not advancing with N means the gate never fired at all; L advancing with
+ * P zero means the list loaded and playback simply was not taken, which no
+ * amount of retrying the READ would ever fix. */
+static uint8_t  pl_sw_ge, pl_sw_rt, pl_sw_pp, pl_sw_fl;
+static uint16_t pl_sw_ct;
+/* ...and the last THREE of them, because a success overwrites the failure.
+ * The first capture showed N8 L8 G1 R0 P1 F0 T9 -- a perfectly healthy
+ * switch, which is exactly what the screen shows AFTER the attempt that
+ * finally works. Keeping a history means one photograph taken after a triple
+ * shows all three attempts, and whether the failures failed the same way.
+ * Packed G,R,P,F as hex nibbles, oldest on the left. */
+static uint16_t pl_sw_hist[3];
+/* Times load_track() came back empty. The playlist path looks healthy, so
+ * the next suspect is downstream: the list switches, track 1 is requested,
+ * and the TRACK open is what does not land -- which would leave the old song
+ * playing and read as "the playlist did not switch". */
+static uint16_t pl_sw_tk;
+/* The TRACK loads that follow a switch, three deep. The playlist side has now
+ * read healthy three times running -- gate confirmed, no retry, playback
+ * taken, right list -- so the failure is downstream of it, and X says
+ * load_track() never came back empty. But opening SUCCESSFULLY is not the
+ * same as opening the RIGHT file: a stale MP3 slot would reopen the previous
+ * track, which sounds exactly like the playlist never switching.
+ *   G  1 the gate confirmed a new file id, 2 it fired on the cap
+ *   O  1 load_track() returned a track, 0 it did not
+ *   C  1 the filename CHANGED, 0 the SAME file was reopened
+ * C zero is the whole hypothesis. */
+static uint16_t tk_hist[3];
+static uint32_t tk_prev_name;     /* FNV of track_file before the load */
+static uint8_t  pl_reload_armed;
+static uint32_t pl_reload_at;        /* hard deadline: act regardless */
+static uint32_t pl_probe_at;         /* next slot-changed check */
+static char     pl_leaving[24];      /* the name we are switching AWAY from */
+static uint8_t  pl_retry;            /* one re-arm if the switch did not take */
+
+/* The playlist to reopen at boot, packed four characters per settings word.
+ *
+ * Storing the NAME is unavoidable. APF cannot enumerate a directory, so 0192
+ * can only open something we already hold, and the slot itself remembers
+ * nothing: with a filename declared in data.json APF resets it to that file at
+ * every core load, and without one the slot comes up empty and prompts. Both
+ * were measured. There is no arrangement of data.json that remembers a pick.
+ *
+ * Twelve characters of STEM, with ".m3u" implied rather than stored -- that
+ * covers "Shenanigans", "audiobook" and most real names for three words
+ * instead of four. Truncation is possible and harmless: a name that does not
+ * round-trip simply fails to reopen and the default loads. */
+#define PL_STEM_MAX 12u
+static char pl_saved_stem[PL_STEM_MAX + 1u];
+
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;
 /* Set by settings_load() once APF's stored values have been taken. Nothing may
@@ -828,6 +982,10 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #define UI_PROG_Y   334u
 #define UI_PROG_H   5u
 #define UI_INNER_W  (FB_W - 2u * UI_MARGIN)
+/* Right edge a painted glyph CELL may not cross on the info card. The card
+ * spans UI_MARGIN-8 .. UI_MARGIN-8+UI_INNER_W+16, so this leaves 8px of
+ * padding on the right to match the 8px already on the left. */
+#define UI_CARD_TEXT_R (UI_MARGIN + UI_INNER_W)
 
 #define UI_SHOW_UNDERRUN 0   /* red square, top-right: audio FIFO ran dry */
 #define UI_UNDERRUN_SZ 10u
@@ -852,8 +1010,13 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * All three run off what the decoder already produces -- there are no frequency
  * bins here, so none of these is a spectrum: BARS and WATER show loudness over
  * TIME, LEVELS shows the two channels right now. */
+/* APPEND ONLY -- never reorder, never insert.
+ *
+ * viz_mode is persisted as an INDEX, so moving an entry silently repoints
+ * every user's saved meter at a different one. Same rule as the interact.json
+ * ids. New modes go immediately before VIZ_COUNT. */
 enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
-       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_COUNT };
+       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_EYE, VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
  * the vertical -- the standard goniometer orientation, and the reason it reads
@@ -902,6 +1065,155 @@ static uint32_t vu_l, vu_r;       /* Q8 deflection, 0..255               */
 static uint8_t  vu_face;          /* the static face is on screen        */
 static uint16_t vu_face_w;        /* ...and the width it was drawn for   */
 static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
+
+/* ---- Magic eye (EM84 indicator tube) ----------------------------------
+ *
+ * The BAR type: two glass tubes side by side, each with a vertical
+ * fluorescent strip whose LENGTH follows its channel.
+ *
+ * The first attempt was a rounded rect with a solid bar in it and read as
+ * generic, correctly -- that describes a bar meter, and this screen has
+ * two of those already. What makes a tube look like a tube is not its
+ * outline, it is the GLASS and the BLOOM:
+ *
+ *   - the envelope is shaded PER COLUMN, bright near the left and falling
+ *     off both ways, so it reads as a cylinder rather than a slab;
+ *   - the top is DOMED, by a per-column offset off the same circle search
+ *     fb_round_rect uses, with a pip above it;
+ *   - a getter flash sits inside the crown, the silvery patch every real
+ *     tube carries;
+ *   - the phosphor has a bright core, two halo layers either side, and a
+ *     bloom that spills ABOVE the tip -- a hard-edged bar is the single
+ *     biggest reason a glow reads as a rectangle;
+ *   - the glow reflects in the base plate, the way the photographed pair
+ *     reflects in its acrylic.
+ *
+ * Nearly all of that is in the CACHED pass, so the per-frame cost is the
+ * strip and its reflection -- about eleven rects a channel.
+ *
+ * CYAN-GREEN, not the accent. Everything else here is a tone of ui_accent
+ * on purpose (see the VU face); this breaks it knowingly, because the glow
+ * IS the instrument. The base plate is accent-tinted instead -- a chassis
+ * can follow the theme where the phosphor cannot. */
+#define EYE_GLASS_D 0x18E4u       /* envelope, in shadow                   */
+#define EYE_GLASS_L 0x530Du       /* envelope, on the specular streak      */
+#define EYE_GETTER  0x6BD0u       /* getter flash inside the crown         */
+#define EYE_SOCKET  0x1082u       /* base of the envelope, in the socket   */
+/* The scale ticks and the plinth are the ONLY parts of this meter that follow
+ * the accent, and they have to, for the reason written on the VU face: with a
+ * fixed palette throughout, cycling the colour moved nothing and the meter
+ * looked broken. The phosphor cannot take the accent -- the glow is the
+ * instrument -- so the etched scale carries it instead. */
+#define EYE_DARK    0x0082u       /* strip window, unexcited               */
+#define EYE_H2      0x0A89u       /* outer halo                            */
+#define EYE_H1      0x1DC3u       /* inner halo                            */
+#define EYE_LIT     0x57FCu       /* the phosphor itself                   */
+#define EYE_TUBE_W  38u
+#define EYE_TUBE_G  10u           /* gap between the pair                  */
+#define EYE_BAR_W    6u           /* the strip core; halos add 4 each side */
+#define EYE_DOME     9u           /* rows the crown curves through         */
+/* Sized to the last pixel of the meter box: pip on row 0, plinth ending on
+ * row 71 of 72. Growing either dimension again means taking it from the
+ * plinth or the dome, not from spare space -- there is none. */
+#define EYE_TUBE_H  62u
+/* The plinth. Overlaps the tube's last row on purpose -- those rows are socket
+ * shadow, so the glass reads as seated IN the base rather than balanced on it,
+ * which is how the photographed pair sits. Wider than the tubes now that the
+ * glow stops above it. */
+#define EYE_BASE_H   8u
+#define EYE_BASE_PAD 8u           /* overhang each side                     */
+static uint32_t eye_l, eye_r;     /* Q8 deflection, 0..255                 */
+static uint8_t  eye_face;         /* envelopes and dark strips are drawn   */
+static uint16_t eye_face_w;       /* ...and the width they were drawn for  */
+static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
+
+/* Light thrown onto the panel beside each tube. The pair occupies 78 px of a
+ * box nearly four times that, and spill is what a bright tube in a dark case
+ * does with the space.
+ *
+ * Anchored to the MIDDLE of the tube, not to the tip of its strip. Tracking
+ * the tip was the first attempt and looked wrong for a reason worth keeping:
+ * the strip grows upward from the bottom, so at low level the tip -- and with
+ * it the whole pool of light -- sat down at the tube's base, as though the
+ * glow came from the socket. A tube lights the room from where the tube is.
+ *
+ * Elliptical falloff, so it reads as a pool rather than a wedge, and it
+ * reaches further out than the cone did.
+ *
+ * Driven by a SEPARATE, heavily smoothed level rather than by the strip.
+ * Light in a room does not snap, and this is a wash behind an instrument that
+ * is already showing the fast movement -- the smoothing is what makes it
+ * atmosphere instead of a second meter. It also pays for itself: quantised to
+ * a few steps, most frames leave it alone entirely.
+ *
+ * Self-erasing: bands past the current reach are painted with the background
+ * itself, so there is no separate erase pass. Quantised into 4-row strips to
+ * keep the rect count down; the ramp moves well under one level across four
+ * rows, so stepping it there is not visible where a flat fill was. */
+#define EYE_GLOW_RX    72u        /* how far the light reaches outward    */
+#define EYE_GLOW_RY    20u        /* ...and half how tall the pool is     */
+#define EYE_GLOW_NB     9u        /* bands across that reach -- 8px each  */
+#define EYE_GLOW_S      4u        /* rows per quantised strip             */
+#define EYE_GLOW_STEPS  6u        /* intensity steps                      */
+#define EYE_GLOW_PEAK  26u        /* strongest mix, out of 64             */
+#define EYE_GLOW_POS    8u        /* vertical positions across the travel */
+/* The band the pool is repainted over, FIXED, covering every position it can
+ * take. It has to be: the pool moves, and a redraw that only covered its own
+ * span left up to 54 rows of the previous position on screen -- seen as a
+ * faint line above the light. Self-erasing only works if the repainted area
+ * does not move, so the area is the union and the rest is painted bed. */
+#define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
+/* Spans the whole box. Shortening it to clear the plinth was tried and looked
+ * worse: the pools reach 72px past each tube while the base is 102px wide, so
+ * the light was chopped flat in mid-air either side of it rather than stopping
+ * at anything. On the base's OWN rows the pools skip its 8px of overhang
+ * instead, which is the only part they would otherwise paint over. */
+#define EYE_GLOW_ROWS  56u        /* rows 16..71                            */
+/* The GAP between the tubes is lit by BOTH of them, and leaving it dark was
+ * the one place the illusion broke: two lamps 10px apart cannot leave the
+ * space between them the darkest thing on the panel.
+ *
+ * It is a separate pass because it depends on both channels at once, where
+ * everything else here is per tube. Cheap -- one rect per row-strip, because
+ * across 10px the two falloffs very nearly cancel and the sum is flat, so a
+ * gradient across it would be invisible.
+ *
+ * It stops ABOVE the plinth. The gap sits over the middle of the base plate,
+ * and painting the bed there would chew a notch out of it -- the same fault
+ * the overhanging plinth had at its ends. */
+#define EYE_GAP_ROWS   48u        /* rows of the gap that are lit          */
+/* POSITION and BRIGHTNESS come from different places, and that split is the
+ * point.
+ *
+ * The pool sits on the MIDDLE OF THE LIT STRIP, taken from the same fast
+ * value the strip itself is drawn from, so the two cannot drift apart --
+ * driving the position from the slow follower is what made the light lag
+ * visibly behind the bars. As the strip grows upward its midpoint rises, so
+ * the light rises with it; at rest it sits low, where the lit part actually
+ * is. That is also the earlier "it comes from the socket" complaint answered
+ * properly: the light was following the TIP, which is the one part of the
+ * strip that is nowhere near the middle of the glow.
+ *
+ * Brightness keeps the slow follower. Light in a room does not snap, and this
+ * is a wash behind an instrument already showing the fast movement.
+ *
+ * Both are quantised -- eight positions, six intensities -- so a redraw costs
+ * only when one of them actually steps. */
+static uint32_t eye_gl_l, eye_gl_r;        /* slow-smoothed level         */
+static uint8_t  eye_cast_l = 0xFFu, eye_cast_r = 0xFFu;   /* step drawn   */
+static uint8_t  eye_gap_l  = 0xFFu, eye_gap_r  = 0xFFu;   /* ...for the gap */
+
+/* Half-width of the glow ellipse at a given distance from its centre row.
+ * Three callers now -- both pools and the gap -- so it stops being copied. */
+static uint32_t eye_glow_rx(uint32_t dy)
+{
+    if (dy >= EYE_GLOW_RY) return 0;
+    uint32_t q = 0;
+    while ((q + 1u) * (q + 1u) + dy * dy
+           <= EYE_GLOW_RY * EYE_GLOW_RY) q++;
+    return (EYE_GLOW_RX * q) / EYE_GLOW_RY;
+}
+
 
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
@@ -995,8 +1307,13 @@ static uint16_t ui_grad_top_c = UI_GRAD_TOP;
  * competes with the type. Then pulled halfway to neutral, because a full
  * saturation cast is what made an earlier coloured ramp read as murky behind
  * the card -- this should say "tinted", not "coloured". */
+/* Set where ui_grad_set() can reach it; the stash itself is built further
+ * down, once UI_WAVE_* are in scope. */
+static uint8_t ui_bg_ready;
+
 static void ui_grad_set(uint16_t accent)
 {
+    ui_bg_ready = 0;            /* the stashed background is now stale */
     uint32_t r = ((accent >> 11) & 0x1Fu) * 255u / 31u;
     uint32_t g = ((accent >> 5)  & 0x3Fu) * 255u / 63u;
     uint32_t b = (accent & 0x1Fu) * 255u / 31u;
@@ -1091,6 +1408,41 @@ static uint32_t ui_wave_w(void)
     return art_shown ? (ART_X - UI_MARGIN - 4u) : UI_INNER_W;
 }
 
+/* A copy of the meter box's BACKGROUND, parked in the columns the scanout
+ * never reads: the framebuffer's stride is 512 and only 400 is displayed, so
+ * x 400..511 exists on every row and is invisible.
+ *
+ * Every meter erases part of the box before redrawing its content, and they
+ * all did it with `bed` -- the gradient sampled once at the box's top row.
+ * That is a flat slab on a ramp that falls to 62% of that value by the bottom
+ * of the box, which is what showed behind the magic eye and the VU needles.
+ *
+ * Per-row erases would be correct and unaffordable: the mirrored bars and the
+ * peak dots erase a full-height column PER BAR, 36 times a frame, so 72 rows
+ * each is 2592 commands. Copying from a prepared strip is ONE command per
+ * erase -- exactly what they cost today.
+ *
+ * Built lazily and dropped whenever the gradient changes. */
+#define UI_BG_X  FB_W                  /* first off-screen column */
+#define UI_BG_W  (FB_STRIDE - FB_W)    /* 112 px of invisible stride */
+
+static void ui_bg_restore(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    if (!w || !h) return;
+    if (!ui_bg_ready) {
+        for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+            fb_rect(UI_BG_X, yy, UI_BG_W, 1, ui_grad_at(yy));
+        ui_bg_ready = 1;
+    }
+    /* Source and destination share rows, so the ramp lines up by
+     * construction and the copy is purely horizontal. */
+    while (w) {
+        uint32_t n = (w < UI_BG_W) ? w : UI_BG_W;
+        fb_copy(UI_BG_X, y, x, y, n, h);
+        x += n; w -= n;
+    }
+}
+
 /* Repaint the strip the art travels through, so a slide leaves the background
  * behind it rather than a smear. Only the bands crossing the panel's rows. */
 static void ui_art_bg_range(uint32_t x, uint32_t w)
@@ -1099,6 +1451,20 @@ static void ui_art_bg_range(uint32_t x, uint32_t w)
     if (x + w > FB_W) w = FB_W - x;
     for (uint32_t y = ART_Y; y < ART_Y + ART_H && y < FB_H; y++)
         fb_rect(x, y, w, 1, ui_grad_at(y));
+}
+
+/* Every meter that CACHES part of itself on screen has to be listed here, and
+ * anything that erases the meter band must call this.
+ *
+ * Twice now a cached face has been wiped and never come back while the moving
+ * part carried on repainting itself: the VU's arc when the album art slid over
+ * it, and the magic eye's envelope on a track change. Both were one missing
+ * assignment at a site that already cleared the OTHER meter. A list of one
+ * invites that; a list with a name is at least the place to look. */
+static void ui_meter_faces_invalidate(void)
+{
+    vu_face  = 0;
+    eye_face = 0;
 }
 
 /* Blit the stash to the current position, clipped at the right edge. The panel
@@ -1111,7 +1477,7 @@ static void ui_art_draw(void)
      * over a cached VU face -- which is how hiding the art left the right
      * meter's arc erased for good: the width changed once, the face was
      * redrawn once, and then the slide wiped it again. */
-    vu_face = 0;
+    ui_meter_faces_invalidate();
 
     if (!art_ready || art_x >= FB_W) return;
     uint32_t w = FB_W - art_x;
@@ -1147,6 +1513,7 @@ static void ui_toast_set(const char *msg, uint32_t n, const char *suffix)
 
 /* Plain text, no trailing number. */
 static void ui_toast_msg(const char *msg) { ui_toast_set(msg, 0xFFFFFFFFu, 0); }
+
 
 /* Bytes per second of AUDIO, which is what both the duration and the seek
  * distance depend on.
@@ -1297,7 +1664,7 @@ static void ui_wave_clear(void)
      * ticks and labels are wiped and never come back, while the needle
      * carries on repainting itself. Hiding the album art did exactly
      * that. */
-    vu_face = 0;
+    ui_meter_faces_invalidate();
 
     for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
@@ -1423,10 +1790,14 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
     if (++m->pos > len) m->pos = 0;
     if (m->pos == 0) m->next = cycles() + CLK_HZ;   /* pause at the start */
 
-    fb_rect(UI_MARGIN, m->y, ui_text_w, FB_CELL(m->scale), UI_PANEL);
+    /* Erase the full paintable width, not just the layout budget: a glyph
+     * cell reaches past the budget, and anything painted outside the erased
+     * strip is never cleaned up -- it accumulated as the text scrolled. */
+    fb_rect(UI_MARGIN, m->y, UI_CARD_TEXT_R - UI_MARGIN,
+            FB_CELL(m->scale), UI_PANEL);
     fb_set_color(fg, UI_PANEL);
-    fb_text_clipped(UI_MARGIN, m->y, m->text + m->pos,
-                    m->scale, m->scale, ui_text_w);
+    fb_text_boxed(UI_MARGIN, m->y, m->text + m->pos,
+                  m->scale, m->scale, ui_text_w, UI_CARD_TEXT_R);
 }
 
 static void ui_draw_chrome(void)
@@ -1437,28 +1808,42 @@ static void ui_draw_chrome(void)
     if (screen_blank) return;
     ui_gradient();
 
-    /* When there's no usable title, say WHICH failure it was and show the
-     * first bytes of the file -- see head_bytes' comment. */
-    char fallback[24];
+    /* When there's no usable title, show the FILENAME.
+     *
+     * It is almost always the song name, so an untagged file reads as itself.
+     * What used to be here was a DIAGNOSTIC -- "NOTAG FFFB9064 R04", the head
+     * bytes and the reload status. It told three failure modes apart during
+     * the reload hunt and earned its place then, but a user is not debugging
+     * this core: a file that plays perfectly well was announcing itself as a
+     * hex dump. Nothing internal goes on this screen any more.
+     *
+     * That also retires the UNICODE TAG case, which was the same mistake in
+     * words -- a tag encoding the parser declines to handle is our limitation
+     * to state in the README, not a caption for someone's music. The filename
+     * is the better answer there too, and those files always have one. */
+    char namebuf[48];
     const char *title = track_title;
     if (!track_title[0]) {
-        if (title_status == ID3_UNSUPPORTED_ENCODING) {
-            title = "UNICODE TAG";
-        } else {
-            char *p = fallback;
-            /* NORD == the sentinel survived, i.e. the read delivered nothing;
-             * NOTAG/NOTIT == real bytes arrived but weren't a tag. */
-            int nothing_landed = (head_bytes[0] == 0xA5u && head_bytes[1] == 0xA5u &&
-                                  head_bytes[2] == 0xA5u && head_bytes[3] == 0xA5u);
-            const char *tag = nothing_landed ? "NORD "
-                            : (title_status == ID3_NO_TAG) ? "NOTAG " : "NOTIT ";
-            while (*tag) *p++ = *tag++;
-            for (int i = 0; i < 4; i++) p = ui_hex2(p, head_bytes[i]);
-            *p++ = ' '; *p++ = 'R';
-            p = ui_hex2(p, (uint8_t)reload_status);
-            *p = 0;
-            title = fallback;
+        /* Last path component, extension dropped: the slot holds a full path
+         * ("/Assets/mp3player/common/Flodown.mp3"). */
+        uint32_t start = 0;
+        for (uint32_t i = 0; track_file[i]; i++)
+            if (track_file[i] == '/' || track_file[i] == 0x5Cu) start = i + 1u;
+
+        uint32_t n = 0, dot = 0;
+        for (uint32_t i = start; track_file[i] && n < sizeof(namebuf) - 1u; i++) {
+            if (track_file[i] == '.') dot = n;      /* LAST dot, not the first */
+            namebuf[n++] = track_file[i];
         }
+        /* Only trim at a dot that actually looks like an extension -- a name
+         * such as "Blur - 13.mp3" must not lose its number, and a leading dot
+         * is not an extension at all. */
+        if (dot && n - dot <= 5u) n = dot;
+        namebuf[n] = 0;
+
+        /* No tag and no name means APF told us nothing about the slot. Rare,
+         * and still not the user's problem to diagnose. */
+        title = n ? namebuf : "UNKNOWN TRACK";
     }
 
     /* Fixed, deliberately. Reflowing the text when the panel slides made the
@@ -1505,7 +1890,8 @@ static void ui_draw_chrome(void)
     uint32_t ts = TS_2X;
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts, ui_text_w);
+    fb_text_boxed(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts,
+                  ui_text_w, UI_CARD_TEXT_R);
 
     /* Artist one step down from the title, never below 1.5x -- that step only
      * exists because the engine can scale fractionally now. */
@@ -1515,7 +1901,8 @@ static void ui_draw_chrome(void)
     if (track_artist[0]) {
         fb_set_color(UI_DIM, UI_PANEL);
         ui_marq_init(&ui_mq_artist, track_artist, y, as);
-        fb_text_clipped(UI_MARGIN, y, ui_mq_artist.text, as, as, ui_text_w);
+        fb_text_boxed(UI_MARGIN, y, ui_mq_artist.text, as, as,
+                      ui_text_w, UI_CARD_TEXT_R);
         y += FB_CELL(as) + 3u;
     }
 
@@ -1539,7 +1926,8 @@ static void ui_draw_chrome(void)
         while (*yr && q < b + sizeof(b) - 1) *q++ = *yr++;
         *q = 0;
         fb_set_color(UI_DIM, UI_PANEL);
-        fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, ui_text_w);
+        fb_text_boxed(UI_MARGIN, y, b, TS_1X, TS_1X,
+                      ui_text_w, UI_CARD_TEXT_R);
         y += FB_CELL(TS_1X) + 2u;
     }
 
@@ -1566,6 +1954,16 @@ static void ui_draw_chrome(void)
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
     ui_last_spd   = 0xFFFFFFFFu;   /* or the diag row dies on the first reload */
+    /* THIRD entry to be forgotten from this list, after ui_last_stall and the
+     * mode row. A toast is drawn only when its fade step CHANGES, so once
+     * chrome has painted over one, ui_toast_step still says "already drawn"
+     * and it never comes back.
+     *
+     * Every toast set around a track change was being erased: the LOADING
+     * PLAYLIST and LOADING TRACK indicators, and pl_report()'s "N TRACKS"
+     * summary too -- which is why picking from the menu showed nothing at all
+     * while the same toasts work fine from a button press. */
+    ui_toast_step = 0xFFFFFFFFu;
     ui_last_prog  = 0xFFFFFFFFu;
     /* The mode row -- repeat, shuffle, the EQ name, N-of-M. Missing from this
      * list until now, and the second entry to be forgotten from it after
@@ -1630,20 +2028,41 @@ static void poll_input(void);
  * they cannot drift -- they are the same screen, and previously each drew the
  * title itself. `f/den` is the title's fade position; the card and version do
  * not fade, because animating the frame draws the eye to the furniture. */
-static void ui_splash_card(uint32_t f, uint32_t den)
+/* The parts of the splash card that never change: the panel itself and the
+ * version. Split out because the fade redraws the TITLE 33 times, and this
+ * used to be redrawn with it.
+ *
+ * That was the rest of the boot flicker. Capping the fade at 33 steps stopped
+ * the title flashing thousands of times a second, but each of those 33 still
+ * refilled the whole card first -- wiping the title AND the version and
+ * writing them back, 33 times, with scanout free to catch either gap. The
+ * version never changes at all, so it was pure churn.
+ *
+ * Glyph cells paint their own background, so the title can be redrawn in
+ * place over itself without the panel underneath being cleared first. */
+static void ui_splash_bg(void)
 {
     /* Identical geometry to ui_draw_chrome()'s card, at full width since the
      * splash has no art panel to make room for. */
     fb_round_rect(UI_MARGIN - 8u, UI_TITLE_Y - 14u,
                   UI_INNER_W + 16u, UI_CARD_H, 8u, UI_PANEL);
 
-    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
-    fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
-
     fb_set_color(UI_DIM, UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_SPL_VER_Y, "v" APP_VER, TS_1X, TS_1X,
                     UI_INNER_W);
+}
+
+static void ui_splash_title(uint32_t f, uint32_t den)
+{
+    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
+    fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
+}
+
+static void ui_splash_card(uint32_t f, uint32_t den)
+{
+    ui_splash_bg();
+    ui_splash_title(f, den);
 }
 
 static void ui_splash(void)
@@ -1806,11 +2225,12 @@ static void ui_splash_anim(void)
      * is what made it flash: each repaint erases its own cell before writing
      * the glyph, and scanout catches the gap. */
     uint32_t last_f = 0xFFFFFFFFu;
+    ui_splash_bg();                  /* ONCE -- see ui_splash_bg() */
     for (;;) {
         uint32_t el = cycles() - t0;
         if (el >= CLK_HZ / 1000u * INTRO_MS) break;
         uint32_t f = (el < fade_end) ? (el * STEP_DEN / fade_end) : STEP_DEN;
-        if (f != last_f) { last_f = f; ui_splash_card(f, STEP_DEN); }
+        if (f != last_f) { last_f = f; ui_splash_title(f, STEP_DEN); }
         ui_wave_anim_tick();
     }
 
@@ -1885,6 +2305,24 @@ static void ui_boot_note(const char *msg)
     ui_boot_msg  = msg;
     ui_boot_t    = 0;
     ui_boot_next = 0;                       /* first tick paints immediately */
+    /* WIPE FIRST. On the splash this row is empty so it never mattered, but in
+     * the player it is the transport row -- PLAYING, the repeat and shuffle
+     * arrows, the EQ name -- and writing over it left the old glyphs showing
+     * around the shorter new text. */
+    fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
+
+    /* Retire any live toast. This row and the toast band are both "what is
+     * happening", and they must not disagree.
+     *
+     * Concretely: ui_draw_chrome() invalidates ui_toast_step so a toast
+     * survives a repaint, which also means the PREVIOUS load's toast gets
+     * redrawn for a frame as the next load completes -- seen as a quick flash
+     * of stale text on the toast line. Killing it here means the newer message
+     * is the only one making a claim. */
+    ui_toast_t0   = 0;
+    ui_toast_step = 0;
+    fb_rect(UI_MARGIN, UI_TOAST_Y, UI_INNER_W, UI_TOAST_H, ui_grad_at(UI_TOAST_Y));
+
     fb_set_color(UI_WHITE, ui_boot_bg());
     /* Left-aligned at UI_MARGIN, like every other row on this screen and on
      * the player it is imitating. An earlier version centred the label and its
@@ -1962,15 +2400,20 @@ static void ui_splash_summary(uint32_t n)
     b[i] = 0;
 
     uint16_t bg = ui_grad_at(UI_SPL_INFO_Y);
+    uint32_t w  = fb_text_width(b, TS_1X);   /* hoisted: the label clips to it */
     fb_set_color(UI_DIM, bg);
     /* A clipped list has to say so here too. The count alone is the one thing
      * that cannot reveal it -- a playlist cut to 128 looks exactly like a
      * playlist of 128. */
-    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y,
-                    pl_truncated ? "PLAYLIST CLIPPED" : "PLAYLIST",
-                    TS_1X, TS_1X, UI_INNER_W);
+    /* Name the playlist rather than saying "PLAYLIST", so a user running more
+     * than one can see which is loaded. Falls back to the generic word when
+     * APF will not say. */
+    const char *lbl = pl_truncated ? "PLAYLIST CLIPPED"
+                    : pl_name[0]   ? pl_name
+                    :                "PLAYLIST";
+    fb_text_clipped(UI_MARGIN, UI_SPL_INFO_Y, lbl,
+                    TS_1X, TS_1X, UI_INNER_W - w - 12u);
     fb_set_color(ui_accent, bg);
-    uint32_t w = fb_text_width(b, TS_1X);
     fb_text_clipped(FB_W - UI_MARGIN - w, UI_SPL_INFO_Y, b, TS_1X, TS_1X, w);
 }
 
@@ -2140,14 +2583,13 @@ static void ui_load_failed(void)
     fb_set_color(UI_RED, UI_BG);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_2X, TS_2X, UI_INNER_W);
 
-    char b[24], *p = b;
-    const char *t = "HEAD ";
-    while (*t) *p++ = *t++;
-    for (int i = 0; i < 4; i++) p = ui_hex2(p, head_bytes[i]);
-    *p = 0;
+    /* This line used to print the file's first four bytes as hex. That is a
+     * debugging aid, and it was on the ONE screen a user is most likely to see
+     * when something has gone wrong -- the moment they least need a hex dump.
+     * Say what happened in words instead. */
     fb_set_color(UI_DIM, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u, b,
-                    TS_1X, TS_1X, UI_INNER_W);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u,
+                    "THE FILE COULD NOT BE READ", TS_1X, TS_1X, UI_INNER_W);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
                     "USE CORE MENU TO PICK", TS_1X, TS_1X, UI_INNER_W);
 
@@ -2212,7 +2654,12 @@ static void ui_draw_dynamic(void)
      * meter that freezes mid-deflection looks broken, and the fall to zero is
      * the most characterful thing an analogue movement does. Every other mode
      * is genuinely static when paused and stays frozen. */
-    uint32_t vu_settling = (viz_mode == VIZ_VU) && (vu_l || vu_r);
+    /* The eye settles for the same reason the needles do: its shadow OPENING
+     * back to rest is the movement that makes it look like a tube rather than
+     * a graphic, and freezing it half-shut looks broken. eye_v counts DOWN to
+     * rest, so "not yet settled" is a non-zero deflection, same as the VU. */
+    uint32_t vu_settling = ((viz_mode == VIZ_VU)  && (vu_l || vu_r)) ||
+                           ((viz_mode == VIZ_EYE) && (eye_l || eye_r));
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
 
@@ -2262,7 +2709,7 @@ static void ui_draw_dynamic(void)
                 if (a > half) a = half;
 
                 uint32_t cx = x0 + w - 1u;
-                fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H, bed);      /* clear column */
+                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H);     /* clear column */
                 if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u,
                                ui_mix(UI_TRACK, ui_accent, a, half));
                 else   fb_rect(cx, cy, 1, 1, UI_TRACK);         /* silence line */
@@ -2284,7 +2731,7 @@ static void ui_draw_dynamic(void)
                 if (!h) h = 1u;
                 uint16_t lc  = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
                 uint16_t c   = ui_mix(UI_TRACK, lc, i + 1u, UI_WAVE_N);
-                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H, bed);
+                ui_bg_restore(x, UI_WAVE_Y, lit, UI_WAVE_H);
                 fb_rect(x, cy - h, lit, h * 2u + 1u, c);
             }
             goto viz_done;
@@ -2302,7 +2749,7 @@ static void ui_draw_dynamic(void)
                 uint32_t pk  = wave_pk[i];
                 if (pk < 2u) pk = 2u;
                 uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H, bed);
+                ui_bg_restore(x, UI_WAVE_Y, lit, UI_WAVE_H);
                 fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 2u, c);
             }
             goto viz_done;
@@ -2319,7 +2766,7 @@ static void ui_draw_dynamic(void)
                 /* Column drawn as three bands -- quiet bed, body, hot tip --
                  * so loud passages read as brighter AND taller. */
                 uint32_t cx = x0 + w - 1u;
-                fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H - a, bed);
+                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H - a);
                 if (a) {
                     uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_H);
                     fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, a, c);
@@ -2345,7 +2792,13 @@ static void ui_draw_dynamic(void)
              * stale even if nothing erased it. */
             if (wf || ww != vu_face_w) vu_face = 0;
 
-            if (!vu_face) fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            /* Per ROW. Same fault the magic eye exposed: the box was filled
+             * with `bed`, the gradient sampled once at its top row, which is a
+             * flat slab on a ramp that falls to 62% of that value by the
+             * bottom. The needles leave most of the box empty, so it shows. */
+            if (!vu_face)
+                for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+                    fb_rect(UI_MARGIN, yy, ww, 1, ui_grad_at(yy));
 
             for (int ch = 0; ch < 2; ch++) {
                 uint32_t half = ww / 2u;
@@ -2385,7 +2838,8 @@ static void ui_draw_dynamic(void)
                          * "the loud end" in any palette. */
                         fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
                                 (t >= 60u) ? ui_accent
-                                           : ui_mix(bed, ui_accent, 2u, 5u));
+                                           : ui_mix(ui_grad_at((uint32_t)ay),
+                                                    ui_accent, 2u, 5u));
                     }
                     for (uint32_t t = 0; t <= 4u; t++) {
                         uint32_t i = t * 4u;
@@ -2396,10 +2850,11 @@ static void ui_draw_dynamic(void)
                             if (ay < (int32_t)UI_WAVE_Y) continue;
                             fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
                                     (t >= 3u) ? ui_accent
-                                              : ui_mix(bed, ui_accent, 3u, 5u));
+                                              : ui_mix(ui_grad_at((uint32_t)ay),
+                                                       ui_accent, 3u, 5u));
                         }
                     }
-                    fb_set_color(ui_accent, bed);
+                    fb_set_color(ui_accent, ui_grad_at(UI_WAVE_Y + 2u));
                     fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
                                     TS_1X, TS_1X, 16u);
                 }
@@ -2418,7 +2873,12 @@ static void ui_draw_dynamic(void)
                     /* One colour throughout its travel. Flashing at the top drew the eye
                      * to the loudest moments, which is the opposite of what a
                      * meter is for -- the scale already marks the peak zone. */
-                    uint16_t col = pass ? ui_accent : bed;
+                    /* The erase pass repaints the needle's own footprint in
+                     * the BACKGROUND colour, so with a ramp behind it that
+                     * colour has to be sampled per segment -- a flat `bed`
+                     * would leave a lighter trail down the lower half of the
+                     * sweep, exactly where the needle spends most of its
+                     * time. */
                     for (uint32_t k = 2; k <= VU_STEPS; k++) {
                         int32_t rr = ((int32_t)nlen * (int32_t)k) / (int32_t)VU_STEPS;
                         int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
@@ -2426,16 +2886,332 @@ static void ui_draw_dynamic(void)
                         if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
                         if (ny < (int32_t)UI_WAVE_Y) continue;
                         uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;
-                        fb_rect((uint32_t)nx, (uint32_t)ny, th, th, col);
+                        fb_rect((uint32_t)nx, (uint32_t)ny, th, th,
+                                pass ? ui_accent
+                                     : ui_grad_at((uint32_t)ny));
                     }
                 }
                 fb_rect(pivx - 2u, pivy - 2u, 5, 5, ui_accent);
-                fb_rect(pivx - 1u, pivy - 1u, 3, 3, bed);
+                for (uint32_t r = 0; r < 3u; r++)
+                    fb_rect(pivx - 1u, pivy - 1u + r, 3, 1,
+                            ui_grad_at(pivy - 1u + r));
 
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
             }
             vu_face = 1;
             vu_face_w = (uint16_t)ww;
+            goto viz_done;
+        }
+
+        /* ---- MAGIC EYE (EM84) ---------------------------------------------
+         * Two tubes, one per channel. See the EYE_* block for why the glass
+         * is shaded per column and why the glow blooms. */
+        if (viz_mode == VIZ_EYE) {
+            if (wf || ww != eye_face_w) eye_face = 0;
+
+            uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
+            uint32_t ty   = UI_WAVE_Y + 3u;
+            uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
+            uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
+            /* Grew with the envelope, so the taller tube is also a longer
+              * throw for the strip rather than just more glass. */
+             uint32_t bh   = 38u;                     /* ...and its height   */
+            uint32_t basy = ty + EYE_TUBE_H - 1u;    /* plinth              */
+            uint16_t basc = ui_mix(ui_grad_at(ty + EYE_TUBE_H - 1u),
+                                   ui_accent, 1u, 3u);
+
+            if (!eye_face) {
+                /* Per ROW, not one flat fill.
+                 *
+                 * Every other meter fills this box with `bed` -- the gradient
+                 * sampled once at the box's top row -- and gets away with it
+                 * because its content covers the box. This meter is the first
+                 * with large EMPTY areas, so it is the first to show that a
+                 * flat slab on a per-row gradient is a visible rectangle: the
+                 * ramp falls from 16.1/31 at the top of the box to 9.9/31 at
+                 * the bottom, and the slab holds the top value throughout.
+                 *
+                 * Painting the real ramp means the meter has no background of
+                 * its own -- it sits on the screen's, and the glow fans into
+                 * it with nothing to fan against. */
+                for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H; y++)
+                    fb_rect(UI_MARGIN, y, ww, 1, ui_grad_at(y));
+
+                for (uint32_t ch = 0; ch < 2u; ch++) {
+                    uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
+                    uint32_t hw = EYE_TUBE_W / 2u;
+
+                    /* One vertical rect per column: the shade makes it a
+                     * cylinder, and the crown's curve is a per-column top
+                     * offset, so both come out of the same pass. */
+                    for (uint32_t i = 0; i < EYE_TUBE_W; i++) {
+                        uint32_t dx = (i < hw) ? (hw - i) : (i - hw);
+                        uint32_t yc = 0;             /* circle, as elsewhere */
+                        while ((yc + 1u) * (yc + 1u) + dx * dx <= hw * hw) yc++;
+                        uint32_t off = EYE_DOME - (EYE_DOME * yc) / hw;
+
+                        /* Specular streak left of centre, falling off faster
+                         * to the right -- lit from the upper left, like the
+                         * rest of the screen's shading. */
+                        uint32_t dl = (i < 9u) ? (9u - i) * 2u
+                                               : ((i - 9u) * 5u) / 4u;
+                        uint32_t lv = (dl < 28u) ? (31u - dl) : 3u;
+                        fb_rect(tx + i, ty + off, 1, EYE_TUBE_H - off,
+                                ui_mix(EYE_GLASS_D, EYE_GLASS_L, lv, 31u));
+                    }
+
+                    /* Pip on the crown, and the getter flash under it. */
+                    fb_rect(tx + hw - 2u, ty - 3u, 4, 4, EYE_GLASS_D);
+                    fb_rect(tx + 6u, ty + EYE_DOME + 1u,
+                            EYE_TUBE_W - 12u, 3, EYE_GETTER);
+                    /* Socket end: the glass goes into a base, so the bottom
+                     * rows are shadow rather than more cylinder. */
+                    fb_rect(tx + 1u, ty + EYE_TUBE_H - 6u,
+                            EYE_TUBE_W - 2u, 6, EYE_SOCKET);
+
+                    uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
+                    fb_rect(bx - 4u, by, EYE_BAR_W + 8u, bh, EYE_DARK);
+
+                    /* Scale ticks etched beside the strip, as on the real
+                     * tube's faceplate, in the accent. Mixed toward the glass
+                     * rather than laid on pure, so they read as printed ON it
+                     * instead of floating above it -- and the TOP tick goes on
+                     * full, marking the loud end the way the VU's face marks
+                     * its peak zone. */
+                    for (uint32_t t = 1; t < 4u; t++)
+                        fb_rect(bx + EYE_BAR_W + 5u, by + (bh * t) / 4u,
+                                2, 1,
+                                (t == 1u) ? ui_accent
+                                          : ui_mix(EYE_GLASS_L, ui_accent,
+                                                   3u, 4u));
+                }
+
+                /* Exactly the width of the pair, not wider. Overhanging it
+                  * put 8px of plinth under each pool, and the pool repaints
+                  * that span with the bed -- which chewed the ends off the
+                  * base plate and read as a gap in the light. It cannot gain
+                  * substance by growing sideways, so it gains it by being
+                  * shaded: a lit top edge and a shadowed underside turn a flat
+                  * bar into a slab with thickness. Six rows, which is every
+                  * one left between the socket and the bottom of the box. */
+                fb_round_rect(x0 - EYE_BASE_PAD, basy,
+                              pair + 2u * EYE_BASE_PAD, EYE_BASE_H, 2u, basc);
+                fb_rect(x0 - EYE_BASE_PAD + 2u, basy,
+                        pair + 2u * EYE_BASE_PAD - 4u, 1,
+                        ui_mix(basc, UI_WHITE, 1u, 4u));
+                fb_rect(x0 - EYE_BASE_PAD + 2u, basy + EYE_BASE_H - 1u,
+                        pair + 2u * EYE_BASE_PAD - 4u, 1,
+                        ui_mix(basc, 0x0000u, 1u, 2u));
+                eye_shown_l = eye_shown_r = 0xFFu;   /* force both strips */
+                /* The box was just cleared, so there is no old cone to
+                 * erase -- and after a width change its coordinates would
+                 * point at the previous layout. */
+                eye_cast_l  = eye_cast_r  = 0xFFu;
+                eye_gap_l   = eye_gap_r   = 0xFFu;
+            }
+
+            /* Kept per channel so the gap pass below can evaluate BOTH
+             * pools at a row without recomputing either. */
+            uint32_t gcy_of[2], amt_of[2];
+            uint8_t  key_of[2];
+
+            for (uint32_t ch = 0; ch < 2u; ch++) {
+                /* VU ballistics per channel -- the tubes are imitating the
+                 * same era of gear as the needles, and two different feels
+                 * would read as two different instruments. */
+                uint32_t pk  = ch ? peak_r : peak_l;
+                uint32_t tgt = (pk * 255u) / 32768u;
+                if (tgt > 255u) tgt = 255u;
+                if (paused) tgt = 0;
+                uint32_t *v = ch ? &eye_r : &eye_l;
+                if (tgt > *v) { *v += VU_ATT; if (*v > tgt) *v = tgt; }
+                else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
+                                if (*v < tgt) *v = tgt; }
+
+                /* A second, slower follower -- for the cast light's
+                 * BRIGHTNESS only. Its position comes off the strip. */
+                uint32_t *g = ch ? &eye_gl_r : &eye_gl_l;
+                if (*v > *g) *g += (*v - *g + 7u) / 8u;
+                else         *g -= (*g - *v) / 8u;
+
+                uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
+                uint32_t bx = tx + (EYE_TUBE_W - EYE_BAR_W) / 2u;
+
+                uint8_t  lit   = (uint8_t)((*v * bh) / 255u);
+                /* A real tube is never fully dark -- the strip sits at a
+                 * short resting length with no signal, because the heater is
+                 * on. Going to zero made the pair look switched OFF during
+                 * quiet passages, which is the opposite of the impression a
+                 * glowing tube is here to give. */
+                if (lit < 3u) lit = 3u;
+                uint8_t *shown = ch ? &eye_shown_r : &eye_shown_l;
+
+                if (!eye_face || lit != *shown) {
+                    uint32_t ly = by + bh - lit;      /* the strip grows UP */
+
+                    /* Dark first, then the glow over it, so the window is
+                     * fully covered whichever way the strip moved. */
+                    if (lit < bh) fb_rect(bx - 4u, by, EYE_BAR_W + 8u,
+                                          bh - lit, EYE_DARK);
+                    fb_rect(bx - 4u, ly, 2, lit, EYE_H2);
+                    fb_rect(bx - 2u, ly, 2, lit, EYE_H1);
+                    fb_rect(bx, ly, EYE_BAR_W, lit, EYE_LIT);
+                    fb_rect(bx + EYE_BAR_W, ly, 2, lit, EYE_H1);
+                    fb_rect(bx + EYE_BAR_W + 2u, ly, 2, lit, EYE_H2);
+                    /* Bloom ABOVE the tip. Without it the strip ends on a
+                     * hard edge and the whole thing reads as a rectangle
+                     * rather than as something glowing. */
+                    if (ly >= by + 2u) {
+                        fb_rect(bx - 2u, ly - 1u, EYE_BAR_W + 4u, 1, EYE_H1);
+                        fb_rect(bx - 1u, ly - 2u, EYE_BAR_W + 2u, 1, EYE_H2);
+                    }
+
+                    /* ...and reflected in the plinth, the way the
+                     * photographed pair reflects in its acrylic. */
+                    uint32_t rf = (lit * 4u) / bh + 1u;
+                    for (uint32_t k = 0; k < 3u; k++)
+                        fb_rect(bx - 3u, basy + 1u + k, EYE_BAR_W + 6u, 1,
+                                (k < rf) ? ui_mix(basc, EYE_LIT, 3u - k, 9u)
+                                         : basc);
+                    *shown = lit;
+                }
+
+                /* The pool of light beside the tube. See the EYE_GLOW_*
+                 * block: fixed centre, elliptical, slow, and only touched
+                 * when its quantised level actually changes. */
+                uint8_t  step = (uint8_t)((*g * EYE_GLOW_STEPS) / 256u);
+                uint32_t pos  = ((uint32_t)lit * EYE_GLOW_POS) / bh;
+                uint8_t  key  = (uint8_t)(step * 16u + pos);
+                uint8_t *cast = ch ? &eye_cast_r : &eye_cast_l;
+
+                /* Midpoint of the lit strip, held so the pool stays inside
+                 * its repaint band. Computed whether or not the pool is
+                 * redrawn -- the gap pass needs it either way. */
+                uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
+                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                /* Both ends. The upper clamp was dropped while the band was
+                 * temporarily shortened and not restored with it, which let
+                 * the pool sit five rows lower than intended and run into the
+                 * bottom of the box. */
+                if (gcy < top + EYE_GLOW_RY) gcy = top + EYE_GLOW_RY;
+                if (gcy + EYE_GLOW_RY > top + EYE_GLOW_ROWS)
+                    gcy = top + EYE_GLOW_ROWS - EYE_GLOW_RY;
+                uint32_t amt = (step * EYE_GLOW_PEAK) / EYE_GLOW_STEPS;
+
+                gcy_of[ch] = gcy; amt_of[ch] = amt; key_of[ch] = key;
+
+                if (!eye_face || key != *cast) {
+                    uint32_t bw   = EYE_GLOW_RX / EYE_GLOW_NB;
+                    uint32_t base = ch ? (tx + EYE_TUBE_W)
+                                       : (tx - EYE_GLOW_RX);
+
+                    for (uint32_t k = 0; k < EYE_GLOW_ROWS; k += EYE_GLOW_S) {
+                        uint32_t y   = top + k;
+                        uint32_t mid = y + EYE_GLOW_S / 2u;
+                        uint32_t dy  = (mid > gcy) ? (mid - gcy) : (gcy - mid);
+                        /* The real ramp for this row, matching what the box
+                         * is now painted with. An earlier attempt used the
+                         * flat `bed` instead: that removed the dark band, and
+                         * replaced it with a lighter slab that did not match
+                         * the gradient either. The band was never the bug --
+                         * the flat box fill was. */
+                        uint16_t bg  = ui_grad_at(y);
+
+                        /* Rows outside the pool get rx 0 and fall straight
+                         * through to the bed fill, which is what erases the
+                         * old position. */
+                        uint32_t rx = eye_glow_rx(dy);
+
+                        uint32_t nb = 0;
+                        while (nb < EYE_GLOW_NB
+                               && (nb * bw + bw / 2u) < rx) nb++;
+
+                        /* The base overhangs the tubes by exactly one band,
+                         * so on its rows the innermost band belongs to it and
+                         * the pool must not touch it -- neither to light it
+                         * nor to erase it. */
+                        uint32_t b0 = (y >= basy) ? 1u : 0u;
+
+                        for (uint32_t b = b0; b < nb; b++) {
+                            uint32_t d   = b * bw + bw / 2u;   /* from tube */
+                            uint32_t wgt = (amt * (rx - d)) / EYE_GLOW_RX;
+                            uint32_t gx  = ch
+                                         ? (base + b * bw)
+                                         : (base + (EYE_GLOW_NB - 1u - b) * bw);
+                            fb_rect(gx, y, bw, EYE_GLOW_S,
+                                    wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
+                        }
+
+                        /* Everything the pool does not reach, in ONE rect --
+                         * so the whole band is repainted every time and the
+                         * pool cleans up after its own previous position,
+                         * without a separate erase pass. Bands are 8px and
+                         * tile the reach exactly, so the two tubes always
+                         * light identical areas. */
+                        /* PER ROW, unlike the lit bands above.
+                         *
+                         * This span is pure background -- it is what makes the
+                         * meter continuous with the screen -- so it has to be
+                         * the exact ramp, dither and all. Painting it in 4-row
+                         * strips like the lit bands gave every strip its top
+                         * row's colour, which reads as horizontal stepping
+                         * against the smoothly dithered box around it, worst
+                         * near the bottom where the ramp is darkest.
+                         *
+                         * The lit bands can stay quantised: the cyan mixed
+                         * into them dominates, and any step is invisible under
+                         * it. Costs ~42 extra rects a channel on a redraw. */
+                        uint32_t r0 = (nb > b0) ? nb : b0;
+                        if (r0 < EYE_GLOW_NB) {
+                            uint32_t rx0 = ch ? (base + r0 * bw) : base;
+                            uint32_t rw  = (EYE_GLOW_NB - r0) * bw;
+                            for (uint32_t r = 0; r < EYE_GLOW_S; r++)
+                                fb_rect(rx0, y + r, rw, 1, ui_grad_at(y + r));
+                        }
+                    }
+                    *cast = key;
+                }
+            }
+
+            /* The gap, lit by BOTH tubes. See EYE_GAP_ROWS. */
+            if (!eye_face || key_of[0] != eye_gap_l
+                          || key_of[1] != eye_gap_r) {
+                uint32_t gx  = x0 + EYE_TUBE_W;
+                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                /* Distance from each tube's inner face to the middle of the
+                 * gap -- the same for both, which is why the sum is flat. */
+                uint32_t d = EYE_TUBE_G / 2u;
+
+                for (uint32_t k = 0; k < EYE_GAP_ROWS; k += EYE_GLOW_S) {
+                    uint32_t y = top + k;
+                    uint32_t h = EYE_GAP_ROWS - k;
+                    if (h > EYE_GLOW_S) h = EYE_GLOW_S;
+
+                    uint32_t wgt = 0;
+                    for (uint32_t ch = 0; ch < 2u; ch++) {
+                        uint32_t mid = y + h / 2u;
+                        uint32_t dy  = (mid > gcy_of[ch])
+                                     ? (mid - gcy_of[ch])
+                                     : (gcy_of[ch] - mid);
+                        uint32_t rx  = eye_glow_rx(dy);
+                        if (d < rx)
+                            wgt += (amt_of[ch] * (rx - d)) / EYE_GLOW_RX;
+                    }
+                    /* Two sources add, but not without limit -- past this the
+                     * gap stops reading as lit glass and starts reading as a
+                     * solid block between the tubes. */
+                    if (wgt > 40u) wgt = 40u;
+
+                    uint16_t bg = ui_grad_at(y);
+                    fb_rect(gx, y, EYE_TUBE_G, h,
+                            wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
+                }
+                eye_gap_l = key_of[0];
+                eye_gap_r = key_of[1];
+            }
+
+            eye_face   = 1;
+            eye_face_w = (uint16_t)ww;
             goto viz_done;
         }
 
@@ -2446,7 +3222,7 @@ static void ui_draw_dynamic(void)
             const int32_t ey = (int32_t)(UI_WAVE_H / 2u) - 1;
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
 
-            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);      /* zero line */
 
             if (!paused) {
@@ -2488,7 +3264,7 @@ static void ui_draw_dynamic(void)
             const uint32_t cx = UI_MARGIN + ww / 2u;
             const uint32_t cy = UI_WAVE_Y + r;
 
-            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
 
             /* Centre cross: without it a quiet passage is an empty box, and
              * there is no way to tell "silent" from "not working". */
@@ -2503,7 +3279,12 @@ static void ui_draw_dynamic(void)
                 for (uint32_t age = SCOPE_HIST; age-- > 0; ) {
                     uint32_t f = (scope_head + SCOPE_HIST - age) % SCOPE_HIST;
                     const signed char *sx = scope_x[f], *sy = scope_y[f];
-                    uint16_t c  = ui_mix(bed, ui_accent, SCOPE_HIST - age, SCOPE_HIST);
+                    /* Blended from the background, so it has to be the
+                     * background near where the trace actually sits -- the
+                     * dots cluster around the centre line. Per-dot would cost
+                     * a call for each of 48 x 4. */
+                    uint16_t c  = ui_mix(ui_grad_at(cy), ui_accent,
+                                         SCOPE_HIST - age, SCOPE_HIST);
                     uint32_t sz = age ? 1u : 2u;     /* newest trace is fatter */
                     for (uint32_t k = 0; k < SCOPE_N; k++) {
                         int32_t px = (int32_t)cx + (sx[k] * ex) / SCOPE_UNIT;
@@ -2824,7 +3605,16 @@ static void ui_draw_dynamic(void)
 
     /* Transport state, in the gap to the right of the clock. Both strings are
      * the same length so one overwrites the other cleanly. */
-    {
+    /* NOT while a boot note is up. UI_BOOT_Y and UI_TRANSPORT_Y are the SAME
+     * ROW -- both 262 -- so during a switch this repainted PLAYING, the
+     * arrows and the EQ name straight over "LOADING PLAYLIST" while
+     * ui_boot_tick() animated its dots on top of both. The user saw the
+     * transport line garbled, assumed the pick had failed, and picked again:
+     * that is a large part of what "I have to load it twice" has been.
+     *
+     * The note owns the row until ui_boot_cancel(), whose callers already
+     * force a full transport repaint after it. */
+    if (!ui_boot_msg) {
         uint16_t tbg = ui_grad_at((UI_TIME_Y + 10u));
         /* Left end of its own row. The arrows sit at a FIXED x derived from
          * the WIDER of the two words, so switching PLAYING <-> PAUSED cannot
@@ -3001,59 +3791,39 @@ static void ui_draw_dynamic(void)
      * HOW TO USE IT: play a file that misbehaves, note T. Watch M and R at
      * 1.0x for ten seconds, hold A, watch them again. Compare, do not infer. */
 #if UI_SHOW_SPEED_DIAG
-    /* Resume row, above the speed row. W is the packed word as loaded, T its
-     * tag, C the tag of the file that actually opened -- if those two differ
-     * the guard rejected the point, and the two numbers say so directly. D is
-     * the latched branch code documented at resume_dbg. */
-    if (ui_sec != ui_last_spd) {
-        /* The packed word itself is NOT shown -- it is readable straight off
-         * the card in interact_persist.json, so the row spends its width on
-         * what only the running core knows: S the saved seconds, D which
-         * branch the restore took, Z the file size and Y the byte offset the
-         * resume wants, the last two being what D9 and D10 turn on. */
-        /* Both halves of the feature on one row, because the last failure was
-         * the SAVE and the row only described the restore:
-         *   S  seconds in the word the core currently holds
-         *   D  which branch the boot-time restore took
-         *   O  resume_on, as adopted from Core Settings
-         *   A  settings_adopted -- 0 means nothing may publish at all
-         *   V  how many times resume_pump has actually published a point
-         * V staying at 0 while music plays IS the save being dead. */
-        char r[64], *rq = r;
-        const char *rl = "RES S";
-        while (*rl) *rq++ = *rl++;
-        rq = ui_dec(rq, RS_SECS(resume_word));
-        *rq++ = ' '; *rq++ = 'D'; rq = ui_dec(rq, resume_dbg);
-        *rq++ = ' '; *rq++ = 'O'; rq = ui_dec(rq, resume_on);
-        *rq++ = ' '; *rq++ = 'A'; rq = ui_dec(rq, settings_adopted);
-        *rq++ = ' '; *rq++ = 'V'; rq = ui_dec(rq, resume_saves);
-        /* P: was the saved point from the playlist. L: what settings_load()
-         * actually returned at boot -- 0 means it took the all-zero early exit
-         * and every setting is a firmware default regardless of what the card
-         * holds, which is the "everything reset" report. C: the accent index
-         * as adopted, a setting whose stored value is 3, so C3 proves the
-         * adopt worked and C0 proves it did not. */
-        *rq++ = ' '; *rq++ = 'P'; rq = ui_dec(rq, RS_PL(resume_word));
-        *rq++ = ' '; *rq++ = 'L'; rq = ui_dec(rq, settings_load_ok);
-        *rq++ = ' '; *rq++ = 'C'; rq = ui_dec(rq, ui_pal_idx);
-        *rq = 0;
-        uint16_t rbg = ui_grad_at((FB_H - 42u));
-        fb_rect(UI_MARGIN, FB_H - 42u, UI_INNER_W, FB_CELL(TS_1X), rbg);
-        fb_set_color(UI_RED, rbg);
-        fb_text_clipped(UI_MARGIN, FB_H - 42u, r, TS_1X, TS_1X, UI_INNER_W);
-    }
+    /* ONE row, at y336..351.
+     *
+     * There were two, and the upper one sat at y318..333 against the toast
+     * band at y314..329 -- they repainted over each other every second, which
+     * is why a toast only ever showed as a hint. Anything added here must stay
+     * below y330.
+     *
+     * Only the open question is carried: N is playlist notifications the RTL
+     * delivered, L is times pl_load() actually ran. The seek and resume
+     * investigations are closed, so their fields are gone. */
     if (ui_sec != ui_last_spd) {
         ui_last_spd = ui_sec;
         char b[64], *q = b;
-        const char *sp = speed_fast ? "1.2x " : "1.0x ";
-        while (*sp) *q++ = *sp++;
-        *q++ = 'T'; q = ui_dec(q, track_secs);
-        *q++ = ' '; *q++ = 'M'; q = ui_dec(q, meas_rate);
-        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, ui_byte_rate());
-        /* ui_sec is NOT shown -- the elapsed clock above already is it, and the
-         * two extra fields pushed the worst-case line past the 360 px column,
-         * where fb_text_clipped would have silently eaten the last value. */
-        *q++ = ' '; *q++ = 'K'; q = ui_dec(q, file_pos >> 10);
+        /* The speed prefix this row was built for is dropped while the
+         * playlist switch is under investigation: measured against the real
+         * font, the full line clips past 296px once the counters reach two
+         * digits, and N is already at 8. */
+        *q++ = 'N'; q = ui_dec(q, pl_notify_n);
+        *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_sw_ct);
+        /* The playlist side read 1010 three times running, so its history is
+         * spent -- one current copy is enough. The row's remaining width goes
+         * to the TRACK loads, which is where the fault now has to be. */
+        *q++ = ' ';
+        q = ui_hex2(q, (uint8_t)(pl_sw_hist[2] >> 8));
+        q = ui_hex2(q, (uint8_t)pl_sw_hist[2]);
+        *q++ = ' '; *q++ = 'K';
+        for (uint32_t i = 0; i < 3u; i++) {
+            *q++ = ' ';
+            *q++ = (char)('0' + ((tk_hist[i] >> 8) & 0xFu));
+            *q++ = (char)('0' + ((tk_hist[i] >> 4) & 0xFu));
+            *q++ = (char)('0' + (tk_hist[i] & 0xFu));
+        }
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -3062,6 +3832,7 @@ static void ui_draw_dynamic(void)
     }
 #endif
 }
+
 
 /* cont1_key bit assignments (APF standard layout) */
 #define KEY_UP      (1u << 0)
@@ -3281,7 +4052,7 @@ static void poll_input(void)
     }
     if (edge & KEY_X) {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
-         * modes wrap in nine taps, and every Select combo the user has to
+         * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
         viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
         ui_wave_clear();                 /* modes do not share a screen layout */
@@ -3298,7 +4069,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_VU     ? "METER: VU"
                    : viz_mode == VIZ_SCROLL ? "METER: WAVEFORM"
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
-                                            : "METER: PEAK DOTS");
+                   : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
+                                            : "METER: MAGIC EYE");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
@@ -3509,14 +4281,36 @@ static void poll_input(void)
     /* Opening the OS menu is the strongest signal that the core is about to
      * be left, so a pending settings write goes out now rather than waiting
      * out its quiet window that may never elapse. */
-    if (in & IN_MENU) { if (!(paused & 2u)) set_flush_now = 1u; paused |= 2u; }
-    else paused &= ~2u;
+    /* The open/closed memory is its OWN flag, not paused's menu bit.
+     * load_track() ends with `paused = 0`, which clears that bit wholesale --
+     * so any load running while the menu was open erased the evidence and the
+     * closing edge below never fired. */
+    if (in & IN_MENU) {
+        if (!menu_was) { set_flush_now = 1u; menu_was = 1u; }
+        paused |= 2u;
+    } else {
+        /* CLOSING edge: the moment a Load Playlist pick has just been made. */
+        if (menu_was) { pl_check_req = 1u; menu_was = 0u; }
+        paused &= ~2u;
+    }
 
     /* Only SET the flag here. This runs from inside the sample-push wait,
      * which is where the CPU spends most of its time when keeping up, so a
      * reload is noticed immediately instead of after the current frame. */
-    if (REG(R_RELOAD) & RL_PENDING) reload_pending = 1u;
-    if (REG(R_RELOAD) & RL_PL_RELOAD) pl_reload_pending = 1u;
+    /* An MP3-slot notification also re-checks the PLAYLIST slot. The RTL
+     * decides which slot an 008A belongs to by comparing a slot id that
+     * crosses clock domains beside the toggle carrying the event, so a
+     * mis-attributed update would be delivered as the wrong slot's and lost. */
+    if (REG(R_RELOAD) & RL_PENDING) { reload_pending = 1u; pl_check_req = 1u; }
+    {
+        uint32_t rl = REG(R_RELOAD);
+        /* Count the EDGE. The bit is sticky until acked and poll_input runs
+         * every loop iteration, so counting the level would tick thousands of
+         * times per pick and say nothing. */
+        if ((rl & RL_PL_RELOAD) && !pl_reload_pending) pl_notify_n++;
+        if (rl & RL_PL_RELOAD) pl_reload_pending = 1u;
+        pl_reload_seen |= rl;              /* sticky: every bit ever observed */
+    }
 }
 
 /* Drops every sample queued in the hardware FIFO. Required on any
@@ -3666,6 +4460,22 @@ static uint32_t probe_file_size(void)
     return lo + 4096u;
 }
 
+/* Where APF's 0190 response lands in the datatable.
+ *
+ * These used to live in playlist.inc, which is included further down -- so
+ * slot_file_id() and slot_filename() below could not see them and were still
+ * written against the ORIGINAL layout, with the response at word 0. It was
+ * moved to word 64 because APF's dataslot ID/size table occupies the start of
+ * this BRAM and every 0190 was overwriting it; these two never followed.
+ *
+ * They have therefore been reading the ID/SIZE TABLE this whole time: binary
+ * pairs with no text in them, so slot_filename() found no printable run and
+ * track_file came back EMPTY on every load. That is why an untagged file
+ * showed UNKNOWN TRACK instead of its name. */
+#define DT_RESP_W   64u     /* response struct  (APF writes) */
+#define DT_PARAM_W  128u    /* parameter struct (APF reads)  */
+#define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window */
+
 static void slot_filename(char *out, uint32_t out_size);
 
 /* Ask APF which file is CURRENTLY in the slot (0190) and reduce its response
@@ -3690,8 +4500,8 @@ static uint32_t slot_file_id(void)
     slot_filename(track_file, sizeof(track_file));
 
     uint32_t h = 2166136261u;                   /* FNV-1a over the struct */
-    for (uint32_t w = 0; w < 64u; w++) {
-        uint32_t v = dt_read(w);
+    for (uint32_t w = 0; w < DT_WORDS; w++) {
+        uint32_t v = dt_read(DT_RESP_W + w);
         for (int b = 0; b < 4; b++) {
             h ^= (v >> (b * 8)) & 0xFFu;
             h *= 16777619u;
@@ -3704,9 +4514,9 @@ static uint32_t slot_file_id(void)
  * longest run of printable ASCII in the struct IS the name. */
 static void slot_filename(char *out, uint32_t out_size)
 {
-    uint8_t raw[256];
-    for (uint32_t w = 0; w < 64u; w++) {
-        uint32_t v = dt_read(w);
+    uint8_t raw[DT_WORDS * 4u];
+    for (uint32_t w = 0; w < DT_WORDS; w++) {
+        uint32_t v = dt_read(DT_RESP_W + w);
         /* BIG-endian unpack: the bridge byte-swaps, and a little-endian
          * unpack scrambles the name into 4-byte groups. */
         raw[w * 4 + 0] = (uint8_t)(v >> 24);
@@ -4866,6 +5676,13 @@ int main(void)
             reload_probe_at = cycles();
             reload_settle   = cycles() + CLK_HZ * 3u / 2u;   /* blind fallback */
             reload_at       = cycles() + CLK_HZ * 5u;        /* hard cap       */
+            /* Same gap: this gate waits at least 1.5 s before the track even
+             * opens. The splash carries LOADING TRACK from the idle screen,
+             * but with the player up there was nothing at all. */
+            /* The boot path sets resume_seek_req before the main loop, so the
+             * gate load that follows is part of RESUMING -- saying LOADING
+             * here overwrote the splash's own message with a contradiction. */
+            ui_boot_note(resume_seek_req ? "RESUMING TRACK" : "LOADING TRACK");
 
             /* Say so NOW, not when the gate below finally opens. That wait is
              * at least 1.5 s and can reach 5 s, and with the screen unchanged
@@ -4906,18 +5723,45 @@ int main(void)
             if ((int32_t)(cycles() - reload_settle)   >= 0 &&
                 (int32_t)(cycles() - reload_probe_at) >= 0) {
                 reload_probe_at = cycles() + CLK_HZ / 10u;
+                /* No toast here. The boot row went up when the pick was
+                 * detected and holds by itself until ui_boot_cancel(); a toast
+                 * refreshed alongside it put the SAME words on a second line,
+                 * which is the duplicate that kept being reported. */
                 uint32_t id = slot_file_id();
                 if (id != 0u && id != stale_ref_file_id) ready = 1;
             }
 
             if (ready || (int32_t)(cycles() - reload_at) >= 0) {
                 reload_armed = 0;
+                uint32_t tk_ge = ready ? 1u : 2u;
+                uint32_t tk_was = tk_prev_name;
 
                 /* The indicator went up when the pick was detected, not here.
                  * was_idle only decides what to restore if the open fails. */
                 int was_idle = idle;
+                if (!was_idle)
+                    ui_boot_note(resume_seek_req ? "RESUMING TRACK"
+                                                 : "LOADING TRACK");
                 int opened   = load_track();
-                ui_boot_cancel();
+                {   /* FNV over the filename APF reports for the slot. */
+                    uint32_t h = 2166136261u;
+                    for (uint32_t i = 0; i < sizeof(track_file)
+                                      && track_file[i]; i++) {
+                        h ^= (uint32_t)(uint8_t)track_file[i];
+                        h *= 16777619u;
+                    }
+                    tk_prev_name = h;
+                    tk_hist[0] = tk_hist[1];
+                    tk_hist[1] = tk_hist[2];
+                    tk_hist[2] = (uint16_t)((tk_ge << 8)
+                               | ((opened ? 1u : 0u) << 4)
+                               |  ((h != tk_was) ? 1u : 0u));
+                }
+                ui_boot_cancel();          /* chrome has repainted the row */
+                /* Icons and the PLAYING label are tracked separately, so a
+                 * wiped row needs both invalidated or the label never returns. */
+                ui_mode_dirty = 1;
+                ui_last_pause = 0xFFFFFFFFu;
 
                 if (!opened && was_idle) {
                     /* The splash went up to carry the indicator; put the
@@ -4949,7 +5793,7 @@ int main(void)
                       * behaviour -- the first track after launch loading
                       * paused, so music never starts the instant the core
                       * opens -- read as the player being stuck. */
-                } else if (!idle) ui_load_failed();
+                } else { pl_sw_tk++; if (!idle) ui_load_failed(); }
                 continue;
             }
         }
@@ -4975,31 +5819,239 @@ int main(void)
         /* The user picked a different playlist. Re-reading slot 3 flushes the
          * MP3 slot's fragment cache, so this pauses briefly rather than doing
          * it underneath a running stream. */
+        /* ARM, do not act. 008A says the user picked a playlist, not that APF
+         * has switched the slot -- exactly the fault the MP3 slot needed a
+         * gate for, and it showed here as "sometimes you have to pick the new
+         * playlist twice": the first read still returned the OLD list, and the
+         * second attempt worked only because the slot had caught up by then.
+         *
+         * Record what we are leaving, then wait for 0190 to report something
+         * else. Positive confirmation, not a blind delay. */
+        /* Menu just closed. Ask slot 3 what it holds; if it is not what we
+         * loaded, the notification for it never arrived, so raise the same
+         * request it would have. Costs one 0190 at a moment when playback is
+         * already interrupted -- a metadata query, not a slot READ, so it does
+         * not drag the MP3 slot's fragment cache down with it the way a
+         * periodic poll of slot 3 would. */
+        /* PERIODIC identity check on slot 3, depending on NOTHING.
+         *
+         * The notification can be dropped and the menu-close edge can be
+         * missed. This asks, every few seconds, whether the slot still holds
+         * what we loaded -- so a pick lost anywhere upstream heals itself
+         * within one interval instead of waiting for the user to retry.
+         *
+         * A 0190 getfile, not a slot READ. That is what makes it affordable:
+         * the warning against polling slot 3 is about reads walking the
+         * cluster chain, and a metadata query does not. If it costs anything
+         * it will be audible as a tic every three seconds -- about as
+         * diagnosable as a symptom gets -- and one constant backs it out.
+         *
+         * Held off while anything is mid-flight so it cannot race a load. */
+        if (!idle && pl_count && !pl_check_req
+            && !pl_reload_pending && !pl_reload_armed
+            && !reload_pending    && !reload_armed
+            && (int32_t)(cycles() - pl_poll_at) >= 0) {
+            pl_poll_at   = cycles() + CLK_HZ * 3u;
+            pl_check_req = 1u;              /* same comparison path as below */
+        }
+
+        if (pl_check_req) {
+            pl_check_req = 0;
+            pl_name_read();
+            int differs = 0;
+            for (uint32_t i = 0; i < sizeof(pl_cur_name); i++) {
+                if (pl_name_raw[i] != pl_cur_name[i]) { differs = 1; break; }
+                if (!pl_cur_name[i]) break;
+            }
+            /* Only when the slot names something. An empty answer means APF
+             * would not say, which is not evidence of a change. */
+            if (differs && pl_name_raw[0]) {
+                /* pl_fb_at is deliberately NOT set here. It opens a window in
+                 * which the notification handler discards arrivals as
+                 * duplicates -- and setting it alongside the request meant the
+                 * handler discarded THIS request, one iteration later, every
+                 * single time. The fallback has never completed a load. It is
+                 * set when the load finishes instead, which is the only point
+                 * a later 008A is genuinely a duplicate. */
+                pl_reload_pending = 1u;
+                /* 0190 has ALREADY proved the slot switched, so the gate has
+                 * nothing left to wait for -- without this it would sit out
+                 * its full five seconds and expire. */
+                pl_skip_gate = 1u;
+            }
+            continue;
+        }
+
         if (pl_reload_pending) {
             pl_reload_pending = 0;
             REG(R_RELOAD) = RL_PL_RELOAD;            /* ack just this bit */
-            /* Same cut as a skip: pl_load() blocks on slot-3 reads for longer
-             * than the FIFO holds, and picking a playlist means leaving the
-             * current track anyway. */
+            /* A notification that lands just AFTER the menu-close fallback
+             * already loaded this pick is the same event twice. Without this
+             * it re-arms, finds the name unchanged, sits out the full five
+             * seconds and then reloads the list it is already playing --
+             * turning a dropped 008A into a worse fault than the one being
+             * worked around. Three seconds only, so a deliberate re-pick of
+             * the same list still reloads it. */
+            if (pl_fb_at && (uint32_t)(cycles() - pl_fb_at) < CLK_HZ * 3u)
+                continue;
+            for (uint32_t i = 0; i < sizeof(pl_leaving); i++)
+                pl_leaving[i] = pl_name_raw[i];
+            pl_reload_armed = 1u;
+            pl_retry        = 1u;        /* one automatic second attempt */
+            pl_probe_at     = cycles();
+            pl_reload_at    = cycles() + CLK_HZ * 5u;
+            /* Cut the outgoing track NOW rather than at the moment the switch
+             * lands -- see PAUSE_LOAD. */
             pcm_flush();
             refill_drain();
             ring_fill = 0; ring_rd = 0;
-            pl_load();
-            pl_report();
-            /* Only take playback if nothing else is claiming it.
-             *
-             * Picking Load MP3 can bring a playlist-slot notification along
-             * with it, and starting track 1 then throws away the file the user
-             * actually chose -- reported as "it reloads the playlist and plays
-             * a playlist song instead of my mp3".
-             *
-             * Gated on the MP3 reload being idle rather than on playback,
-             * deliberately: picking a NEW playlist while a track is playing
-             * should still start it, which is the whole point of that action.
-             * Only a pick already in flight suppresses it. */
-            if (pl_count && !reload_pending && !reload_armed) pl_play_at(0);
-            ui_mode_dirty = 1;
+            paused |= PAUSE_LOAD;
+            /* Say something immediately. The gate below waits for APF to
+             * switch the slot -- usually quick, five second cap -- and with
+             * the player still up and the old track still playing there is
+             * otherwise nothing to show the pick registered. The boot row
+             * cannot be used: UI_BOOT_Y is the live transport row. */
+            ui_boot_note("LOADING PLAYLIST");
             continue;
+        }
+
+        if (pl_reload_armed) {
+            int expired = (int32_t)(cycles() - pl_reload_at) >= 0;
+            int due     = (int32_t)(cycles() - pl_probe_at)  >= 0;
+
+            if (due || expired) {
+                pl_probe_at = cycles() + CLK_HZ / 10u;
+                pl_name_read();
+                /* No toast: the boot row is already showing this. */
+
+                int changed = 0;
+                for (uint32_t i = 0; i < sizeof(pl_leaving); i++) {
+                    if (pl_name_raw[i] != pl_leaving[i]) { changed = 1; break; }
+                    if (!pl_leaving[i]) break;
+                }
+
+                if (changed || expired || pl_skip_gate) {
+                    /* The fallback set pl_leaving from a name 0190 had
+                     * ALREADY refreshed, so the "did it really change" retry
+                     * below would compare the new name against itself, call
+                     * it unchanged and load a second time. It has nothing to
+                     * check here -- 0190 is the evidence. */
+                    uint8_t from_fallback = pl_skip_gate;
+                    if (pl_skip_gate) { pl_skip_gate = 0; pl_retry = 0; }
+                    pl_reload_armed = 0;
+                    pl_load_n++;
+                    pl_sw_ge = changed ? 1u : 2u;
+                    pl_sw_rt = 0u;
+                    ui_boot_note("LOADING PLAYLIST");
+                    /* Same cut as a skip: pl_load() blocks on slot-3 reads for
+                     * longer than the FIFO holds, and picking a playlist means
+                     * leaving the current track anyway. */
+                    pcm_flush();
+                    refill_drain();
+                    ring_fill = 0; ring_rd = 0;
+                    uint32_t sig_was = pl_sig;
+                    pl_load();
+
+                    /* Did the switch actually happen?
+                     *
+                     * If the slot still reports the name we were leaving, APF
+                     * had not swapped it when the gate fired -- the probe saw
+                     * a stale 0190, or the five second cap expired first --
+                     * and we have just reloaded the OLD list. That is the
+                     * intermittent "pick it twice" fault, and it is DETECTABLE
+                     * here even though the race causing it is not reliably
+                     * reproducible.
+                     *
+                     * So make the second attempt ourselves. Once only: picking
+                     * the SAME playlist again is a legitimate case where the
+                     * name does not change, and that must cost one wasted
+                     * retry rather than a loop. */
+                    if (pl_retry) {
+                        int same = 1;
+                        for (uint32_t i = 0; i < sizeof(pl_leaving); i++) {
+                            if (pl_name_raw[i] != pl_leaving[i]) { same = 0; break; }
+                            if (!pl_leaving[i]) break;
+                        }
+
+                        /* The name check alone was NOT enough, and the report
+                         * that it still happens is what shows why.
+                         *
+                         * There are two stale things here, not one. 0190 can
+                         * still name the old file -- that is `same`, and it is
+                         * caught. But 0190 can ALSO report the new name while
+                         * the reads keep coming out of APF's fragment cache,
+                         * so the bytes are the old list under the new name.
+                         * The name check passes, no retry fires, and the old
+                         * playlist plays: exactly the surviving symptom.
+                         *
+                         * The text answers it directly. Two different lists
+                         * hashing the same means they hold identical bytes, in
+                         * which case reloading costs one wasted attempt and
+                         * changes nothing the user hears. */
+                        int stale = (!same && pl_sig && pl_sig == sig_was);
+
+                        if (same || stale) {
+                            pl_sw_rt        = same ? 1u : 2u;
+                            pl_retry        = 0;
+                            /* 0190 already names the right file, so there is
+                             * nothing to reopen -- only APF's cached fragments
+                             * for slot 3, which still describe the old one.
+                             * Touching a different slot is the documented (and
+                             * here already proven) way to drop them. Waiting
+                             * would not: a cache has no timeout.
+                             *
+                             * Safe at this point specifically: the stream is
+                             * already flushed for the reload, so the re-walk
+                             * this costs lands in silence rather than starving
+                             * a running decode. */
+                            if (stale) target_flush_slot_cache();
+                            pl_reload_armed = 1u;
+                            /* A stale read has already changed name, so its
+                             * probe fires at once -- this delay IS the settle.
+                             * The `same` case is still waiting on the name, so
+                             * it keeps the fast poll. */
+                            pl_probe_at     = cycles() +
+                                              (stale ? CLK_HZ / 4u : CLK_HZ / 10u);
+                            pl_reload_at    = cycles() + CLK_HZ * 5u;
+                            continue;        /* indicator stays up across it */
+                        }
+                    }
+                    pl_retry = 0;
+
+                    /* Release the row WITHOUT wiping: it is the transport row
+                     * in the player, and ui_mode_dirty below repaints it. */
+                    ui_boot_cancel();
+                    ui_mode_dirty = 1;
+                    ui_last_pause = 0xFFFFFFFFu;
+                    /* Released here as well as by load_track(), for the paths
+                     * that never reach one -- an empty or unreadable list, or
+                     * a pick that lost the race to something else. */
+                    paused &= (uint32_t)~PAUSE_LOAD;
+                    pl_report();
+                    /* Only take playback if nothing else is claiming it. A
+                     * Load MP3 pick can bring a playlist notification with it,
+                     * and starting track 1 then discards the chosen file. */
+                    pl_sw_ct = pl_count;
+                    pl_sw_fl = (uint8_t)((reload_pending ? 1u : 0u)
+                                       | (reload_armed  ? 2u : 0u));
+                    pl_sw_pp = (pl_count && !reload_pending && !reload_armed)
+                             ? 1u : 0u;
+                    pl_sw_hist[0] = pl_sw_hist[1];
+                    pl_sw_hist[1] = pl_sw_hist[2];
+                    pl_sw_hist[2] = (uint16_t)(((uint32_t)pl_sw_ge << 12)
+                                             | ((uint32_t)pl_sw_rt << 8)
+                                             | ((uint32_t)pl_sw_pp << 4)
+                                             |  (uint32_t)pl_sw_fl);
+                    /* NOW the dedupe window opens: a notification arriving
+                     * after this really is the same pick reported late. */
+                    if (from_fallback) pl_fb_at = cycles();
+                    if (pl_sw_pp) pl_play_at(0);
+                    ui_mode_dirty = 1;
+                    continue;
+                }
+            }
+            /* Still waiting for APF to switch the slot. Nothing is playing
+             * while we do -- see PAUSE_LOAD. */
         }
 
         /* Track skip (Left/Right held). pl_play_at() issues 0192; APF then
