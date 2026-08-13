@@ -1105,10 +1105,10 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * atmosphere instead of a second meter. It also pays for itself: quantised to
  * a few steps, most frames leave it alone entirely.
  *
- * Self-erasing. The bounding box is FIXED now that the pool no longer moves,
- * so bands past the current reach are painted with the bed itself and there is
- * no separate erase pass. Quantised into 4-row strips: the bed is a dithered
- * per-row gradient, and over four rows the ramp moves well under one level. */
+ * Self-erasing: bands past the current reach are painted with the bed itself,
+ * so there is no separate erase pass. Quantised into 4-row strips purely to
+ * keep the rect count down -- the box is one flat colour, so there is no ramp
+ * to step against. */
 #define EYE_GLOW_RX    72u        /* how far the light reaches outward    */
 #define EYE_GLOW_RY    20u        /* ...and half how tall the pool is     */
 #define EYE_GLOW_NB     9u        /* bands across that reach -- 8px each  */
@@ -2977,7 +2977,14 @@ static void ui_draw_dynamic(void)
                         uint32_t y   = top + k;
                         uint32_t mid = y + EYE_GLOW_S / 2u;
                         uint32_t dy  = (mid > gcy) ? (mid - gcy) : (gcy - mid);
-                        uint16_t bg  = ui_grad_at(y);
+                        /* `bed`, NOT ui_grad_at(y). The meter box is filled
+                         * with ONE colour -- the gradient sampled at its top
+                         * row -- and every meter draws against that. Mixing
+                         * against the true per-row ramp instead made the glow
+                         * band 30-40%% darker than the box around it, which
+                         * showed as a black rectangle behind the tubes,
+                         * worst on the colours with the steepest ramp. */
+                        uint16_t bg  = bed;
 
                         /* Rows outside the pool get rx 0 and fall straight
                          * through to the bed fill, which is what erases the
@@ -3041,9 +3048,8 @@ static void ui_draw_dynamic(void)
                      * solid block between the tubes. */
                     if (wgt > 40u) wgt = 40u;
 
-                    uint16_t bg = ui_grad_at(y);
                     fb_rect(gx, y, EYE_TUBE_G, h,
-                            wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
+                            wgt ? ui_mix(bed, EYE_LIT, wgt, 64u) : bed);
                 }
                 eye_gap_l = key_of[0];
                 eye_gap_r = key_of[1];
