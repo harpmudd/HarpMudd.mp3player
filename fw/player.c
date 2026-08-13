@@ -1128,11 +1128,12 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * faint line above the light. Self-erasing only works if the repainted area
  * does not move, so the area is the union and the rest is painted bed. */
 #define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
-/* Stops ABOVE the plinth, which is what lets the plinth be wider and taller
- * than the tubes: the band repaints its whole reach every time, so anything
- * of the base inside it gets painted over with background. Light stopping at
- * the chassis is also what light does. */
-#define EYE_GLOW_ROWS  48u        /* rows 16..63; the base owns 64..71      */
+/* Spans the whole box. Shortening it to clear the plinth was tried and looked
+ * worse: the pools reach 72px past each tube while the base is 102px wide, so
+ * the light was chopped flat in mid-air either side of it rather than stopping
+ * at anything. On the base's OWN rows the pools skip its 8px of overhang
+ * instead, which is the only part they would otherwise paint over. */
+#define EYE_GLOW_ROWS  56u        /* rows 16..71                            */
 /* The GAP between the tubes is lit by BOTH of them, and leaving it dark was
  * the one place the illusion broke: two lamps 10px apart cannot leave the
  * space between them the darkest thing on the panel.
@@ -3026,7 +3027,13 @@ static void ui_draw_dynamic(void)
                         while (nb < EYE_GLOW_NB
                                && (nb * bw + bw / 2u) < rx) nb++;
 
-                        for (uint32_t b = 0; b < nb; b++) {
+                        /* The base overhangs the tubes by exactly one band,
+                         * so on its rows the innermost band belongs to it and
+                         * the pool must not touch it -- neither to light it
+                         * nor to erase it. */
+                        uint32_t b0 = (y >= basy) ? 1u : 0u;
+
+                        for (uint32_t b = b0; b < nb; b++) {
                             uint32_t d   = b * bw + bw / 2u;   /* from tube */
                             uint32_t wgt = (amt * (rx - d)) / EYE_GLOW_RX;
                             uint32_t gx  = ch
@@ -3042,9 +3049,10 @@ static void ui_draw_dynamic(void)
                          * without a separate erase pass. Bands are 8px and
                          * tile the reach exactly, so the two tubes always
                          * light identical areas. */
-                        if (nb < EYE_GLOW_NB)
-                            fb_rect(ch ? (base + nb * bw) : base, y,
-                                    (EYE_GLOW_NB - nb) * bw, EYE_GLOW_S, bg);
+                        uint32_t r0 = (nb > b0) ? nb : b0;
+                        if (r0 < EYE_GLOW_NB)
+                            fb_rect(ch ? (base + r0 * bw) : base, y,
+                                    (EYE_GLOW_NB - r0) * bw, EYE_GLOW_S, bg);
                     }
                     *cast = key;
                 }
