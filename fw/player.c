@@ -5832,7 +5832,13 @@ int main(void)
             /* Only when the slot names something. An empty answer means APF
              * would not say, which is not evidence of a change. */
             if (differs && pl_name_raw[0]) {
-                pl_fb_at = cycles();
+                /* pl_fb_at is deliberately NOT set here. It opens a window in
+                 * which the notification handler discards arrivals as
+                 * duplicates -- and setting it alongside the request meant the
+                 * handler discarded THIS request, one iteration later, every
+                 * single time. The fallback has never completed a load. It is
+                 * set when the load finishes instead, which is the only point
+                 * a later 008A is genuinely a duplicate. */
                 pl_reload_pending = 1u;
                 /* 0190 has ALREADY proved the slot switched, so the gate has
                  * nothing left to wait for -- without this it would sit out
@@ -5896,6 +5902,7 @@ int main(void)
                      * below would compare the new name against itself, call
                      * it unchanged and load a second time. It has nothing to
                      * check here -- 0190 is the evidence. */
+                    uint8_t from_fallback = pl_skip_gate;
                     if (pl_skip_gate) { pl_skip_gate = 0; pl_retry = 0; }
                     pl_reload_armed = 0;
                     pl_load_n++;
@@ -6001,6 +6008,9 @@ int main(void)
                                              | ((uint32_t)pl_sw_rt << 8)
                                              | ((uint32_t)pl_sw_pp << 4)
                                              |  (uint32_t)pl_sw_fl);
+                    /* NOW the dedupe window opens: a notification arriving
+                     * after this really is the same pick reported late. */
+                    if (from_fallback) pl_fb_at = cycles();
                     if (pl_sw_pp) pl_play_at(0);
                     ui_mode_dirty = 1;
                     continue;
