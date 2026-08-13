@@ -1305,8 +1305,13 @@ static uint16_t ui_grad_top_c = UI_GRAD_TOP;
  * competes with the type. Then pulled halfway to neutral, because a full
  * saturation cast is what made an earlier coloured ramp read as murky behind
  * the card -- this should say "tinted", not "coloured". */
+/* Set where ui_grad_set() can reach it; the stash itself is built further
+ * down, once UI_WAVE_* are in scope. */
+static uint8_t ui_bg_ready;
+
 static void ui_grad_set(uint16_t accent)
 {
+    ui_bg_ready = 0;            /* the stashed background is now stale */
     uint32_t r = ((accent >> 11) & 0x1Fu) * 255u / 31u;
     uint32_t g = ((accent >> 5)  & 0x3Fu) * 255u / 63u;
     uint32_t b = (accent & 0x1Fu) * 255u / 31u;
@@ -1399,6 +1404,41 @@ static void fb_round_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 static uint32_t ui_wave_w(void)
 {
     return art_shown ? (ART_X - UI_MARGIN - 4u) : UI_INNER_W;
+}
+
+/* A copy of the meter box's BACKGROUND, parked in the columns the scanout
+ * never reads: the framebuffer's stride is 512 and only 400 is displayed, so
+ * x 400..511 exists on every row and is invisible.
+ *
+ * Every meter erases part of the box before redrawing its content, and they
+ * all did it with `bed` -- the gradient sampled once at the box's top row.
+ * That is a flat slab on a ramp that falls to 62% of that value by the bottom
+ * of the box, which is what showed behind the magic eye and the VU needles.
+ *
+ * Per-row erases would be correct and unaffordable: the mirrored bars and the
+ * peak dots erase a full-height column PER BAR, 36 times a frame, so 72 rows
+ * each is 2592 commands. Copying from a prepared strip is ONE command per
+ * erase -- exactly what they cost today.
+ *
+ * Built lazily and dropped whenever the gradient changes. */
+#define UI_BG_X  FB_W                  /* first off-screen column */
+#define UI_BG_W  (FB_STRIDE - FB_W)    /* 112 px of invisible stride */
+
+static void ui_bg_restore(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    if (!w || !h) return;
+    if (!ui_bg_ready) {
+        for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+            fb_rect(UI_BG_X, yy, UI_BG_W, 1, ui_grad_at(yy));
+        ui_bg_ready = 1;
+    }
+    /* Source and destination share rows, so the ramp lines up by
+     * construction and the copy is purely horizontal. */
+    while (w) {
+        uint32_t n = (w < UI_BG_W) ? w : UI_BG_W;
+        fb_copy(UI_BG_X, y, x, y, n, h);
+        x += n; w -= n;
+    }
 }
 
 /* Repaint the strip the art travels through, so a slide leaves the background
@@ -2667,7 +2707,7 @@ static void ui_draw_dynamic(void)
                 if (a > half) a = half;
 
                 uint32_t cx = x0 + w - 1u;
-                fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H, bed);      /* clear column */
+                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H);     /* clear column */
                 if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u,
                                ui_mix(UI_TRACK, ui_accent, a, half));
                 else   fb_rect(cx, cy, 1, 1, UI_TRACK);         /* silence line */
@@ -2689,7 +2729,7 @@ static void ui_draw_dynamic(void)
                 if (!h) h = 1u;
                 uint16_t lc  = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
                 uint16_t c   = ui_mix(UI_TRACK, lc, i + 1u, UI_WAVE_N);
-                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H, bed);
+                ui_bg_restore(x, UI_WAVE_Y, lit, UI_WAVE_H);
                 fb_rect(x, cy - h, lit, h * 2u + 1u, c);
             }
             goto viz_done;
@@ -2707,7 +2747,7 @@ static void ui_draw_dynamic(void)
                 uint32_t pk  = wave_pk[i];
                 if (pk < 2u) pk = 2u;
                 uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H, bed);
+                ui_bg_restore(x, UI_WAVE_Y, lit, UI_WAVE_H);
                 fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 2u, c);
             }
             goto viz_done;
@@ -2724,7 +2764,7 @@ static void ui_draw_dynamic(void)
                 /* Column drawn as three bands -- quiet bed, body, hot tip --
                  * so loud passages read as brighter AND taller. */
                 uint32_t cx = x0 + w - 1u;
-                fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H - a, bed);
+                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H - a);
                 if (a) {
                     uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_H);
                     fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, a, c);
@@ -3180,7 +3220,7 @@ static void ui_draw_dynamic(void)
             const int32_t ey = (int32_t)(UI_WAVE_H / 2u) - 1;
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
 
-            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);      /* zero line */
 
             if (!paused) {
@@ -3222,7 +3262,7 @@ static void ui_draw_dynamic(void)
             const uint32_t cx = UI_MARGIN + ww / 2u;
             const uint32_t cy = UI_WAVE_Y + r;
 
-            fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
 
             /* Centre cross: without it a quiet passage is an empty box, and
              * there is no way to tell "silent" from "not working". */
@@ -3237,7 +3277,12 @@ static void ui_draw_dynamic(void)
                 for (uint32_t age = SCOPE_HIST; age-- > 0; ) {
                     uint32_t f = (scope_head + SCOPE_HIST - age) % SCOPE_HIST;
                     const signed char *sx = scope_x[f], *sy = scope_y[f];
-                    uint16_t c  = ui_mix(bed, ui_accent, SCOPE_HIST - age, SCOPE_HIST);
+                    /* Blended from the background, so it has to be the
+                     * background near where the trace actually sits -- the
+                     * dots cluster around the centre line. Per-dot would cost
+                     * a call for each of 48 x 4. */
+                    uint16_t c  = ui_mix(ui_grad_at(cy), ui_accent,
+                                         SCOPE_HIST - age, SCOPE_HIST);
                     uint32_t sz = age ? 1u : 2u;     /* newest trace is fatter */
                     for (uint32_t k = 0; k < SCOPE_N; k++) {
                         int32_t px = (int32_t)cx + (sx[k] * ex) / SCOPE_UNIT;
