@@ -237,6 +237,33 @@ anything they can see.
 
 # Enhancements
 
+## Progressive JPEG covers are silently skipped — user report 2026-08-13
+
+picojpeg is baseline only: `case M_SOF2: return PJPG_UNSUPPORTED_MODE`. A
+progressive JPEG is rejected whatever its size, which is exactly how it was
+reported -- "even a 100x100 3 KB jpeg does not work", after the user had
+correctly ruled size out. Desktop taggers show progressive files fine, so
+mp3tag displaying the cover is not evidence against this.
+
+**The README now says baseline**, which is the fix for the next person. It said
+"JPEG album art only", and the user did everything right against that.
+
+What the core accepts, for reference:
+
+- baseline JPEG, 8-bit, greyscale or YCbCr; no progressive, CMYK or arithmetic
+- ID3v2.3 / v2.4 `APIC`. **ID3v2.2's 3-character `PIC` is not read** -- worth
+  fixing if anyone reports it, it is a second frame-id comparison
+- MIME containing `jp[eg]`, case-insensitive; picture TYPE is not checked
+- up to `ART_MAX_BYTES` (2 MB)
+- under 736 px on either axis -> full decode, both must be <= 1024;
+  736+ on both -> reduce path, up to 2560
+
+**That size rule is a trap worth removing.** A 900x900 cover works and a
+1200x600 one does not, because the reduce path is only chosen when BOTH axes
+are >= 736 and full decode is capped at 1024. Nothing tells the user which
+branch they are in. Allowing reduce on a per-axis basis, or raising
+ART_FULL_MAX, would make the rule "up to 2560" flat.
+
 ## PNG album art — MEASURED AND DEPRIORITIZED
 
 **Measured 2026-08-04, as this entry asked: 19 `.mp3` files across the card,
