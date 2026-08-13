@@ -392,169 +392,6 @@ and having several books on the go — so if this is ever picked up and AAC is
 too expensive, **per-book bookmarks alone would deliver most of the value** for
 a fraction of the work, and against MP3 files that already play.
 
-## The persisted-settings register file is FULL
-
-`mp3_soc.v` takes the settings index as `set_idx <= dDAT_MOSI[2:0]`. Three bits,
-eight slots, and all eight are spoken for: volume, accent, repeat, shuffle, art,
-meter, EQ, blank. **Any new remembered setting needs that widened to 4 bits.**
-
-The edit itself is one line plus the `set_reg` array bound. What it costs is the
-iteration model: everything since rev 20 has been firmware-only, rebuilt in
-seconds, and this drops back to a full Quartus compile, a `CORE_VERSION` bump
-and a timing-closure round. So widen it ONCE, to 16 slots, and land anything
-that needs a slot in the same pass rather than paying that twice.
-
-Currently blocks resume-position below. **Variable speed deliberately avoids it
-by not persisting** — see that entry; deciding a setting does not need to be
-remembered is the cheapest way past this.
-
-## Resume where you left off (requested 2026-08-10)
-
-Restore the playlist position, and optionally the offset within the track, on
-next launch. The better of the two requests from that day: it works exactly as
-asked and fits the architecture.
-
-Persistence goes through the `interact.json` vars APF stores in its own file —
-the one mechanism here that has never touched the user's music, unlike the two
-that did. A position update is two MMIO writes and no SD access, so ticking it
-once a second is free. Restoring is `load_track()` plus a seek, and both the
-seek and the frame resync already exist.
-
-Needs two slots (track index, byte offset) and probably a third for an on/off
-switch, since resuming mid-track surprises people who did not ask for it. See
-the register-file item above.
-
-Three things to design around:
-
-- **The `.m3u` may have changed.** Store a hash of the track's filename beside
-  the index and fall back to track 1 when it does not match, or the saved index
-  silently points at a different track.
-- **APF may not flush its persist file on a hard power-off**, so the last few
-  seconds of position can be lost. Acceptable; do not build a mechanism to
-  defeat it.
-- Resuming into the middle of a file must go through the same start path every
-  other route uses — see the reload handler's note about that being the whole
-  reason track changes stopped clicking.
-
-Roughly 5-8 hours plus the compile: two hardware sessions.
-
-## Variable playback speed — 1.2x is reachable, 2x is NOT (requested 2026-08-10)
-
-The mechanism already exists. `R_PCM_RATE` sets the FIFO drain rate and the
-firmware already computes it per file, so scaling it is one line. That buys
-speed WITH pitch shift — the chipmunk effect — which is tolerable for spoken
-word and unacceptable for music.
-
-**The decoder is the ceiling, and it rules out the speeds people actually ask
-for.** Playing at N x means decoding N x as many frames per second, against the
-Stage 0 measurements of what decode costs of the 60 MHz budget:
-
-| speed | typical (128k/44.1) | worst case (320k/48) |
-|-------|---------------------|----------------------|
-| 1x    | 33.9 MHz            | 45.7 MHz             |
-| 1.2x  | 40.7                | 54.8 — tight         |
-| 1.5x  | 50.9                | 68.6 — OVER          |
-| 2x    | 67.8 — OVER         | 91.4                 |
-| 3x    | 102                 | 137                  |
-
-So 1.2x works, 1.5x works on ordinary files and breaks on 320 kbps, and 2x/3x
-cannot work at all. There is no clocking out of it either: clk_sys is 60 MHz
-because the worst slack observed across fits implied fmax around 66, which is
-why 70 was judged a coin flip (see the rev 13 entry).
-
-Pitch preservation would need WSOLA or a phase vocoder on top of that, adding
-DSP to the budget that is already the binding constraint — and it would eat the
-same headroom the speed-up needs. Not viable as the design stands.
-
-**If this is built, build it for spoken word and say so**: 1.2x/1.5x only,
-pitch-shifted, and leave 2x off the list rather than shipping something that
-stutters.
-
-### BUILT AND PARKED on branch `speed-1.2x` (2026-08-10)
-
-Implemented, HW-tested, **not merged**. User verdict: "works, but is a little
-rough." Two open defects, and the first is the reason it is parked.
-
-**1. Seek/elapsed wrong at 1.2x on some files — FIXED 2026-08-11**, and it was
-not a speed bug at all. See the Fixed entry below; the short version is that
-three files were CBR with no Xing header, so the exact rate was available and
-being discarded in favour of a measurement. HW-confirmed at 1.2x and 1.0x.
-
-**2. Occasional distortion when engaging 1.2x — STILL OPEN.** Consistent with
-the budget table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of
-60, so a dense passage can miss and underrun the FIFO. Likely inherent, and a
-disclosable limitation rather than a fault -- which is what makes the
-experimental label below honest rather than a hedge for something broken.
-
-**A method note worth more than either defect.** Before the hardware test I
-asserted that speed could not disturb the elapsed clock, having grepped
-`ui_sec *=` and found only two resets and the seek path — all file-domain.
-But the steady-state update is `ui_sec++` at line 2497, driven by decoded
-frames, and an assignment search cannot find an increment. The check was
-structurally incapable of contradicting the conclusion it was run to test,
-which is the same failure as seeding a simulation at its own fixed point.
-**When a search comes back clean, ask what shape of code it could not have
-matched.**
-
-### Shipping it as EXPERIMENTAL is on the table (user, 2026-08-11)
-
-If 1.2x never reaches "correct on every file", the user may ship it labelled
-an experimental feature rather than hold it back. Their call, not to be made
-by whoever picks this up. What that would require:
-
-- **README says so plainly** -- experimental, pitch rises with speed, seek can
-  misbehave on some files, and it is meant for spoken word.
-- **Off by default and unpersisted**, which it already is: hold A each session.
-  Nothing about a bad session survives into the next one.
-- **Distortion is disclosed, not fixed.** 1.2x needs up to 54.8 MHz of the
-  60 available, so a dense passage can underrun. That is the budget, not a bug.
-
-The seek defect is the one that decides it. Distortion is a known cost a user
-can hear and accept; a clock that walks backwards looks broken.
-
-### Capturing the seek defect properly -- do this BEFORE attempting a fix
-
-`UI_SHOW_SPEED_DIAG 1` in `fw/player.c` brings back the row:
-
-    1.0x T241 M16003 R16003 K2048
-
-For each file that misbehaves, note T FIRST, then M and R over ten seconds at
-1.0x, then the same held at 1.2x.
-
-- **T non-zero** kills the leading theory outright: the file has a Xing header,
-  `ui_byte_rate()` returns the exact rate, and `meas_rate` is never consulted.
-- **T zero** is the path the 2026-08-10 hold-to-seek bug lived in, and "wrong on
-  some files, fine on others" is that bug's signature. If M drifts at 1.2x while
-  holding steady at 1.0x on the SAME file, that is the fault located.
-
-Also record the file's bitrate and whether it is CBR or VBR. Three files that
-fail and three that do not is worth more than a long session with one.
-
-### Agreed design (2026-08-10): hold A, no persistence
-
-Hold **A** for 1.2x, hold again for normal. Deliberately NOT a Core Setting and
-deliberately not remembered — which is what makes this cheap. No persist slot
-means no register-file widen, so no Quartus compile, no `CORE_VERSION` bump and
-no timing-closure round: **firmware only, rebuilt in seconds.** Resetting to
-normal speed on every launch is also the right default for something you engage
-per-listen rather than per-library.
-
-A currently fires on the EDGE (press), because it is the one control with no
-hold action. Adding one means moving it to resolve on RELEASE, which is already
-the house convention -- see the comment above `poll_input()`: Left/Right and
-Select "both resolve on RELEASE, so the tap action cannot fire and then be
-followed by the hold action for the same press." Reuse that discriminator
-(`PL_HOLD_MS`, 400 ms) rather than inventing a second one, or a long press will
-pause AND change speed.
-
-Two things to get right: the toast has to say which speed is now active, since
-an unlabelled 1.2x just sounds like a bad file; and the seek arithmetic reads
-`ui_byte_rate()`, so confirm a speed change does not make the elapsed clock or
-the seek distance wrong -- that feedback loop is what the FIXED entry on seek
-below is about.
-
-Roughly 2 hours, one hardware test.
-
 ## Track changes take too long — user report 2026-08-12
 
 "Skipping titles needs a bit long time." Real, and measured rather than
@@ -744,9 +581,182 @@ glide/fade pair, the cut-at-press transition, and the confirmed-EOF guard all
 fix real faults. Worth a pass, one at a time, each verified on hardware —
 not a bulk tidy.
 
+## The persisted-settings register file — 5 of 16 slots free
+
+**Was "FULL", and is no longer.** rev 21 widened `set_idx` from 3 bits to 4 in
+`mp3_soc.v`, taking the file from 8 slots to 16. Eleven are spoken for: volume,
+accent, repeat, shuffle, resume point, meter, EQ, resume on/off, and three
+words carrying twelve characters of the playlist stem.
+
+**Five are free**, so the next remembered setting costs nothing but an
+`interact.json` entry. The one after five more needs another widen — and the
+register file is `ramstyle = "logic"`, kept in fabric because BRAM is at 97%,
+so each slot is real LUTs rather than free memory.
+
+Anything stored here is read back through `interact.json`, so see the id rules
+at the top of `fw/settings.inc` before adding one: ids are never renumbered, a
+slider's `max` has to cover the new range, and array order sets the menu order.
+
 # Fixed
 
 Kept for the reasoning, not the status. Nothing here is outstanding.
+
+## Resume where you left off — SHIPPED v1.1.0, extended in v1.2.0
+
+Restore the playlist position, and optionally the offset within the track, on
+next launch. The better of the two requests from that day: it works exactly as
+asked and fits the architecture.
+
+Persistence goes through the `interact.json` vars APF stores in its own file —
+the one mechanism here that has never touched the user's music, unlike the two
+that did. A position update is two MMIO writes and no SD access, so ticking it
+once a second is free. Restoring is `load_track()` plus a seek, and both the
+seek and the frame resync already exist.
+
+Needs two slots (track index, byte offset) and probably a third for an on/off
+switch, since resuming mid-track surprises people who did not ask for it. See
+the register-file item above.
+
+Three things to design around:
+
+- **The `.m3u` may have changed.** Store a hash of the track's filename beside
+  the index and fall back to track 1 when it does not match, or the saved index
+  silently points at a different track.
+- **APF may not flush its persist file on a hard power-off**, so the last few
+  seconds of position can be lost. Acceptable; do not build a mechanism to
+  defeat it.
+- Resuming into the middle of a file must go through the same start path every
+  other route uses — see the reload handler's note about that being the whole
+  reason track changes stopped clicking.
+
+Roughly 5-8 hours plus the compile: two hardware sessions.
+
+**Shipped.** v1.1.0 restored the track and position; v1.2.0 added the
+playlist NAME, so it survives using a list other than playlist.m3u. Scope is
+one bookmark — see the note under the v1.2.0 defect.
+
+## Variable playback speed — SHIPPED, hold A for 1.2x
+
+The mechanism already exists. `R_PCM_RATE` sets the FIFO drain rate and the
+firmware already computes it per file, so scaling it is one line. That buys
+speed WITH pitch shift — the chipmunk effect — which is tolerable for spoken
+word and unacceptable for music.
+
+**The decoder is the ceiling, and it rules out the speeds people actually ask
+for.** Playing at N x means decoding N x as many frames per second, against the
+Stage 0 measurements of what decode costs of the 60 MHz budget:
+
+| speed | typical (128k/44.1) | worst case (320k/48) |
+|-------|---------------------|----------------------|
+| 1x    | 33.9 MHz            | 45.7 MHz             |
+| 1.2x  | 40.7                | 54.8 — tight         |
+| 1.5x  | 50.9                | 68.6 — OVER          |
+| 2x    | 67.8 — OVER         | 91.4                 |
+| 3x    | 102                 | 137                  |
+
+So 1.2x works, 1.5x works on ordinary files and breaks on 320 kbps, and 2x/3x
+cannot work at all. There is no clocking out of it either: clk_sys is 60 MHz
+because the worst slack observed across fits implied fmax around 66, which is
+why 70 was judged a coin flip (see the rev 13 entry).
+
+Pitch preservation would need WSOLA or a phase vocoder on top of that, adding
+DSP to the budget that is already the binding constraint — and it would eat the
+same headroom the speed-up needs. Not viable as the design stands.
+
+**If this is built, build it for spoken word and say so**: 1.2x/1.5x only,
+pitch-shifted, and leave 2x off the list rather than shipping something that
+stutters.
+
+### BUILT AND PARKED on branch `speed-1.2x` (2026-08-10)
+
+Implemented, HW-tested, **not merged**. User verdict: "works, but is a little
+rough." Two open defects, and the first is the reason it is parked.
+
+**1. Seek/elapsed wrong at 1.2x on some files — FIXED 2026-08-11**, and it was
+not a speed bug at all. See the Fixed entry below; the short version is that
+three files were CBR with no Xing header, so the exact rate was available and
+being discarded in favour of a measurement. HW-confirmed at 1.2x and 1.0x.
+
+**2. Occasional distortion when engaging 1.2x — STILL OPEN.** Consistent with
+the budget table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of
+60, so a dense passage can miss and underrun the FIFO. Likely inherent, and a
+disclosable limitation rather than a fault -- which is what makes the
+experimental label below honest rather than a hedge for something broken.
+
+**A method note worth more than either defect.** Before the hardware test I
+asserted that speed could not disturb the elapsed clock, having grepped
+`ui_sec *=` and found only two resets and the seek path — all file-domain.
+But the steady-state update is `ui_sec++` at line 2497, driven by decoded
+frames, and an assignment search cannot find an increment. The check was
+structurally incapable of contradicting the conclusion it was run to test,
+which is the same failure as seeding a simulation at its own fixed point.
+**When a search comes back clean, ask what shape of code it could not have
+matched.**
+
+### Shipping it as EXPERIMENTAL is on the table (user, 2026-08-11)
+
+If 1.2x never reaches "correct on every file", the user may ship it labelled
+an experimental feature rather than hold it back. Their call, not to be made
+by whoever picks this up. What that would require:
+
+- **README says so plainly** -- experimental, pitch rises with speed, seek can
+  misbehave on some files, and it is meant for spoken word.
+- **Off by default and unpersisted**, which it already is: hold A each session.
+  Nothing about a bad session survives into the next one.
+- **Distortion is disclosed, not fixed.** 1.2x needs up to 54.8 MHz of the
+  60 available, so a dense passage can underrun. That is the budget, not a bug.
+
+The seek defect is the one that decides it. Distortion is a known cost a user
+can hear and accept; a clock that walks backwards looks broken.
+
+### Capturing the seek defect properly -- do this BEFORE attempting a fix
+
+`UI_SHOW_SPEED_DIAG 1` in `fw/player.c` brings back the row:
+
+    1.0x T241 M16003 R16003 K2048
+
+For each file that misbehaves, note T FIRST, then M and R over ten seconds at
+1.0x, then the same held at 1.2x.
+
+- **T non-zero** kills the leading theory outright: the file has a Xing header,
+  `ui_byte_rate()` returns the exact rate, and `meas_rate` is never consulted.
+- **T zero** is the path the 2026-08-10 hold-to-seek bug lived in, and "wrong on
+  some files, fine on others" is that bug's signature. If M drifts at 1.2x while
+  holding steady at 1.0x on the SAME file, that is the fault located.
+
+Also record the file's bitrate and whether it is CBR or VBR. Three files that
+fail and three that do not is worth more than a long session with one.
+
+### Agreed design (2026-08-10): hold A, no persistence
+
+Hold **A** for 1.2x, hold again for normal. Deliberately NOT a Core Setting and
+deliberately not remembered — which is what makes this cheap. No persist slot
+means no register-file widen, so no Quartus compile, no `CORE_VERSION` bump and
+no timing-closure round: **firmware only, rebuilt in seconds.** Resetting to
+normal speed on every launch is also the right default for something you engage
+per-listen rather than per-library.
+
+A currently fires on the EDGE (press), because it is the one control with no
+hold action. Adding one means moving it to resolve on RELEASE, which is already
+the house convention -- see the comment above `poll_input()`: Left/Right and
+Select "both resolve on RELEASE, so the tap action cannot fire and then be
+followed by the hold action for the same press." Reuse that discriminator
+(`PL_HOLD_MS`, 400 ms) rather than inventing a second one, or a long press will
+pause AND change speed.
+
+Two things to get right: the toast has to say which speed is now active, since
+an unlabelled 1.2x just sounds like a bad file; and the seek arithmetic reads
+`ui_byte_rate()`, so confirm a speed change does not make the elapsed clock or
+the seek distance wrong -- that feedback loop is what the FIXED entry on seek
+below is about.
+
+Roughly 2 hours, one hardware test.
+
+**Shipped.** Hold A toggles 1.2x, off every launch, documented in the README
+along with the distortion it can cause. Still open, separately: the 400 ms
+hold threshold is shared with the seek and may be too easy to hit by
+accident — see its own entry.
+
 
 ## No internals on screen, and the filename when a file has no tag — 2026-08-12
 
