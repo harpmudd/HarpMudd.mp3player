@@ -113,8 +113,16 @@ holding, so it is one bookmark rather than one per list."
 
 ## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
 
-Intermittent, and MORE COMMON than "rare" -- the user corrected that framing
-on 2026-08-13, having twice needed three attempts. Picking a playlist from the
+Intermittent. The user corrected an earlier "rare" framing on 2026-08-13,
+having twice needed three attempts -- **but that estimate predates 03adc3d**,
+which found the menu-close fallback had never once completed a load (a
+self-cancelling dedupe, and a closing edge that could not fire). Expect the
+frequency to be lower than anything measured before that commit; nothing yet
+measures how much lower.
+
+The README wording was softened to match on the same day, at the user's call.
+Put it back if reports say otherwise -- the frequency claim there is the least
+evidenced thing in that file. Picking a playlist from the
 Core menu sometimes has no effect at all: no LOADING message, no load, and
 waiting does not help. Picking again works.
 

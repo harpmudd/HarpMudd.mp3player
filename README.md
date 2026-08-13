@@ -177,10 +177,8 @@ framework bugs that had to be found first — is in
 - **Playlists are capped at 128 tracks**, or 16 KB of `.m3u` text — whichever
   comes first, which allows about 128 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **Picking a playlist sometimes does nothing.** No loading message and no
-  change, because the core is never told the pick happened. Picking it again
-  works, though it can occasionally take a couple of tries. Intermittent, and
-  only ever seen when switching from one playlist to another.
+- **Occasionally a playlist pick doesn't take.** Pick it again and it loads.
+  Only seen when switching from one playlist to another.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
