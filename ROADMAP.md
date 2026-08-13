@@ -195,6 +195,24 @@ evidence — but all three earn their place on other grounds.
 If it ever returns it clears all three at once, leaving "APF never made the
 assignment" as the only surviving explanation.
 
+### 2026-08-13: it did return, and the mitigations were not running
+
+Two bugs, either sufficient alone, meant the menu-close fallback had **never
+once completed a load** since it was added: it set the dedupe timestamp at the
+same moment it raised its own request, so the notification handler discarded
+that request one iteration later; and the open/closed memory was paused's menu
+bit, which `load_track()` clears wholesale.
+
+The design fault underneath: noticing a pick had exactly ONE route, so every
+bug in it was total. There are four now, failing independently -- 008A tagged
+for slot 3, 008A tagged for slot 2 (the RTL can mis-attribute), the menu-close
+edge, and a 3 s identity poll that depends on neither notification nor edge.
+
+**Measured, and it corrects a standing claim:** a 0190 getfile on slot 3 every
+3 s while streaming produces NO audible tic. The warning against polling slot 3
+applies to slot READS walking the cluster chain, not to a metadata query. The
+RTL comment that stated it absolutely has been corrected.
+
 Documented in the README as a known limitation, so a user who does hit it
 knows to pick again rather than assuming the core is broken.
 

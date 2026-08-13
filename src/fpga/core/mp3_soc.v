@@ -298,9 +298,16 @@ module mp3_soc #(
 
     // The playlist slot raises 008A exactly as the MP3 slot does, but the edge
     // above is gated on the MP3 id -- so without this a "Load Playlist" pick is
-    // invisible to firmware and silently does nothing. Polling slot 3 instead is
-    // NOT an option: touching a different slot makes APF drop its fragment cache
-    // for the MP3 slot, and every refill then re-walks the FAT cluster chain.
+    // invisible to firmware and silently does nothing.
+    //
+    // This comment used to add that polling slot 3 was NOT an option, because
+    // touching another slot makes APF drop its fragment cache for the MP3 slot
+    // and every refill then re-walks the FAT cluster chain. That is true of a
+    // slot READ (0180) and was measured. It is NOT true of a 0190 getfile:
+    // firmware polls slot 3's identity every 3 s while streaming and no tic is
+    // audible (measured 2026-08-13). A metadata query does not walk the chain.
+    // The distinction matters -- the poll is the only recovery route that
+    // depends on neither this notification nor a menu edge.
     wire pl_reload_edge = (upd_sync[2] ^ upd_sync[1]) && (upd_id_74 == PL_SLOT_ID);
 
     reg mp3_reloaded, pl_reloaded;
