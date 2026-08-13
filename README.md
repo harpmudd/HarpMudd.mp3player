@@ -57,8 +57,9 @@ restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset are
 remembered between sessions, and the controls and **Core Settings** stay in
-step. **Where you were in a playlist is remembered too** — the track and your
-position in it. Turn that off with **Resume playback** in Core Settings.
+step. **Where you were in a playlist can be remembered too** — the track and
+your position in it. That one is off until you ask for it: switch on **Resume
+playback** in Core Settings.
 
 Only one place is remembered, for the last playlist you used. Switch to another
 list and the first one starts over next time.

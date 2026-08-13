@@ -17,9 +17,15 @@ What changed in each release, newest first.
 ## v1.1.0 — 11 August 2026
 
 - **Resume where you left off** in a playlist — the track and your position in
-  it. Turn it off in Core Settings.
+  it. Switch it on in Core Settings.
 - **1.2× playback speed** for spoken word. Hold **A**.
-- Fixed: seeking landed in the wrong place on some files.
+- Screen blanking moved to **Select + Down**.
+- The album art panel and the screen-blank timeout are no longer remembered
+  between launches — their saved slots went to resume. Everything else carries
+  over from v1.0.0.
+- Fixed: seeking landed in the wrong place on files with no Xing header, and
+  their total time was wrong too.
+- Fixed: Load MP3 could lose your pick to a playlist reload.
 
 ## v1.0.0 — 10 August 2026
 
