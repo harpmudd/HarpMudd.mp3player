@@ -343,6 +343,35 @@ static uint32_t fb_text_width(const char *s, uint32_t sx)
  * The screen edge is enforced here rather than trusted to max_w, because
  * max_w is a budget measured from x and every caller would otherwise have to
  * subtract its own x correctly to stay safe. Returns where the text ended. */
+/* As fb_text_clipped, plus a hard right edge the painted CELL may not cross.
+ *
+ * Needed because the two limits below are genuinely different sizes: max_w
+ * budgets ADVANCES, but fb_char paints a whole cell, so the final glyph can
+ * reach (cell - advance) px past the budget -- 12px at TS_1X and 24px at
+ * TS_2X. On the info card that ran the title through the panel's right border,
+ * and left the marquee painting outside the strip it erases, so the overspill
+ * was never cleaned up and accumulated as it scrolled.
+ *
+ * The card has 8px of padding on the left and had none on the right. Passing
+ * its inner edge here makes it symmetric. */
+static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
+                              uint32_t sx, uint32_t sy, uint32_t max_w,
+                              uint32_t paint_r)
+{
+    uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
+    uint32_t limit = x + max_w;
+    if (paint_r > FB_W) paint_r = FB_W;
+    while (*s) {
+        uint32_t a = fb_adv(*s, sx);
+        if (x + a > limit)   break;        /* out of layout budget */
+        if (x + cell > paint_r) break;     /* would paint past the box */
+        fb_char(x, y, *s, sx, sy);
+        x += a;
+        s++;
+    }
+    return x;
+}
+
 static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
                                 uint32_t sx, uint32_t sy, uint32_t max_w)
 {
@@ -951,6 +980,10 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #define UI_PROG_Y   334u
 #define UI_PROG_H   5u
 #define UI_INNER_W  (FB_W - 2u * UI_MARGIN)
+/* Right edge a painted glyph CELL may not cross on the info card. The card
+ * spans UI_MARGIN-8 .. UI_MARGIN-8+UI_INNER_W+16, so this leaves 8px of
+ * padding on the right to match the 8px already on the left. */
+#define UI_CARD_TEXT_R (UI_MARGIN + UI_INNER_W)
 
 #define UI_SHOW_UNDERRUN 0   /* red square, top-right: audio FIFO ran dry */
 #define UI_UNDERRUN_SZ 10u
@@ -1715,10 +1748,14 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
     if (++m->pos > len) m->pos = 0;
     if (m->pos == 0) m->next = cycles() + CLK_HZ;   /* pause at the start */
 
-    fb_rect(UI_MARGIN, m->y, ui_text_w, FB_CELL(m->scale), UI_PANEL);
+    /* Erase the full paintable width, not just the layout budget: a glyph
+     * cell reaches past the budget, and anything painted outside the erased
+     * strip is never cleaned up -- it accumulated as the text scrolled. */
+    fb_rect(UI_MARGIN, m->y, UI_CARD_TEXT_R - UI_MARGIN,
+            FB_CELL(m->scale), UI_PANEL);
     fb_set_color(fg, UI_PANEL);
-    fb_text_clipped(UI_MARGIN, m->y, m->text + m->pos,
-                    m->scale, m->scale, ui_text_w);
+    fb_text_boxed(UI_MARGIN, m->y, m->text + m->pos,
+                  m->scale, m->scale, ui_text_w, UI_CARD_TEXT_R);
 }
 
 static void ui_draw_chrome(void)
@@ -1811,7 +1848,8 @@ static void ui_draw_chrome(void)
     uint32_t ts = TS_2X;
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts, ui_text_w);
+    fb_text_boxed(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts,
+                  ui_text_w, UI_CARD_TEXT_R);
 
     /* Artist one step down from the title, never below 1.5x -- that step only
      * exists because the engine can scale fractionally now. */
@@ -1821,7 +1859,8 @@ static void ui_draw_chrome(void)
     if (track_artist[0]) {
         fb_set_color(UI_DIM, UI_PANEL);
         ui_marq_init(&ui_mq_artist, track_artist, y, as);
-        fb_text_clipped(UI_MARGIN, y, ui_mq_artist.text, as, as, ui_text_w);
+        fb_text_boxed(UI_MARGIN, y, ui_mq_artist.text, as, as,
+                      ui_text_w, UI_CARD_TEXT_R);
         y += FB_CELL(as) + 3u;
     }
 
@@ -1845,7 +1884,8 @@ static void ui_draw_chrome(void)
         while (*yr && q < b + sizeof(b) - 1) *q++ = *yr++;
         *q = 0;
         fb_set_color(UI_DIM, UI_PANEL);
-        fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, ui_text_w);
+        fb_text_boxed(UI_MARGIN, y, b, TS_1X, TS_1X,
+                      ui_text_w, UI_CARD_TEXT_R);
         y += FB_CELL(TS_1X) + 2u;
     }
 
