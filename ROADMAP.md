@@ -113,10 +113,14 @@ holding, so it is one bookmark rather than one per list."
 
 ## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
 
-Rare. Picking a playlist from the Core menu sometimes has no effect at all:
-no LOADING message, no load, and waiting does not help. Picking again works.
-User decision 2026-08-12: **not a deal breaker** — it is rare, and the natural
-user response (pick again) is also the workaround.
+Intermittent, and MORE COMMON than "rare" -- the user corrected that framing
+on 2026-08-13, having twice needed three attempts. Picking a playlist from the
+Core menu sometimes has no effect at all: no LOADING message, no load, and
+waiting does not help. Picking again works.
+
+User decision 2026-08-12: **not a deal breaker** -- the natural user response
+(pick again) is also the workaround. That still stands; the frequency does not
+change the decision, only how it is described to users.
 
 ### What the instrumentation actually proved
 
