@@ -4386,6 +4386,22 @@ static uint32_t probe_file_size(void)
     return lo + 4096u;
 }
 
+/* Where APF's 0190 response lands in the datatable.
+ *
+ * These used to live in playlist.inc, which is included further down -- so
+ * slot_file_id() and slot_filename() below could not see them and were still
+ * written against the ORIGINAL layout, with the response at word 0. It was
+ * moved to word 64 because APF's dataslot ID/size table occupies the start of
+ * this BRAM and every 0190 was overwriting it; these two never followed.
+ *
+ * They have therefore been reading the ID/SIZE TABLE this whole time: binary
+ * pairs with no text in them, so slot_filename() found no printable run and
+ * track_file came back EMPTY on every load. That is why an untagged file
+ * showed UNKNOWN TRACK instead of its name. */
+#define DT_RESP_W   64u     /* response struct  (APF writes) */
+#define DT_PARAM_W  128u    /* parameter struct (APF reads)  */
+#define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window */
+
 static void slot_filename(char *out, uint32_t out_size);
 
 /* Ask APF which file is CURRENTLY in the slot (0190) and reduce its response
@@ -4410,8 +4426,8 @@ static uint32_t slot_file_id(void)
     slot_filename(track_file, sizeof(track_file));
 
     uint32_t h = 2166136261u;                   /* FNV-1a over the struct */
-    for (uint32_t w = 0; w < 64u; w++) {
-        uint32_t v = dt_read(w);
+    for (uint32_t w = 0; w < DT_WORDS; w++) {
+        uint32_t v = dt_read(DT_RESP_W + w);
         for (int b = 0; b < 4; b++) {
             h ^= (v >> (b * 8)) & 0xFFu;
             h *= 16777619u;
@@ -4424,9 +4440,9 @@ static uint32_t slot_file_id(void)
  * longest run of printable ASCII in the struct IS the name. */
 static void slot_filename(char *out, uint32_t out_size)
 {
-    uint8_t raw[256];
-    for (uint32_t w = 0; w < 64u; w++) {
-        uint32_t v = dt_read(w);
+    uint8_t raw[DT_WORDS * 4u];
+    for (uint32_t w = 0; w < DT_WORDS; w++) {
+        uint32_t v = dt_read(DT_RESP_W + w);
         /* BIG-endian unpack: the bridge byte-swaps, and a little-endian
          * unpack scrambles the name into 4-byte groups. */
         raw[w * 4 + 0] = (uint8_t)(v >> 24);

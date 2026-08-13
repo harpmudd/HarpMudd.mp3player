@@ -42,9 +42,8 @@
  * this BRAM as {slot_id, size} pairs -- measured, see core_game.vh. The
  * response struct used to sit at word 0 and APF overwrote the table with it on
  * every 0190. */
-#define DT_RESP_W   64u     /* response struct  (APF writes) */
-#define DT_PARAM_W  128u    /* parameter struct (APF reads)  */
-#define DT_WORDS    64u     /* 256 bytes, matching slot_filename()'s window */
+/* DT_RESP_W / DT_PARAM_W / DT_WORDS are defined in player.c, above
+ * slot_file_id() -- which needs them and is compiled before this file. */
 
 static inline void dt_write(uint32_t word, uint32_t val)
 {
