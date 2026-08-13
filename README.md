@@ -7,6 +7,8 @@ persistence and resume — it remembers where you were in a playlist.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
+Release history: [CHANGELOG.md](CHANGELOG.md).
+
 ## Installing
 
 Copy the `Cores`, `Platforms` and `Assets` folders onto the root of your
