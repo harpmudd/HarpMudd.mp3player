@@ -12,6 +12,31 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
+# Releasing
+
+**Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
+running list and stays flat, one line an item. A GitHub release body carries
+the same content grouped under **New** / **Changed** / **Fixed**, which earns
+its place there because a release is read once, on its own, by someone
+deciding whether to update.
+
+Same facts either way. If they disagree, the changelog is right.
+
+**Edit release bodies IN PLACE:**
+
+```
+PATCH /repos/{owner}/{repo}/releases/{id}   {"body": "..."}
+```
+
+Auth is the cached git credential (`git credential fill`); there is no gh CLI
+here. **Never delete and recreate a release to change its text** — the Pocket
+core updaters poll constantly, so that zeroes the asset's download count and
+briefly removes the file they are fetching. Delete only when the attached zip
+itself has to change.
+
+Also at release time: add the date to the changelog entry, which is left off
+until a version is actually tagged.
+
 # Defects
 
 Fixed before anything in Enhancements, regardless of how interesting the
