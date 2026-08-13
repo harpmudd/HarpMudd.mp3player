@@ -1105,10 +1105,10 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * atmosphere instead of a second meter. It also pays for itself: quantised to
  * a few steps, most frames leave it alone entirely.
  *
- * Self-erasing: bands past the current reach are painted with the bed itself,
- * so there is no separate erase pass. Quantised into 4-row strips purely to
- * keep the rect count down -- the box is one flat colour, so there is no ramp
- * to step against. */
+ * Self-erasing: bands past the current reach are painted with the background
+ * itself, so there is no separate erase pass. Quantised into 4-row strips to
+ * keep the rect count down; the ramp moves well under one level across four
+ * rows, so stepping it there is not visible where a flat fill was. */
 #define EYE_GLOW_RX    72u        /* how far the light reaches outward    */
 #define EYE_GLOW_RY    20u        /* ...and half how tall the pool is     */
 #define EYE_GLOW_NB     9u        /* bands across that reach -- 8px each  */
@@ -2807,10 +2807,25 @@ static void ui_draw_dynamic(void)
               * throw for the strip rather than just more glass. */
              uint32_t bh   = 38u;                     /* ...and its height   */
             uint32_t basy = ty + EYE_TUBE_H + 1u;    /* plinth              */
-            uint16_t basc = ui_mix(bed, ui_accent, 1u, 3u);
+            uint16_t basc = ui_mix(ui_grad_at(ty + EYE_TUBE_H + 1u),
+                                   ui_accent, 1u, 3u);
 
             if (!eye_face) {
-                fb_rect(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H, bed);
+                /* Per ROW, not one flat fill.
+                 *
+                 * Every other meter fills this box with `bed` -- the gradient
+                 * sampled once at the box's top row -- and gets away with it
+                 * because its content covers the box. This meter is the first
+                 * with large EMPTY areas, so it is the first to show that a
+                 * flat slab on a per-row gradient is a visible rectangle: the
+                 * ramp falls from 16.1/31 at the top of the box to 9.9/31 at
+                 * the bottom, and the slab holds the top value throughout.
+                 *
+                 * Painting the real ramp means the meter has no background of
+                 * its own -- it sits on the screen's, and the glow fans into
+                 * it with nothing to fan against. */
+                for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H; y++)
+                    fb_rect(UI_MARGIN, y, ww, 1, ui_grad_at(y));
 
                 for (uint32_t ch = 0; ch < 2u; ch++) {
                     uint32_t tx = x0 + ch * (EYE_TUBE_W + EYE_TUBE_G);
@@ -2977,14 +2992,13 @@ static void ui_draw_dynamic(void)
                         uint32_t y   = top + k;
                         uint32_t mid = y + EYE_GLOW_S / 2u;
                         uint32_t dy  = (mid > gcy) ? (mid - gcy) : (gcy - mid);
-                        /* `bed`, NOT ui_grad_at(y). The meter box is filled
-                         * with ONE colour -- the gradient sampled at its top
-                         * row -- and every meter draws against that. Mixing
-                         * against the true per-row ramp instead made the glow
-                         * band 30-40%% darker than the box around it, which
-                         * showed as a black rectangle behind the tubes,
-                         * worst on the colours with the steepest ramp. */
-                        uint16_t bg  = bed;
+                        /* The real ramp for this row, matching what the box
+                         * is now painted with. An earlier attempt used the
+                         * flat `bed` instead: that removed the dark band, and
+                         * replaced it with a lighter slab that did not match
+                         * the gradient either. The band was never the bug --
+                         * the flat box fill was. */
+                        uint16_t bg  = ui_grad_at(y);
 
                         /* Rows outside the pool get rx 0 and fall straight
                          * through to the bed fill, which is what erases the
@@ -3048,8 +3062,9 @@ static void ui_draw_dynamic(void)
                      * solid block between the tubes. */
                     if (wgt > 40u) wgt = 40u;
 
+                    uint16_t bg = ui_grad_at(y);
                     fb_rect(gx, y, EYE_TUBE_G, h,
-                            wgt ? ui_mix(bed, EYE_LIT, wgt, 64u) : bed);
+                            wgt ? ui_mix(bg, EYE_LIT, wgt, 64u) : bg);
                 }
                 eye_gap_l = key_of[0];
                 eye_gap_r = key_of[1];
