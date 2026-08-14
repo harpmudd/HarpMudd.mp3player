@@ -281,6 +281,18 @@ if __name__ == '__main__':
     print(f"  {frames} frames, {samples} samples, {scans} frames needed a sync scan")
     if digest is None:
         sys.exit(1)
+    # An all-zero digest is FLAC's "not computed", not a mismatch. Every
+    # 24-bit file on the test card has one -- the tagging pipeline zeroes it --
+    # so reporting MISMATCH here would be a false alarm on most of the corpus.
+    if si['md5'] == b' ' * 16:
+        print("  STREAMINFO md5 ABSENT -- the encoder stored none")
+        print(f"  decoded    md5 {digest.hex()}")
+        print("  ==> CANNOT VERIFY arithmetic; but the parse is exact:")
+        print(f"      {samples} samples decoded vs {si['total']} declared"
+              f" ({'match' if samples == si['total'] else 'MISMATCH'})")
+        print(f"      {scans} frames needed a sync scan"
+              f" ({'exact bit consumption' if scans == 0 else 'DESYNC'})")
+        sys.exit(0 if (samples == si['total'] and scans == 0) else 1)
     ok = digest == si['md5']
     print(f"  STREAMINFO md5 {si['md5'].hex()}")
     print(f"  decoded    md5 {digest.hex()}")
