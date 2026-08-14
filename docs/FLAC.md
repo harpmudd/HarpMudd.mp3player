@@ -235,3 +235,66 @@ heap minimum, so this specific mistake fails the build instead of shipping.
 
 **Scope limit: 16-bit / 44.1 kHz.** 24/96 is not worth attempting — it doubles
 the throughput problem to reach an output that is 16/48 regardless.
+
+---
+
+## CORRECTION 2026-08-14 — the CPU estimate above was wrong
+
+First hardware playback, four files from the test card:
+
+| file | format | bitrate | result |
+|---|---|---|---|
+| Pink Floyd — The Show Must Go On | 16/44.1 | 843 kbps | **plays clean** |
+| Psychedelic Furs — The Boy That Invented Rock & Roll | 24/44.1 | 1635 kbps | hiccups |
+| Jerry Garcia — Alabama Getaway | 24/88.2 | 2501 kbps | hiccups |
+| Circles Around the Sun — Third Sunrise Over Gliese | 24/96 | 3149 kbps | hiccups |
+
+The Furs file is the one that matters. It runs at **the same sample rate** as
+the file that plays perfectly, and it still hiccups — so the difference is bit
+depth alone, and "§1 CPU — comfortable" was reasoning from the wrong variable.
+
+**Cost tracks BITRATE, not sample rate.** The reason is the bit reader, not the
+arithmetic: 24-bit residuals are larger, so each sample carries more coded bits
+(9.6 bits/sample for the Pink Floyd file against 18.5 for the Furs). The LPC
+and Rice work per sample is essentially unchanged by depth; the bits pulled
+through the reader roughly double. A cost model built on samples/second could
+never have seen that.
+
+The corollary is that the tier table in §1 should be read as a **bitrate**
+table. Anything near 850 kbps is fine; the failures start somewhere between
+that and 1635, and the exact cutoff has to be measured, not derived — the same
+mistake twice would be careless.
+
+### Attribution before optimisation
+
+"The decoder cannot keep up" and "the ring is starved" both present as
+hiccups and need opposite fixes, so guessing between them was not worth a
+hardware round trip. The diagnostic row now reports, per second:
+
+- **D** — percent of the second spent idle, waiting on a full FIFO
+- **O** — percent spent blocked in `flac_pull` waiting for bytes
+- **U** — underrun edges since boot, i.e. the audible fault itself
+
+Read D and O together. High D with underruns means the decoder is fast enough
+and the ring is the problem — worth noting because the ring was just cut from
+32 KB to 24 KB to make room for the decoder, which at 204 KB/s holds only about
+0.12 s. Both near zero means the decoder genuinely cannot keep up.
+
+### What was done anyway, because it was cheap and safe
+
+All on the per-sample path, all verified against the reference decoder:
+
+1. **64-bit bit reservoir**, refilled four bytes at a time instead of one.
+2. **`unary()` by `__builtin_clzll`** rather than one iteration per zero bit.
+3. **Hot functions at `-O2`**, the rest of `flac.c` still `-Os`. The whole file
+   at `-O2` does not link — the heap assert in `link.ld` catches it — but the
+   five functions on the per-sample path do fit.
+4. **Word-at-a-time copy out of the ring**, which is UNCACHED, so every byte
+   there was a separate bus transaction.
+5. **`wasted == 0` fast path** in the FIXED and LPC loops, removing one
+   variable shift per tap on the dominant inner loop.
+
+Two of these were nearly bugs and are worth recording: capping the reservoir at
+63 bits matters because `1 << bitcnt` is undefined at 64, and the first version
+of the leading-zero count scanned bit by bit, which would have made `unary()`
+*slower* than what it replaced.
