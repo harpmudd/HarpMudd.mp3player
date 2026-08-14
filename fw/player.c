@@ -5816,6 +5816,12 @@ static int load_track(void)
     track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
     bytes_per_sec = 16000u;
     paused = 0;
+    /* `stopped` is sticky and was cleared in exactly ONE place -- the A handler,
+     * on un-pause. A new track starts PLAYING, so leaving it set meant the
+     * first A press paused while the transport still read STOPPED, and it took
+     * a second play/pause to clear. Clearing it here is what `paused = 0`
+     * already means: this track is running, not parked at 0:00. */
+    stopped = 0;
     seek_req = 0; soft_restart_req = 0;
     st0 = 0; REG(R_STAT0) = 0; REG(R_STAT1) = 0; REG(R_STAT2) = 0; REG(R_STAT3) = 0;
     st0 |= (1u << 0); REG(R_STAT0) = st0;            /* decoder up */

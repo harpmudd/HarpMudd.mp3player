@@ -232,9 +232,97 @@ static void art_flush_row(uint32_t ay, uint32_t aw, uint32_t ah)
         art_emit_row(art_line, aw, dy);
 }
 
+/* ---- FLAC: METADATA_BLOCK_PICTURE (type 6) -----------------------------
+ *
+ * Only the FINDER differs from the ID3 path. Both set art_jpg_pos/art_jpg_end
+ * to an absolute byte range in the file, and everything downstream -- the
+ * windowed reader, picojpeg, the scaler, the stash -- is untouched.
+ *
+ * The block is all BIG-endian (unlike the Vorbis comment block next to it,
+ * which is little-endian; FLAC mixes the two):
+ *   u32 picture type, u32 mime len + mime, u32 desc len + desc,
+ *   u32 width, height, depth, colours, u32 data len, then the image.
+ *
+ * Prefers picture type 3 (front cover): the Psychedelic Furs file on the test
+ * card carries TWO picture blocks, and taking the first would be a coin toss.
+ */
+static uint32_t art_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+}
+
+static int art_find_flac_picture(void)
+{
+    if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 4u)) return 0;
+    if (tagbuf[0] != 'f' || tagbuf[1] != 'L' ||
+        tagbuf[2] != 'a' || tagbuf[3] != 'C') return 0;
+
+    uint32_t off = 4u, best_pos = 0, best_end = 0;
+    int best_front = 0;
+
+    /* Bounded: a corrupt length must not turn this into an unbounded walk. */
+    for (uint32_t guard = 0; guard < 64u; guard++) {
+        if (!target_read_slot(MP3_SLOT_ID, off, TAG_OFF, 4u)) break;
+        uint32_t last = (uint32_t)(tagbuf[0] >> 7);
+        uint32_t type = (uint32_t)(tagbuf[0] & 0x7Fu);
+        uint32_t len  = ((uint32_t)tagbuf[1] << 16)
+                      | ((uint32_t)tagbuf[2] << 8) | (uint32_t)tagbuf[3];
+        uint32_t body = off + 4u;
+
+        if (type == 6u && len > 32u && len <= ART_MAX_BYTES) {
+            /* Headers only. 1 KB covers any sane MIME and description, and
+             * bounds the read against a 59 KB block. */
+            uint32_t win = len < 1024u ? len : 1024u;
+            if (!target_read_slot(MP3_SLOT_ID, body, TAG_OFF, win)) break;
+
+            uint32_t ptype = art_be32(&tagbuf[0]);
+            uint32_t mlen  = art_be32(&tagbuf[4]);
+            uint32_t q     = 8u;
+
+            /* picojpeg is baseline JPEG only, and PNG cover art is common. */
+            int jpg = 0;
+            if (mlen && q + mlen + 4u <= win) {
+                for (uint32_t k = q; k + 2u < q + mlen; k++) {
+                    uint8_t a = tagbuf[k] | 0x20u, b = tagbuf[k+1] | 0x20u,
+                            c = tagbuf[k+2] | 0x20u;
+                    if (a == 'j' && b == 'p' && (c == 'e' || c == 'g')) { jpg = 1; break; }
+                }
+                q += mlen;
+
+                uint32_t dlen = art_be32(&tagbuf[q]); q += 4u + dlen;
+                /* width/height/depth/colours, then the data length. */
+                if (jpg && q + 20u <= win) {
+                    uint32_t dl = art_be32(&tagbuf[q + 16u]);
+                    uint32_t dp = body + q + 20u;
+                    if (dl && dl <= ART_MAX_BYTES && (!best_end || (ptype == 3u && !best_front))) {
+                        best_pos   = dp;
+                        best_end   = dp + dl;
+                        best_front = (ptype == 3u);
+                    }
+                }
+            }
+        }
+
+        off = body + len;
+        if (last) break;
+    }
+
+    if (!best_end) return 0;
+    art_jpg_pos = best_pos;
+    art_jpg_end = best_end;
+    art_win_len = 0;
+    art_win_pos = 0;
+    return 1;
+}
+
 static int art_decode(uint32_t tag_len)
 {
-    if (!tag_len || !art_find_apic(tag_len)) return 0;
+    /* Same decoder, different finder. */
+    int found = (track_fmt == FMT_FLAC)
+              ? art_find_flac_picture()
+              : (tag_len && art_find_apic(tag_len));
+    if (!found) return 0;
     uint32_t jpg_start = art_jpg_pos;        /* to rewind for a second init */
 
     pjpeg_image_info_t info;
