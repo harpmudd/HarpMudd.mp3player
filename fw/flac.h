@@ -51,7 +51,7 @@ typedef struct {
     void         *ctx;
     uint8_t       buf[512];
     uint32_t      have, pos;      /* bytes in buf, and read cursor          */
-    uint64_t      bitacc;         /* bit reservoir, refilled 4 bytes at a time */
+    uint32_t      bitacc;         /* bit reservoir                          */
     uint32_t      bitcnt;
     int           eof;
 

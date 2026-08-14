@@ -5,17 +5,6 @@
 
 /* ------------------------------------------------------------------ input */
 
-/* -Os for the file, -O2 for the hot path.
- *
- * The whole file at -O2 does not fit -- the link fails on the heap assert --
- * but only five functions matter, and the size they cost at -O2 is small
- * enough to pay for. Everything here is on the per-SAMPLE path: the bit
- * reader, the Rice decoder, and the streaming subframe that drives them. The
- * per-frame and per-file code stays -Os, where its size is what counts and
- * its speed does not. */
-#define HOT __attribute__((optimize("O2")))
-#define ALWAYS_INLINE inline __attribute__((always_inline))
-
 static int fill(flac_t *f)
 {
     if (f->pos < f->have) return 1;
@@ -33,47 +22,31 @@ static int byte(flac_t *f)
     return f->buf[f->pos++];
 }
 
-/* MSB-first bit reader over a 64-bit reservoir.
- *
- * It was 32-bit and refilled a byte at a time through byte(), which measured
- * as the bottleneck: hardware plays 843 kbps but hiccups at 1635, and cost
- * tracking BITRATE rather than sample rate points straight at the bit reader
- * -- larger residuals mean more bits per sample, not more samples.
- *
- * 64 bits lets a refill take four bytes at once and leaves room for a 32-bit
- * read without a second top-up. */
-static HOT int need(flac_t *f, uint32_t n)
+/* MSB-first bit reader. The reservoir holds at most 24 bits so a 32-bit
+ * accumulator can always take another byte without shifting anything out. */
+static int need(flac_t *f, uint32_t n)
 {
     while (f->bitcnt < n) {
-        if (f->pos + 4u <= f->have && f->bitcnt <= 31u) {
-            f->bitacc = (f->bitacc << 32)
-                      | ((uint64_t)f->buf[f->pos] << 24)
-                      | ((uint64_t)f->buf[f->pos + 1u] << 16)
-                      | ((uint64_t)f->buf[f->pos + 2u] << 8)
-                      |  (uint64_t)f->buf[f->pos + 3u];
-            f->pos += 4u;
-            f->bitcnt += 32u;
-            continue;
-        }
         int b = byte(f);
         if (b < 0) return 0;
-        f->bitacc = (f->bitacc << 8) | (uint64_t)b;
+        f->bitacc = (f->bitacc << 8) | (uint32_t)b;
         f->bitcnt += 8;
     }
     return 1;
 }
 
-static HOT ALWAYS_INLINE uint32_t bits(flac_t *f, uint32_t n)
+static uint32_t bits(flac_t *f, uint32_t n)
 {
     if (!n) return 0;
-    if (f->bitcnt < n && !need(f, n)) return 0;
+    if (!need(f, n)) return 0;
     f->bitcnt -= n;
-    return (uint32_t)((f->bitacc >> f->bitcnt)
-                      & (n == 32u ? 0xFFFFFFFFu : ((1u << n) - 1u)));
+    uint32_t v = (f->bitacc >> f->bitcnt) & (n == 32u ? 0xFFFFFFFFu
+                                                      : ((1u << n) - 1u));
+    return v;
 }
 
 /* Sign-extend an n-bit two's complement value. */
-static HOT int32_t sbits(flac_t *f, uint32_t n)
+static int32_t sbits(flac_t *f, uint32_t n)
 {
     if (!n) return 0;
     uint32_t v = bits(f, n);
@@ -81,33 +54,16 @@ static HOT int32_t sbits(flac_t *f, uint32_t n)
     return (int32_t)v;
 }
 
-/* Unary: count zeros up to the first 1. Every Rice residual calls this, so it
- * is the hottest function in the decoder.
- *
- * Scans the whole reservoir at once instead of one bit per iteration. The
- * bit-at-a-time version cost a call to need() and a shift PER ZERO, which at
- * 24-bit residual sizes is most of the decode. */
-static HOT uint32_t unary(flac_t *f)
+/* Unary: count zeros up to the first 1. Used by every Rice residual. */
+static uint32_t unary(flac_t *f)
 {
     uint32_t n = 0;
     for (;;) {
-        if (!f->bitcnt && !need(f, 1)) return n;
-
-        uint64_t win = f->bitacc & (((uint64_t)1 << f->bitcnt) - 1u);
-        if (win) {
-            /* Leading zeros inside the live window. __builtin_clzll is a
-             * handful of instructions; counting them by shifting would cost
-             * one iteration per bit of the RESERVOIR, which is slower than
-             * the bit-at-a-time version this replaces. */
-            uint32_t lead = (uint32_t)__builtin_clzll(win) - (64u - f->bitcnt);
-            n += lead;
-            f->bitcnt -= lead + 1u;          /* the zeros and the 1 */
-            return n;
-        }
-
-        n += f->bitcnt;                      /* all zeros -- consume them all */
-        f->bitcnt = 0;
-        if (n > (1u << 20)) return n;        /* corrupt stream, do not hang */
+        if (!need(f, 1)) return n;
+        f->bitcnt--;
+        if ((f->bitacc >> f->bitcnt) & 1u) return n;
+        n++;
+        if (n > 1u << 20) return n;          /* corrupt stream, do not hang */
     }
 }
 
@@ -243,7 +199,7 @@ static flac_err rice_init(flac_t *f, rice_t *r, uint32_t order)
     return FLAC_OK;
 }
 
-static HOT int32_t rice_next(flac_t *f, rice_t *r)
+static int32_t rice_next(flac_t *f, rice_t *r)
 {
     if (!r->left) {                                   /* open next partition */
         if (r->part >= r->parts) return 0;
@@ -263,7 +219,7 @@ static HOT int32_t rice_next(flac_t *f, rice_t *r)
 
 /* Decodes `n` residuals starting at out[0]. Rice partitions are flat in the
  * bitstream, so this can run straight into the caller's reconstruction. */
-static HOT flac_err residual(flac_t *f, uint32_t order, int32_t *out)
+static flac_err residual(flac_t *f, uint32_t order, int32_t *out)
 {
     uint32_t method = bits(f, 2);
     if (method > 1u) return FLAC_ERR_DATA;
@@ -359,7 +315,7 @@ static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
 /* Scales a decoded sample of `bps` bits down to 16 for the DAC. The output
  * is 16/48 whatever the source, so this is not a quality choice -- it is the
  * interface. */
-static HOT ALWAYS_INLINE int16_t to16(int32_t v, uint32_t bps)
+static int16_t to16(int32_t v, uint32_t bps)
 {
     if (bps > 16u) v >>= (int)(bps - 16u);
     else if (bps < 16u) v <<= (int)(16u - bps);
@@ -377,7 +333,7 @@ static HOT ALWAYS_INLINE int16_t to16(int32_t v, uint32_t bps)
  * those overwritten entries. One blocksize buffer instead of two: 18432 bytes
  * for the 4608-sample blocks on the test card, not 36864.
  */
-static HOT flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
+static flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
                                 uint8_t m, flac_sink_fn sink, void *sctx)
 {
     int32_t *buf = f->ch0;
@@ -409,19 +365,10 @@ static HOT flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
         if (e) return e;
         for (uint32_t j = 0; j < order; j++) EMIT(warm[j] << wasted);
         const int8_t *c = fixed_coef[order];
-        /* wasted bits are rare -- almost every real file has none -- but the
-         * shift ran on EVERY TAP regardless, which is `order` wasted
-         * instructions per sample on the hottest loop in the decoder. */
         while (i < n) {
             int32_t p = 0;
-            if (wasted) {
-                for (uint32_t j = 0; j < order; j++)
-                    p += c[j] * (buf[i - 1u - j] >> wasted);
-                EMIT((rice_next(f, &r) + p) << wasted);
-            } else {
-                for (uint32_t j = 0; j < order; j++) p += c[j] * buf[i - 1u - j];
-                EMIT(rice_next(f, &r) + p);
-            }
+            for (uint32_t j = 0; j < order; j++) p += c[j] * (buf[i - 1u - j] >> wasted);
+            EMIT((rice_next(f, &r) + p) << wasted);
         }
     } else if (type >= 32u) {                      /* LPC */
         uint32_t order = type - 31u;
@@ -437,15 +384,9 @@ static HOT flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
         for (uint32_t j = 0; j < order; j++) EMIT(warm[j] << wasted);
         while (i < n) {
             int64_t p = 0;
-            if (wasted) {
-                for (uint32_t j = 0; j < order; j++)
-                    p += (int64_t)coef[j] * (buf[i - 1u - j] >> wasted);
-                EMIT((rice_next(f, &r) + (int32_t)(p >> shift)) << wasted);
-            } else {
-                for (uint32_t j = 0; j < order; j++)
-                    p += (int64_t)coef[j] * buf[i - 1u - j];
-                EMIT(rice_next(f, &r) + (int32_t)(p >> shift));
-            }
+            for (uint32_t j = 0; j < order; j++)
+                p += (int64_t)coef[j] * (buf[i - 1u - j] >> wasted);
+            EMIT((rice_next(f, &r) + (int32_t)(p >> shift)) << wasted);
         }
     } else {
         return FLAC_ERR_DATA;

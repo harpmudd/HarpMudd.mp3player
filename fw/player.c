@@ -569,7 +569,8 @@ static uint32_t pcm_under_n;    /* underrun EDGES since boot, for the diag  */
  * Cycles, not iterations: a wait iteration and a decode iteration are not the
  * same size, and comparing counts of them would prove nothing. */
 static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
-static uint8_t  fl_idle_pct, fl_io_pct;    /* last completed second         */
+static uint32_t fl_emit_cyc;               /* output path, minus the wait   */
+static uint8_t  fl_idle_pct, fl_io_pct, fl_emit_pct;
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -3886,7 +3887,9 @@ static void ui_draw_dynamic(void)
         fl_io_pct   = (uint8_t)(fl_io_cyc   / (CLK_HZ / 100u));
         if (fl_idle_pct > 99u) fl_idle_pct = 99u;
         if (fl_io_pct   > 99u) fl_io_pct   = 99u;
-        fl_idle_cyc = fl_io_cyc = 0u;
+        fl_emit_pct = (uint8_t)(fl_emit_cyc / (CLK_HZ / 100u));
+        if (fl_emit_pct > 99u) fl_emit_pct = 99u;
+        fl_idle_cyc = fl_io_cyc = fl_emit_cyc = 0u;
         char b[64], *q = b;
         /* The speed prefix this row was built for is dropped while the
          * playlist switch is under investigation: measured against the real
@@ -3906,6 +3909,7 @@ static void ui_draw_dynamic(void)
          * this row the two are indistinguishable from the couch. */
         *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
+        *q++ = ' '; *q++ = 'E'; q = ui_dec(q, fl_emit_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
@@ -4741,21 +4745,7 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
         uint32_t avail = ring_fill - ring_rd;
         uint32_t take  = ((uint32_t)(n - got) < avail) ? (uint32_t)(n - got)
                                                        : avail;
-        /* The ring is UNCACHED, so every byte here is a bus transaction.
-         * Copying words cuts that by four. Both cursors are 4-aligned in the
-         * steady state -- flac_pull asks for 512 at a time and ring_rd
-         * advances by what it took -- so the fast path is the normal one, and
-         * the byte loop stays for the ends. */
-        uint32_t i = 0;
-        if ((((uintptr_t)dst + (uint32_t)got) & 3u) == 0u &&
-            ((uintptr_t)&ring[ring_rd] & 3u) == 0u) {
-            uint32_t       *dw = (uint32_t *)(void *)(dst + got);
-            const uint32_t *sw = (const uint32_t *)(const void *)&ring[ring_rd];
-            uint32_t w = take >> 2;
-            for (uint32_t j = 0; j < w; j++) dw[j] = sw[j];
-            i = w << 2;
-        }
-        for (; i < take; i++) dst[got + i] = ring[ring_rd + i];
+        for (uint32_t i = 0; i < take; i++) dst[got + i] = ring[ring_rd + i];
         ring_rd += take;
         got     += (int)take;
     }
@@ -4787,6 +4777,7 @@ static int flac_restart(void)
 static void flac_emit(void *ctx, const int16_t *pcm, uint32_t frames)
 {
     (void)ctx;
+    uint32_t t_in = cycles(), idle0 = fl_idle_cyc;
     for (uint32_t i = 0; i < frames; i++) {
         int32_t l = pcm[i * 2], r = pcm[i * 2 + 1];
         if (fade_left) {
@@ -4806,6 +4797,7 @@ static void flac_emit(void *ctx, const int16_t *pcm, uint32_t frames)
         REG(R_AUDIO) = ((uint32_t)(uint16_t)(int16_t)r << 16)
                      | (uint32_t)(uint16_t)(int16_t)l;
     }
+    fl_emit_cyc += (cycles() - t_in) - (fl_idle_cyc - idle0);
 }
 
 /* Issue a read, then go back to decoding and collect it later.
@@ -6878,10 +6870,15 @@ int main(void)
              * merely delaying it. Being blocked here is the healthy state.
              * This is also where the CPU spends most of its time, so input and
              * I/O are serviced from inside the wait. */
-            while (PCM_FULL(REG(R_PCM_ST))) {
-                poll_input();
-                refill_pump();
-                if (reload_pending) goto next_outer;
+            if (PCM_FULL(REG(R_PCM_ST))) {
+                uint32_t t0 = cycles();
+                do {
+                    poll_input();
+                    refill_pump();
+                    if (reload_pending) { fl_idle_cyc += cycles() - t0;
+                                          goto next_outer; }
+                } while (PCM_FULL(REG(R_PCM_ST)));
+                fl_idle_cyc += cycles() - t0;
             }
             REG(R_AUDIO) = ((uint32_t)(uint16_t)(int16_t)r << 16)
                          | (uint32_t)(uint16_t)(int16_t)l;
