@@ -89,6 +89,13 @@ flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
 typedef void (*flac_sink_fn)(void *ctx, const int16_t *pcm, uint32_t frames);
 flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx);
 
+/* Profiling, present when flac.c is built with FLAC_PROFILE (the default).
+ * Firmware points flac_tick at its cycle counter; leave it null to disable. */
+extern uint32_t (*flac_tick)(void);
+extern uint32_t flac_res_cyc;    /* channel 0, Rice/bit-reader pass */
+extern uint32_t flac_lpc_cyc;    /* channel 0, reconstruction pass  */
+extern uint8_t  flac_order, flac_type;   /* type: 1 FIXED, 2 LPC    */
+
 const char *flac_strerror(flac_err e);
 
 #endif

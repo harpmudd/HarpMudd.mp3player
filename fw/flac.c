@@ -262,6 +262,37 @@ static const int8_t fixed_coef[5][4] = {
 /* Decodes one subframe into `out` (blocksize entries). `bps` is this
  * subframe's sample size, which is one bit wider than the frame's for the
  * side channel of a decorrelated pair. */
+
+/* ---- optional profiling ------------------------------------------------
+ *
+ * D0 says the decoder is over budget but not by HOW MUCH -- it clips at zero,
+ * and "needs 1.2x" and "needs 4x" are the difference between a fixable problem
+ * and one to document instead. These split channel 0's decode into its two
+ * passes so the effort goes where the cycles are.
+ *
+ * Channel 0 specifically, because subframe() runs residual and reconstruction
+ * as SEPARATE passes and they can be timed apart. subframe_stream() interleaves
+ * them by design and cannot be split; channel 1 does the same work, so the
+ * ratio carries.
+ *
+ * The hook is a function pointer so the decoder keeps no firmware dependency
+ * and the host tests leave it null. Two calls per pass per frame -- roughly
+ * ten a second, against 88200 samples. FLAC_PROFILE 0 removes it entirely. */
+#ifndef FLAC_PROFILE
+#define FLAC_PROFILE 1
+#endif
+
+#if FLAC_PROFILE
+uint32_t (*flac_tick)(void);
+uint32_t flac_res_cyc, flac_lpc_cyc;
+uint8_t  flac_order, flac_type;
+#define PROF_T0()   uint32_t prof_t0 = flac_tick ? flac_tick() : 0u
+#define PROF_ADD(A) do { if (flac_tick) (A) += flac_tick() - prof_t0; } while (0)
+#else
+#define PROF_T0()   do {} while (0)
+#define PROF_ADD(A) do {} while (0)
+#endif
+
 static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
 {
     (void)bits(f, 1);                       /* zero bit */
@@ -280,14 +311,21 @@ static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
     } else if (type >= 8u && type <= 12u) { /* FIXED, order 0..4 */
         uint32_t order = type - 8u;
         for (uint32_t i = 0; i < order; i++) out[i] = sbits(f, bps);
+#if FLAC_PROFILE
+        flac_order = (uint8_t)order; flac_type = 1u;
+#endif
+        { PROF_T0();
         flac_err e = residual(f, order, out + order);
-        if (e) return e;
+        PROF_ADD(flac_res_cyc);
+        if (e) return e; }
         const int8_t *c = fixed_coef[order];
+        PROF_T0();
         for (uint32_t i = order; i < n; i++) {
             int32_t p = 0;
             for (uint32_t j = 0; j < order; j++) p += c[j] * out[i - 1u - j];
             out[i] += p;
         }
+        PROF_ADD(flac_lpc_cyc);
     } else if (type >= 32u) {               /* LPC, order 1..32 */
         uint32_t order = type - 31u;
         for (uint32_t i = 0; i < order; i++) out[i] = sbits(f, bps);
@@ -296,14 +334,21 @@ static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
         if (prec == 16u || shift < 0) return FLAC_ERR_DATA;
         int32_t coef[FLAC_MAX_ORDER];
         for (uint32_t i = 0; i < order; i++) coef[i] = sbits(f, prec);
+#if FLAC_PROFILE
+        flac_order = (uint8_t)order; flac_type = 2u;
+#endif
+        { PROF_T0();
         flac_err e = residual(f, order, out + order);
-        if (e) return e;
+        PROF_ADD(flac_res_cyc);
+        if (e) return e; }
+        PROF_T0();
         for (uint32_t i = order; i < n; i++) {
             int64_t p = 0;
             for (uint32_t j = 0; j < order; j++)
                 p += (int64_t)coef[j] * out[i - 1u - j];
             out[i] += (int32_t)(p >> shift);
         }
+        PROF_ADD(flac_lpc_cyc);
     } else {
         return FLAC_ERR_DATA;
     }

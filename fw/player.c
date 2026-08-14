@@ -26,6 +26,13 @@
 #include <stdint.h>
 #include "mp3dec.h"
 #include "font_metrics.h"
+/* Up here, not down beside the FLAC glue where it used to sit. The diagnostic
+ * row is ~800 lines ABOVE that point and reads flac_order, and C would have
+ * taken the undeclared name as an error -- the same ordering trap that once
+ * dropped the IO_BENCH readout with no warning at all. Nothing in these two
+ * headers depends on anything in this file. */
+#include <stdlib.h>                /* malloc/free -- fw/alloc.c provides them */
+#include "flac.h"
 
 #define REG(a)      (*(volatile uint32_t *)(uintptr_t)(a))
 
@@ -570,6 +577,14 @@ static uint32_t pcm_under_n;    /* underrun EDGES since boot, for the diag  */
  * same size, and comparing counts of them would prove nothing. */
 static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
 static uint32_t fl_emit_cyc;               /* output path, minus the wait   */
+/* Decode cycles and the audio they produced, so LOAD can exceed 100%.
+ * D clips at zero the moment the decoder falls behind, which is exactly when
+ * the interesting question starts -- 1.2x over and 4x over need completely
+ * different answers, and D reports both as 0. */
+static uint32_t fl_dec_cyc, fl_dec_samp;
+static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
+static uint16_t fl_load_pct;               /* uncapped: 100 = exactly realtime */
+static uint8_t  fl_res_pct;                /* Rice's share of channel 0        */
 static uint8_t  fl_idle_pct, fl_io_pct, fl_emit_pct;
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
@@ -3889,6 +3904,17 @@ static void ui_draw_dynamic(void)
         if (fl_io_pct   > 99u) fl_io_pct   = 99u;
         fl_emit_pct = (uint8_t)(fl_emit_cyc / (CLK_HZ / 100u));
         if (fl_emit_pct > 99u) fl_emit_pct = 99u;
+        if (fl_dec_samp && fl_rate_hz) {
+            uint64_t num = (uint64_t)fl_dec_cyc * (uint64_t)fl_rate_hz * 100u;
+            uint64_t den = (uint64_t)fl_dec_samp * (uint64_t)CLK_HZ;
+            uint32_t v   = den ? (uint32_t)(num / den) : 0u;
+            fl_load_pct  = (uint16_t)(v > 999u ? 999u : v);
+        }
+        {   uint32_t tot = flac_res_cyc + flac_lpc_cyc;
+            fl_res_pct = tot ? (uint8_t)((uint64_t)flac_res_cyc * 100u / tot) : 0u;
+            flac_res_cyc = flac_lpc_cyc = 0u;
+        }
+        fl_dec_cyc = fl_dec_samp = 0u;
         fl_idle_cyc = fl_io_cyc = fl_emit_cyc = 0u;
         char b[64], *q = b;
         /* The speed prefix this row was built for is dropped while the
@@ -3907,9 +3933,15 @@ static void ui_draw_dynamic(void)
          * fast enough and the ring is the problem; both near zero means the
          * decoder is not fast enough. Those need opposite fixes, and without
          * this row the two are indistinguishable from the couch. */
-        *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
+        /* L is the one that matters: decode cost as a percent of realtime,
+         * NOT capped at 100. R is Rice's share of channel 0 against the
+         * reconstruction pass, and P the LPC order -- together they say which
+         * loop to attack, if attacking it can even be enough. */
+        *q++ = 'L'; q = ui_dec(q, fl_load_pct);
+        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, fl_res_pct);
+        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, flac_order);
+        *q++ = ' '; *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
-        *q++ = ' '; *q++ = 'E'; q = ui_dec(q, fl_emit_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
@@ -4636,8 +4668,6 @@ static void target_flush_slot_cache(void)
     target_read_slot(FW_SLOT_ID, 0, TAG_OFF, 512);
 }
 
-#include <stdlib.h>                /* malloc/free -- fw/alloc.c provides them */
-#include "flac.h"
 
 /* Which decoder the current track needs. Detected from the file's first four
  * bytes, not its extension -- a .flac that is really an MP3 should play, and a
@@ -5565,6 +5595,8 @@ static int load_track(void)
         rate_set       = 1;
         pcm_rate_apply(fl.rate);
         flac_stall     = 0;
+        flac_tick      = cycles;   /* profiling hook, dev builds only */
+        fl_rate_hz     = fl.rate;
     }
 #if IO_BENCH
     /* Here specifically: the FIFO is flushed and the gap is already silent,
@@ -6690,7 +6722,14 @@ int main(void)
                 pcm_under_n++;
                 fade_left    = FADE_SAMPLES;
             }
+            uint32_t t_frame = cycles();
+            uint32_t idle0 = fl_idle_cyc, io0 = fl_io_cyc;
             flac_err fe = flac_decode_frame(&fl, flac_emit, 0);
+            /* Work only: subtract every cycle spent WAITING, so the figure is
+             * what the decoder costs rather than how long the frame took. */
+            fl_dec_cyc  += (cycles() - t_frame)
+                         - ((fl_idle_cyc - idle0) + (fl_io_cyc - io0));
+            fl_dec_samp += fl.blocksize;
             if (fe == FLAC_END || fe == FLAC_ERR_SHORT) {
                 if (pl_advance_auto()) { ui_mode_dirty = 1; continue; }
                 if (pl_count && rep_mode == REP_OFF &&
