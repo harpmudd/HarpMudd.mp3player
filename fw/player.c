@@ -2660,7 +2660,13 @@ static void ui_idle_screen(const char *reason)
     ui_gs_line(330u, "   Load Playlist   your whole .m3u",  UI_DIM,    TS_1X);
 }
 
-static void ui_load_failed(void)
+/* The failure screen, with the two explanatory lines supplied by the caller.
+ *
+ * "THE FILE COULD NOT BE READ" is right for a file that genuinely would not
+ * read, and wrong for one this core simply cannot decode fast enough -- that
+ * is not a broken file, and telling someone their music is corrupt when it is
+ * not is worse than saying nothing. */
+static void ui_failed_msg(const char *l1, const char *l2)
 {
     /* Wake first if the screen is dark. This draws straight to the framebuffer
      * rather than through ui_draw_dynamic(), so without this it would paint
@@ -2683,15 +2689,43 @@ static void ui_load_failed(void)
      * Say what happened in words instead. */
     fb_set_color(UI_DIM, UI_BG);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u,
-                    "THE FILE COULD NOT BE READ", TS_1X, TS_1X, UI_INNER_W);
+                    l1, TS_1X, TS_1X, UI_INNER_W);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
-                    "USE CORE MENU TO PICK", TS_1X, TS_1X, UI_INNER_W);
+                    l2, TS_1X, TS_1X, UI_INNER_W);
 
     /* Stay alive so a reload can rescue us. */
     for (;;) {
         poll_input();
         if (reload_pending) return;
     }
+}
+
+static void ui_load_failed(void)
+{
+    ui_failed_msg("THE FILE COULD NOT BE READ", "USE CORE MENU TO PICK");
+}
+
+/* Hi-res FLAC this core cannot decode in realtime.
+ *
+ * The cutoff is 48 kHz, and it is measured rather than chosen. Decode cost as
+ * a percent of realtime, with I/O already at zero: 16/44.1 = 74, 24/44.1 = 80,
+ * 24/88.2 = 150, 24/96 = 180. Cost tracks sample rate almost exactly, so 48 kHz
+ * lands near 87 for 24-bit and everything above it is beyond reach -- 88.2 kHz
+ * would need the decoder to be half again faster, and the largest single
+ * optimisation available bought 1.3x on one of its two passes.
+ *
+ * Refusing is the kind thing to do. These files DO decode, just not fast
+ * enough, so without this they play through to the end sounding broken -- and
+ * a listener has no way to tell that from a damaged file or a broken core. */
+/* 48000, from measurement: decode is 74% of realtime at 16/44.1 and 80% at
+ * 24/44.1, rising almost exactly with sample rate to 150% at 88.2 kHz. 48 kHz
+ * lands near 87% for 24-bit, which fits; nothing above it does. */
+#define FLAC_MAX_RATE 48000u
+static uint8_t rate_unsupported;   /* set at load, consumed by the main loop */
+
+static void ui_rate_unsupported(void)
+{
+    ui_failed_msg("HI-RES FLAC NOT SUPPORTED", "48kHz MAX - 44.1kHz IS TYPICAL");
 }
 
 /* Called from the main loop every frame. Under rev 6 this had to be throttled
@@ -5601,6 +5635,17 @@ static int load_track(void)
             track_fmt = FMT_MP3;
             return 0;
         }
+        /* Refuse hi-res BEFORE committing the arena to it. Measured cutoff --
+         * see ui_rate_unsupported(). Handing the arena back to Helix on the
+         * way out matters: leaving the core with no decoder is what once made
+         * a single bad file break every load after it. */
+        if (fl.rate > FLAC_MAX_RATE) {
+            REG(R_STAT2) = 0xC3000000u | fl.rate;
+            dec = MP3InitDecoder();
+            track_fmt = FMT_MP3;
+            rate_unsupported = 1u;
+            return 0;
+        }
         fl_buf = (int32_t *)malloc((size_t)fl.max_blocksize * sizeof(int32_t));
         if (!fl_buf) { REG(R_STAT2) = 0xC1000000u; return 0; }
         fl.ch0     = fl_buf;
@@ -6144,6 +6189,12 @@ int main(void)
                       * behaviour -- the first track after launch loading
                       * paused, so music never starts the instant the core
                       * opens -- read as the player being stuck. */
+                } else if (rate_unsupported) {
+                    /* A file we CAN read and cannot play fast enough. Says so,
+                     * rather than claiming the file could not be read. */
+                    rate_unsupported = 0;
+                    pl_sw_tk++;
+                    if (!idle) ui_rate_unsupported();
                 } else { pl_sw_tk++; if (!idle) ui_load_failed(); }
                 continue;
             }
