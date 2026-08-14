@@ -520,9 +520,18 @@ static uint32_t peak_amp;         /* max |sample| in the most recently decoded f
 enum { ID3_OK, ID3_NO_TAG, ID3_NO_FRAME, ID3_UNSUPPORTED_ENCODING };
 static int title_status;
 static uint8_t ui_warn_row;   /* draw the album/format row as a warning */
-/* The rejected file's rate. Mirrored because `fl` is declared with the FLAC
- * glue, ~2000 lines below the card that has to name it. */
-static uint32_t fl_reject_hz;
+/* WHY a FLAC file was turned away, and the offending value. Mirrored because
+ * `fl` is declared with the FLAC glue, ~2000 lines below the card that has to
+ * name it.
+ *
+ * Four reasons, not one. Only the sample-rate gate used to say anything
+ * useful; a 32-bit, multichannel or huge-blocksize file fell through to "THE
+ * FILE COULD NOT BE READ", which is both wrong and alarming -- those files
+ * read perfectly well, this core just cannot play them. flac_open fills
+ * STREAMINFO before it rejects, so the real numbers are already in hand. */
+enum { FLR_NONE = 0, FLR_RATE, FLR_DEPTH, FLR_CHANS, FLR_BLOCK };
+static uint8_t  fl_reject_kind;
+static uint32_t fl_reject_val;
 
 static char track_title[48];
 static char track_artist[48];
@@ -580,12 +589,6 @@ static uint32_t pcm_under_n;    /* underrun EDGES since boot, for the diag  */
  * Cycles, not iterations: a wait iteration and a decode iteration are not the
  * same size, and comparing counts of them would prove nothing. */
 static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
-static uint32_t fl_emit_cyc;               /* output path, minus the wait   */
-/* Decode cycles and the audio they produced, so LOAD can exceed 100%.
- * D clips at zero the moment the decoder falls behind, which is exactly when
- * the interesting question starts -- 1.2x over and 4x over need completely
- * different answers, and D reports both as 0. */
-static uint32_t fl_dec_cyc, fl_dec_samp;
 static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
 /* Why the last flac_open() failed, and how many times. The first load of a
  * track has failed several times across builds and then succeeded on a retry,
@@ -593,9 +596,7 @@ static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
  * which of MAGIC/STREAMINFO/UNSUPPORTED/SYNC/DATA/SHORT it actually was. */
 static uint8_t  fl_open_err;
 static uint8_t  fl_open_fails;
-static uint16_t fl_load_pct;               /* uncapped: 100 = exactly realtime */
-static uint8_t  fl_res_pct;                /* Rice's share of channel 0        */
-static uint8_t  fl_idle_pct, fl_io_pct, fl_emit_pct;
+static uint8_t  fl_idle_pct, fl_io_pct;
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -2743,30 +2744,41 @@ static uint8_t rate_unsupported;   /* set at load, consumed by the main loop */
  * deserves. */
 static void ui_rate_unsupported(void)
 {
-    /* KEEP the title and artist. flac_open parses the Vorbis comments during
-     * the metadata walk and the rate is only rejected afterwards, so the real
-     * tags are already in hand -- "Jerry Garcia / Alabama Getaway" with a
-     * reason under it beats a truncated filename and nothing else.
-     *
-     * The album row carries the reason instead, in red, naming the file's
-     * actual rate: "48kHz MAX" alone does not say what is wrong with THIS
-     * file, and the previous wording did not say it would not play at all. */
+    /* KEEP the title and artist when we have them. For a rate rejection the
+     * Vorbis comments were already parsed -- the gate runs after flac_open --
+     * so the card reads "Jerry Garcia / Alabama Getaway" with the reason under
+     * it. The other three reasons fire inside flac_open, before the comment
+     * block is reached, so those fall back to the filename. */
     track_year[0] = 0;
     track_trk[0]  = 0;
 
     {
         char *q = track_album;
-        const char *p1 = "WON'T PLAY - ";
-        while (*p1) *q++ = *p1++;
+        uint32_t v = fl_reject_val;
 
-        uint32_t khz = fl_reject_hz / 1000u, frac = (fl_reject_hz % 1000u) / 100u;
-        if (khz >= 100u) *q++ = (char)('0' + khz / 100u);
-        if (khz >= 10u)  *q++ = (char)('0' + (khz / 10u) % 10u);
-        *q++ = (char)('0' + khz % 10u);
-        if (frac) { *q++ = '.'; *q++ = (char)('0' + frac); }
-
-        const char *p2 = "kHz, 48 MAX";
-        while (*p2) *q++ = *p2++;
+        if (fl_reject_kind == FLR_RATE) {
+            const char *p1 = "HI-RES ";
+            while (*p1) *q++ = *p1++;
+            q = ui_dec(q, v / 1000u);
+            uint32_t frac = (v % 1000u) / 100u;
+            if (frac) { *q++ = '.'; *q++ = (char)('0' + frac); }
+            const char *p2 = "kHz - PLAYS 48kHz MAX";
+            while (*p2) *q++ = *p2++;
+        } else if (fl_reject_kind == FLR_DEPTH) {
+            q = ui_dec(q, v);
+            const char *p2 = "-BIT FLAC - PLAYS 24-BIT MAX";
+            while (*p2) *q++ = *p2++;
+        } else if (fl_reject_kind == FLR_CHANS) {
+            q = ui_dec(q, v);
+            const char *p2 = " CHANNELS - PLAYS STEREO MAX";
+            while (*p2) *q++ = *p2++;
+        } else {
+            const char *p1 = "BLOCK ";
+            while (*p1) *q++ = *p1++;
+            q = ui_dec(q, v);
+            const char *p2 = " - PLAYS 6144 MAX";
+            while (*p2) *q++ = *p2++;
+        }
         *q = 0;
     }
     ui_warn_row = 1u;
@@ -3990,20 +4002,7 @@ static void ui_draw_dynamic(void)
         fl_io_pct   = (uint8_t)(fl_io_cyc   / (CLK_HZ / 100u));
         if (fl_idle_pct > 99u) fl_idle_pct = 99u;
         if (fl_io_pct   > 99u) fl_io_pct   = 99u;
-        fl_emit_pct = (uint8_t)(fl_emit_cyc / (CLK_HZ / 100u));
-        if (fl_emit_pct > 99u) fl_emit_pct = 99u;
-        if (fl_dec_samp && fl_rate_hz) {
-            uint64_t num = (uint64_t)fl_dec_cyc * (uint64_t)fl_rate_hz * 100u;
-            uint64_t den = (uint64_t)fl_dec_samp * (uint64_t)CLK_HZ;
-            uint32_t v   = den ? (uint32_t)(num / den) : 0u;
-            fl_load_pct  = (uint16_t)(v > 999u ? 999u : v);
-        }
-        {   uint32_t tot = flac_res_cyc + flac_lpc_cyc;
-            fl_res_pct = tot ? (uint8_t)((uint64_t)flac_res_cyc * 100u / tot) : 0u;
-            flac_res_cyc = flac_lpc_cyc = 0u;
-        }
-        fl_dec_cyc = fl_dec_samp = 0u;
-        fl_idle_cyc = fl_io_cyc = fl_emit_cyc = 0u;
+        fl_idle_cyc = fl_io_cyc = 0u;
         char b[64], *q = b;
         /* The speed prefix this row was built for is dropped while the
          * playlist switch is under investigation: measured against the real
@@ -4021,14 +4020,11 @@ static void ui_draw_dynamic(void)
          * fast enough and the ring is the problem; both near zero means the
          * decoder is not fast enough. Those need opposite fixes, and without
          * this row the two are indistinguishable from the couch. */
-        /* L is the one that matters: decode cost as a percent of realtime,
-         * NOT capped at 100. R is Rice's share of channel 0 against the
-         * reconstruction pass, and P the LPC order -- together they say which
-         * loop to attack, if attacking it can even be enough. */
-        *q++ = 'L'; q = ui_dec(q, fl_load_pct);
-        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, fl_res_pct);
-        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, flac_order);
-        *q++ = ' '; *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
+        /* L/R/P are retired: they did their job -- the 48 kHz gate is set
+         * from the numbers they produced -- and FLAC_PROFILE is now 0. What
+         * remains is what the one OPEN defect needs: F names why a load
+         * failed. */
+        *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
         *q++ = ' '; *q++ = 'F'; q = ui_dec(q, fl_open_err);
@@ -5168,13 +5164,15 @@ static uint32_t fl_meter_n;
 static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
 {
     (void)ctx;
-    uint32_t t_in = cycles(), idle0 = fl_idle_cyc;
-
     /* Safe here: ui_draw_dynamic() performs no I/O and cannot re-enter the
      * decoder. It reads position from `frames`, which has not been advanced
-     * for the frame in flight, so the clock trails by at most one frame. */
-    if ((int32_t)(t_in - fl_ui_next) >= 0) {
-        fl_ui_next = t_in + FL_UI_PERIOD;
+     * for the frame in flight, so the clock trails by at most one frame.
+     *
+     * Reads the counter itself now the profiling timestamp it used to borrow
+     * is gone -- one MMIO read per 64 samples. */
+    uint32_t t_now = cycles();
+    if ((int32_t)(t_now - fl_ui_next) >= 0) {
+        fl_ui_next = t_now + FL_UI_PERIOD;
         if (!ui_dump_mode) ui_draw_dynamic();
     }
 
@@ -5216,7 +5214,6 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
         REG(R_AUDIO) = ((uint32_t)(uint16_t)(int16_t)r << 16)
                      | (uint32_t)(uint16_t)(int16_t)l;
     }
-    fl_emit_cyc += (cycles() - t_in) - (fl_idle_cyc - idle0);
 }
 
 /* Issue a read, then go back to decoding and collect it later.
@@ -5979,6 +5976,23 @@ static int load_track(void)
         fl.tag_cap    = sizeof(track_title);
 
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
+        if (fe == FLAC_ERR_UNSUPPORTED) {
+            /* Mirrors the order of the checks inside flac_open, so the reason
+             * reported is the one that actually fired. */
+            if (fl.channels < 1u || fl.channels > 2u) {
+                fl_reject_kind = FLR_CHANS; fl_reject_val = fl.channels;
+            } else if (fl.bps != 8u && fl.bps != 16u &&
+                       fl.bps != 20u && fl.bps != 24u) {
+                fl_reject_kind = FLR_DEPTH; fl_reject_val = fl.bps;
+            } else {
+                fl_reject_kind = FLR_BLOCK; fl_reject_val = fl.max_blocksize;
+            }
+            REG(R_STAT2) = 0xC4000000u | (uint32_t)fl_reject_kind;
+            dec = MP3InitDecoder();
+            track_fmt = FMT_MP3;
+            rate_unsupported = 1u;
+            return 0;
+        }
         if (fe != FLAC_OK) {
             fl_open_err = (uint8_t)fe;      /* shown on the diag row */
             fl_open_fails++;
@@ -5996,7 +6010,8 @@ static int load_track(void)
          * a single bad file break every load after it. */
         if (fl.rate > FLAC_MAX_RATE) {
             REG(R_STAT2) = 0xC3000000u | fl.rate;
-            fl_reject_hz = fl.rate;
+            fl_reject_kind = FLR_RATE;
+            fl_reject_val  = fl.rate;
             dec = MP3InitDecoder();
             track_fmt = FMT_MP3;
             rate_unsupported = 1u;
@@ -6026,7 +6041,6 @@ static int load_track(void)
         rate_set       = 1;
         pcm_rate_apply(fl.rate);
         flac_stall     = 0;
-        flac_tick      = cycles;   /* profiling hook, dev builds only */
         flac_scan_metadata();      /* seek table + where audio starts */
         fl_rate_hz     = fl.rate;
     }
@@ -7233,14 +7247,7 @@ int main(void)
                 pcm_under_n++;
                 fade_left    = FADE_SAMPLES;
             }
-            uint32_t t_frame = cycles();
-            uint32_t idle0 = fl_idle_cyc, io0 = fl_io_cyc;
             flac_err fe = flac_decode_frame(&fl, flac_emit, 0);
-            /* Work only: subtract every cycle spent WAITING, so the figure is
-             * what the decoder costs rather than how long the frame took. */
-            fl_dec_cyc  += (cycles() - t_frame)
-                         - ((fl_idle_cyc - idle0) + (fl_io_cyc - io0));
-            fl_dec_samp += fl.blocksize;
             /* Meters are fed from flac_emit on a fixed 1152-pair interval,
              * not here: once per frame is 9.6 Hz and looks delayed. */
             if (fe == FLAC_END || fe == FLAC_ERR_SHORT) {

@@ -463,7 +463,7 @@ static const int8_t fixed_coef[5][4] = {
  * and the host tests leave it null. Two calls per pass per frame -- roughly
  * ten a second, against 88200 samples. FLAC_PROFILE 0 removes it entirely. */
 #ifndef FLAC_PROFILE
-#define FLAC_PROFILE 1
+#define FLAC_PROFILE 0     /* 1 to re-measure; must be 0 in a shipped build */
 #endif
 
 #if FLAC_PROFILE
