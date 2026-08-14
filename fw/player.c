@@ -1,3 +1,7 @@
+        /* The playlist-switch fields are gone: that investigation shipped in
+         * v1.2.0 and the row's width is needed for the throughput and heap
+         * figures the FLAC decision turns on. pl_sw_* and tk_hist are still
+         * recorded, one flag away, if it ever reopens. */
 // =============================================================================
 // Stage 3 -- real MP3 playback.
 //
@@ -963,6 +967,31 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 /* TEMPORARY, with IO_BENCH: shows the throughput figure. Back to 0 before
  * anything ships -- no diagnostic is ever shown to users. */
 #define UI_SHOW_SPEED_DIAG 1
+
+/* ---- TEMPORARY: sequential SD throughput benchmark ------------------------
+ *
+ * The ONE measurement the FLAC decision turns on. Everything else about FLAC
+ * is understood; whether the card can sustain ~112 KB/s is not, and 40 KB/s at
+ * MP3's 320 kbps is the most this core has ever had to hold.
+ *
+ * It has to be a BURST, not an observation of normal playback: during playback
+ * the refill rate is limited by DEMAND, so timing it would measure the bitrate
+ * of the file and report it as a capacity figure. This reads N chunks
+ * back-to-back with no decoding in between, which is the ceiling.
+ *
+ * Sequential on purpose. The ~480 ms the old size probe spent on ~20 reads is
+ * not representative -- those were random offsets that made APF re-walk the
+ * cluster chain each time.
+ *
+ * Lands in the tag scratch buffer, never the ring, so it cannot disturb audio.
+ * Runs ONCE a session. MUST go back to 0 before shipping. */
+#define IO_BENCH 1
+/* Defined HERE, above every user. It lived next to REFILL_CHUNK, ~90 lines
+ * BELOW the diagnostic row that tests it -- so `#if IO_BENCH` in the row saw
+ * an undefined name, evaluated it as 0, and dropped the readout with no
+ * warning. The benchmark ran; its result was simply never printed. */
+static uint16_t io_kbps;          /* measured sustained sequential read rate */
+static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -3893,26 +3922,6 @@ extern char _ring_start, _ring_size;
 #define RING_SIZE    ((uint32_t)(uintptr_t)&_ring_size)
 #define REFILL_CHUNK 4096u
 
-/* ---- TEMPORARY: sequential SD throughput benchmark ------------------------
- *
- * The ONE measurement the FLAC decision turns on. Everything else about FLAC
- * is understood; whether the card can sustain ~112 KB/s is not, and 40 KB/s at
- * MP3's 320 kbps is the most this core has ever had to hold.
- *
- * It has to be a BURST, not an observation of normal playback: during playback
- * the refill rate is limited by DEMAND, so timing it would measure the bitrate
- * of the file and report it as a capacity figure. This reads N chunks
- * back-to-back with no decoding in between, which is the ceiling.
- *
- * Sequential on purpose. The ~480 ms the old size probe spent on ~20 reads is
- * not representative -- those were random offsets that made APF re-walk the
- * cluster chain each time.
- *
- * Lands in the tag scratch buffer, never the ring, so it cannot disturb audio.
- * Runs ONCE a session. MUST go back to 0 before shipping. */
-#define IO_BENCH 1
-static uint16_t io_kbps;          /* measured sustained sequential read rate */
-static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
 
 static uint8_t * const ring = (uint8_t *)(uintptr_t)(UNCACHED + (uint32_t)(uintptr_t)&_ring_start);
 
