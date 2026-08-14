@@ -927,6 +927,8 @@ static char     track_file[64];        /* filename APF reports for the slot  */
  * identity, measured unstable, and its gate removed. Deleted, not left to
  * rot.) */
 static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
+static int      slot_changed(void);    /* defined with the 0190 helpers      */
+static uint32_t tk_poll_at;            /* next track-slot identity check     */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
 static uint32_t reload_retries;
@@ -1021,7 +1023,9 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * is still open. Cheaper to keep than to rewrite. */
 /* TEMPORARY, with IO_BENCH: shows the throughput figure. Back to 0 before
  * anything ships -- no diagnostic is ever shown to users. */
-#define UI_SHOW_SPEED_DIAG 1
+/* 0 for any build a user sees -- the standing rule is that no diagnostic ever
+ * reaches one. Set to 1 to bring the D/O/U/F row back while investigating. */
+#define UI_SHOW_SPEED_DIAG 0
 
 /* ---- TEMPORARY: sequential SD throughput benchmark ------------------------
  *
@@ -2707,10 +2711,20 @@ static void ui_failed_msg(const char *l1, const char *l2)
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
                     l2, TS_1X, TS_1X, UI_INNER_W);
 
-    /* Stay alive so a reload can rescue us. */
+    /* Stay alive so a reload can rescue us.
+     *
+     * poll_input() only sees the 008A NOTIFICATION, so a missed one left this
+     * screen with no way out and the next pick appeared to do nothing -- pick
+     * again and it works. Ask the slot directly as well. No audio is playing
+     * here, so the query costs nothing that matters and can run often. */
+    tk_poll_at = cycles() + CLK_HZ;
     for (;;) {
         poll_input();
         if (reload_pending) return;
+        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
+            tk_poll_at = cycles() + CLK_HZ;
+            if (slot_changed()) reload_pending = 1u;
+        }
     }
 }
 
@@ -2803,9 +2817,16 @@ static void ui_rate_unsupported(void)
 
     /* Stay alive so a reload can rescue us, exactly as the failure screen
      * does -- the difference is only what the user is looking at. */
+    /* Same fallback as the failure screen: this is exactly where it was seen
+     * -- refuse a hi-res file, pick a playable one, nothing happens. */
+    tk_poll_at = cycles() + CLK_HZ;
     for (;;) {
         poll_input();
         if (reload_pending) { ui_warn_row = 0u; return; }
+        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
+            tk_poll_at = cycles() + CLK_HZ;
+            if (slot_changed()) reload_pending = 1u;
+        }
     }
 }
 
@@ -4789,7 +4810,11 @@ static void slot_filename(char *out, uint32_t out_size);
  * yet?" -- every content-based guess at that was defeated by a read that was
  * wrong but stable. HASHES the struct rather than parsing it, so nothing here
  * depends on a field offset that would otherwise be guesswork. */
-static uint32_t slot_file_id(void)
+/* `want_name` distinguishes the two callers. A LOAD wants the filename as a
+ * side effect; the periodic identity poll must not have it, or it would
+ * overwrite the playing track's name with the slot's before the load that
+ * makes it true. */
+static uint32_t slot_id_query(int want_name)
 {
     refill_drain();                     /* one command in flight, ever */
     uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
@@ -4803,7 +4828,7 @@ static uint32_t slot_file_id(void)
         if ((int32_t)(cycles() - deadline) >= 0) return 0;   /* 0 = unknown */
     }
 
-    slot_filename(track_file, sizeof(track_file));
+    if (want_name) slot_filename(track_file, sizeof(track_file));
 
     uint32_t h = 2166136261u;                   /* FNV-1a over the struct */
     for (uint32_t w = 0; w < DT_WORDS; w++) {
@@ -4814,6 +4839,22 @@ static uint32_t slot_file_id(void)
         }
     }
     return h ? h : 1u;                          /* keep 0 for "unknown" */
+}
+
+static uint32_t slot_file_id(void) { return slot_id_query(1); }
+
+/* Is the slot pointing somewhere other than what is loaded?
+ *
+ * The playlist slot has had a periodic identity poll since the double-load bug
+ * (pl_poll_at); the TRACK slot never got one, and relies entirely on the 008A
+ * notification. When that notification goes missing the load simply does not
+ * happen and nothing recovers it -- which is the "picked a song, waited, had
+ * to pick it again" fault, the same shape as the playlist bug on the path that
+ * was never fixed. */
+static int slot_changed(void)
+{
+    uint32_t id = slot_id_query(0);
+    return id && cur_file_id && id != cur_file_id;
 }
 
 /* Pull the filename out of the 0190 response WITHOUT knowing its layout: the
@@ -6653,6 +6694,17 @@ int main(void)
             && (int32_t)(cycles() - pl_poll_at) >= 0) {
             pl_poll_at   = cycles() + CLK_HZ * 3u;
             pl_check_req = 1u;              /* same comparison path as below */
+        }
+
+        /* The same backstop for the TRACK slot. Staggered 2s against the
+         * playlist's 3s so the two queries rarely land together, and held off
+         * while anything is mid-flight so it cannot race a load. */
+        if (!idle && cur_file_id && !pl_check_req
+            && !pl_reload_pending && !pl_reload_armed
+            && !reload_pending    && !reload_armed
+            && (int32_t)(cycles() - tk_poll_at) >= 0) {
+            tk_poll_at = cycles() + CLK_HZ * 2u;
+            if (slot_changed()) reload_pending = 1u;
         }
 
         if (pl_check_req) {
