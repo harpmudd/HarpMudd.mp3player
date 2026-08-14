@@ -128,6 +128,8 @@
  * ~34 KB block every time and this should sit flat no matter how many tracks
  * are loaded. If it climbs per reload, something genuinely is not being freed. */
 extern unsigned int arena_used(void);
+extern unsigned int arena_limit(void);
+#define ARENA_LIMIT (arena_limit())
 extern unsigned int arena_total(void);
 
 #define CLK_HZ      60000000u   /* clk_sys; UI timing needs it before playback does */
@@ -4621,6 +4623,7 @@ static void target_flush_slot_cache(void)
     target_read_slot(FW_SLOT_ID, 0, TAG_OFF, 512);
 }
 
+#include <stdlib.h>                /* malloc/free -- fw/alloc.c provides them */
 #include "flac.h"
 
 /* Which decoder the current track needs. Detected from the file's first four
@@ -4686,6 +4689,7 @@ static void io_bench(uint32_t from)
 #endif
 
 static void refill_pump(void);     /* defined below; the glue needs it */
+static int  prefill(void);         /* likewise, for flac_restart()     */
 
 /* ---------------------------------------------------------- FLAC glue ---
  *
@@ -4723,6 +4727,28 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
         got     += (int)take;
     }
     return got;
+}
+
+static uint32_t fl_cap;            /* max_blocksize, kept across reopens */
+
+/* Rewinds a FLAC stream to its first audio frame.
+ *
+ * Needed because every reposition -- track start, restart, stop -- resets the
+ * ring to file_pos and the decoder's own state would be left mid-stream. MP3
+ * survives that by re-finding a sync word; FLAC cannot, because its metadata
+ * was consumed once at open and the bit reader holds partial bytes.
+ *
+ * Reopening from byte 0 re-reads the metadata, which is a few hundred bytes
+ * and only happens on a reposition. Simpler and surer than trying to record
+ * where the audio began and restore the reader's bit position to match. */
+static int flac_restart(void)
+{
+    ring_fill = 0; ring_rd = 0; file_pos = 0;
+    flac_stall = 0;
+    if (!prefill()) return 0;
+    if (flac_open(&fl, flac_pull, 0, fl_buf, fl_cap) != FLAC_OK) return 0;
+    pcm_rate_apply(fl.rate);
+    return 1;
 }
 
 static void flac_emit(void *ctx, const int16_t *pcm, uint32_t frames)
@@ -5252,6 +5278,25 @@ static int read_track_head(void)
 
     for (int i = 0; i < 4; i++) head_bytes[i] = ring[i];
 
+    /* FLAC or MP3, decided by the file's first four bytes rather than its
+     * extension -- a mislabelled file should play, and a .flac that is really
+     * an MP3 should not fail mysteriously.
+     *
+     * Detected here because everything below is ID3-shaped: tag length, the
+     * settle-compare on the tag bytes, audio_start. None of it applies to a
+     * FLAC, whose metadata the decoder consumes itself. */
+    if (ring[0] == 'f' && ring[1] == 'L' && ring[2] == 'a' && ring[3] == 'C') {
+        track_fmt   = FMT_FLAC;
+        audio_start = 0;
+        ring_rd     = 0;
+        track_title[0] = 0; track_artist[0] = 0;
+        track_album[0] = 0; track_year[0]   = 0; track_trk[0] = 0;
+        title_status   = ID3_NO_TAG;      /* filename fallback shows the name */
+        cur_file_id    = slot_file_id();
+        return 1;
+    }
+    track_fmt = FMT_MP3;
+
     /* Converge rather than try to RECOGNISE a bad read: re-read until two
      * consecutive reads agree. That needs no reference value, no file size and
      * no theory of the cause, and it terminates on its own. */
@@ -5439,6 +5484,44 @@ static int load_track(void)
     uint32_t t0 = cycles(), tphase = t0;
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
     ld_head = LD_MS(cycles() - tphase); tphase = cycles();
+
+    if (track_fmt == FMT_FLAC) {
+        /* Hand the arena to FLAC. Helix has to go first -- the two decoders
+         * swap the same space, and Helix's 23824 leaves no room beside a
+         * blocksize buffer. */
+        if (dec) { MP3FreeDecoder(dec); dec = 0; }
+        fl_buf = 0;
+
+        /* Open with a provisional cap so STREAMINFO can be read; the real
+         * buffer is sized from max_blocksize once it is known. */
+        static int32_t probe_cap;
+        probe_cap = (int32_t)(ARENA_LIMIT / sizeof(int32_t));
+        flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
+        if (fe != FLAC_OK && fe != FLAC_ERR_UNSUPPORTED) {
+            REG(R_STAT2) = 0xC0000000u | (uint32_t)fe;
+            return 0;
+        }
+        fl_buf = (int32_t *)malloc((size_t)fl.max_blocksize * sizeof(int32_t));
+        if (!fl_buf) { REG(R_STAT2) = 0xC1000000u; return 0; }
+        fl.ch0     = fl_buf;
+        fl.ch0_cap = fl.max_blocksize;
+        fl_cap     = fl.max_blocksize;
+
+        track_hz       = fl.rate;
+        samprate       = fl.rate;
+        track_kbps     = 0;
+        samp_per_frame = fl.max_blocksize;
+        track_secs     = fl.rate ? (uint32_t)(fl.total_samples / fl.rate) : 0;
+        rate_set       = 1;
+        pcm_rate_apply(fl.rate);
+        flac_stall     = 0;
+    } else if (fl_buf) {
+        /* Coming back to MP3: give the space back and rebuild Helix. */
+        free(fl_buf);
+        fl_buf = 0;
+        if (!dec) dec = MP3InitDecoder();
+        if (!dec) { REG(R_STAT2) = 0xF0000000u; return 0; }
+    }
 #if IO_BENCH
     /* Here specifically: the FIFO is flushed and the gap is already silent,
      * so a one-off burst costs gap length rather than audio. */
@@ -6385,6 +6468,16 @@ int main(void)
             if (idle) continue;             /* nothing loaded to reposition */
             pcm_flush();
             refill_drain();
+            if (track_fmt == FMT_FLAC) {
+                /* Reopen: the decoder cannot resume from a rewound ring. */
+                if (!flac_restart()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+                frames = 0; min_level = 0xFFFFFFFFu;
+                ui_sec = 0; ui_sec_acc = 0;
+                ui_last_sec = 0xFFFFFFFFu; ui_prog_sec = 0xFFFFFFFFu;
+                ui_last_pause = 0xFFFFFFFFu;
+                ui_draw_dynamic();
+                continue;
+            }
             file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
             frames = 0; min_level = 0xFFFFFFFFu;
@@ -6537,6 +6630,32 @@ int main(void)
                 continue;
             }
             st0 |= (1u << 5); REG(R_STAT0) = st0;
+            continue;
+        }
+
+        if (track_fmt == FMT_FLAC) {
+            /* One FLAC frame per pass. The decoder pulls from the ring and
+             * pushes to the FIFO through the two adapters, so this loop keeps
+             * its existing shape -- UI, input and end-of-track all still run
+             * between frames. */
+            flac_err fe = flac_decode_frame(&fl, flac_emit, 0);
+            if (fe == FLAC_END || fe == FLAC_ERR_SHORT) {
+                if (pl_advance_auto()) { ui_mode_dirty = 1; continue; }
+                if (pl_count && rep_mode == REP_OFF &&
+                    pl_pos + 1u >= pl_count) {
+                    paused |= 1u;
+                    ui_toast_msg("END OF PLAYLIST");
+                }
+                soft_restart_req = 1;
+                continue;
+            }
+            if (fe != FLAC_OK) { errs++; REG(R_STAT2) = 0xC2000000u | fe; }
+            frames++;
+            ui_sec = fl.rate ? (uint32_t)((uint64_t)frames * fl.blocksize
+                                          / fl.rate) : 0;
+            st0 |= (1u << 3);
+            REG(R_STAT0) = st0;
+            if (!ui_dump_mode) ui_draw_dynamic();
             continue;
         }
 

@@ -21,7 +21,19 @@ MEMORY {
 ENTRY(_start)
 
 _stack_size = 0x4000;    /* 16 KB */
-_ring_size  = 0x8000;    /* 32 KB -- ~0.8 s at 320 kbps */
+/* 24 KB, down from 32.
+ *
+ * The ring sits ABOVE the image, so shrinking it moves _tag_start up and
+ * hands 8 KB straight to the firmware -- which is what made room for a second
+ * decoder's code. Both decoders' text must be resident; only their buffers
+ * can swap.
+ *
+ * Affordable now in a way it was not when 32 KB was chosen. The ring exists to
+ * absorb SD stalls, and the card measured 736 KB/s sequential against 40 KB/s
+ * of MP3 demand -- an 18x margin. 24 KB is still ~0.6 s at 320 kbps, and
+ * ~0.23 s at the 105 KB/s the CD-rip FLAC on the test card needs. Watch the
+ * underrun flag if either ever looks marginal. */
+_ring_size  = 0x6000;    /* 24 KB -- ~0.6 s at 320 kbps */
 _tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
 
 SECTIONS {

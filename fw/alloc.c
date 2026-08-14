@@ -82,4 +82,5 @@ void *calloc(size_t a, size_t b)
 void *realloc(void *p, size_t n) { (void)p; (void)n; return (void *)0; }
 
 unsigned int arena_used(void)  { return arena_peak; }
+unsigned int arena_limit(void) { return ARENA_BYTES; }
 unsigned int arena_total(void) { return ARENA_BYTES; }
