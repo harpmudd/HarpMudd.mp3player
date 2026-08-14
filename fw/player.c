@@ -2784,6 +2784,21 @@ static void ui_rate_unsupported(void)
     ui_warn_row = 1u;
 
     ui_blank_wake();
+
+    /* Repaint the whole frame before the card.
+     *
+     * ui_draw_chrome() draws the card and nothing behind it, so the previous
+     * track's ALBUM ART stayed on screen next to a message about a file that
+     * has none -- it read as though the refused file had that artwork. The
+     * gradient clears it.
+     *
+     * The art panel is also parked off-screen, so nothing slides it back: a
+     * refused file has no art of its own, and art_have/art_file_id still
+     * describe the previous track, which is what should happen if the user
+     * goes back to it. */
+    art_shown = 0;
+    art_x     = FB_W;
+    ui_gradient();
     ui_draw_chrome();
 
     /* Stay alive so a reload can rescue us, exactly as the failure screen
