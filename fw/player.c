@@ -5894,6 +5894,16 @@ static int load_track(void)
         track_hz       = fl.rate;
         samprate       = fl.rate;
         track_kbps     = 0;
+        /* Seek distance falls back to bytes_per_sec until the size probe lands
+         * slot_size, and the 16000 default would make every FLAC seek about
+         * six times too short. Estimate from the uncompressed rate instead:
+         * FLAC lands around 60-77% of PCM on the test files (16/44.1 measured
+         * 105 KB/s against 176 uncompressed, 24/44.1 204 against 265), so 70%
+         * is within ~15% either way -- and it stops mattering entirely the
+         * moment slot_size is known, when both helpers switch to the exact
+         * size/duration figure. */
+        bytes_per_sec  = ((uint32_t)fl.rate * (uint32_t)fl.channels
+                          * (uint32_t)fl.bps / 8u) * 7u / 10u;
         samp_per_frame = fl.max_blocksize;
         track_secs     = fl.rate ? (uint32_t)(fl.total_samples / fl.rate) : 0;
         rate_set       = 1;
@@ -6948,6 +6958,28 @@ int main(void)
                 pcm_flush();
                 refill_drain();
                 ring_fill = 0; ring_rd = 0;
+
+                if (track_fmt == FMT_FLAC) {
+                    /* The ring just moved; the decoder must not carry the old
+                     * position's buffered bytes and half-consumed bit
+                     * reservoir across with it. Without this it decodes stale
+                     * input as though it belonged at the new offset and never
+                     * resyncs -- the hang. frame_header() then scans for the
+                     * next sync from clean state, and rejects a false one via
+                     * its blocksize check against ch0_cap. */
+                    flac_flush_input(&fl);
+                    flac_stall  = 0;
+                    fl_meter_n  = 0;
+
+                    /* Rebase the frame counter. The FLAC path derives ui_sec
+                     * from `frames`, so leaving it alone would let the next
+                     * decoded frame snap the clock straight back to where the
+                     * seek started. */
+                    if (fl.max_blocksize)
+                        frames = (uint32_t)(((uint64_t)ui_sec * (uint64_t)fl.rate)
+                                            / (uint64_t)fl.max_blocksize);
+                }
+
                 if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
                 if (paused) { ui_draw_dynamic(); continue; }
             }

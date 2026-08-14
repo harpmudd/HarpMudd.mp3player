@@ -102,6 +102,10 @@ extern uint32_t flac_res_cyc;    /* channel 0, Rice/bit-reader pass */
 extern uint32_t flac_lpc_cyc;    /* channel 0, reconstruction pass  */
 extern uint8_t  flac_order, flac_type;   /* type: 1 FIXED, 2 LPC    */
 
+/* Drops buffered input and bit state after the caller has repositioned the
+ * stream. Keeps STREAMINFO and the block buffer. */
+void flac_flush_input(flac_t *f);
+
 const char *flac_strerror(flac_err e);
 
 #endif

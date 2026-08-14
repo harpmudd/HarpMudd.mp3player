@@ -581,6 +581,24 @@ static flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
 /* ---------------------------------------------------------------- frame */
 
 
+/* Drops buffered input and all bit state, keeping STREAMINFO and the caller's
+ * block buffer.
+ *
+ * For seeking. The caller moves the underlying stream, then calls this; the
+ * next frame_header() sync scan starts clean at the new position. Without it
+ * the decoder carries up to 512 buffered bytes and a partial bit reservoir
+ * from the OLD offset, decodes them as though they belonged at the new one,
+ * and never recovers -- which presented as a hang.
+ *
+ * Not flac_restart(): that reopens from byte 0 and re-reads the metadata,
+ * which is right for a track restart and wrong for a seek. */
+void flac_flush_input(flac_t *f)
+{
+    f->have = 0; f->pos = 0;
+    f->bitacc = 0; f->bitcnt = 0;
+    f->eof = 0;
+}
+
 flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx)
 {
     if (f->eof && f->pos >= f->have) return FLAC_END;
