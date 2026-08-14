@@ -20,6 +20,7 @@ void *_sbrk(int incr)
 }
 
 unsigned int heap_used(void) { return (unsigned int)(heap_ptr - &_heap_start); }
+unsigned int heap_total(void) { return (unsigned int)(&_heap_end - &_heap_start); }
 
 int  _write(int fd, const char *buf, int len) { (void)fd; (void)buf; return len; }
 int  _read(int fd, char *buf, int len)  { (void)fd; (void)buf; (void)len; return 0; }

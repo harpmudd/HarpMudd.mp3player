@@ -124,6 +124,7 @@
  * ~34 KB block every time and this should sit flat no matter how many tracks
  * are loaded. If it climbs per reload, something genuinely is not being freed. */
 extern unsigned int heap_used(void);
+extern unsigned int heap_total(void);
 
 #define CLK_HZ      60000000u   /* clk_sys; UI timing needs it before playback does */
 
@@ -564,7 +565,7 @@ static void vol_apply(void)
  * pl_order and leaves pl_off alone, so "track 4 of 12" always means the same
  * track whether shuffled or not, and turning shuffle off resumes the file
  * order without reloading anything. */
-#define PL_MAX       256u        /* tracks; the index costs 4 bytes each */
+#define PL_MAX       128u        /* tracks; the index costs 4 bytes each */
 /* The .m3u text. 8 KB made PL_MAX unreachable in practice and therefore a lie:
  * a real playlist here averages 110 bytes a line, so the buffer ran out at ~74
  * tracks while the documentation promised 128.
@@ -578,7 +579,7 @@ static void vol_apply(void)
  *
  * Do not raise one without the other. That mismatch has already shipped once,
  * in the direction that made the documented cap a lie. */
-#define PL_TEXT_MAX  22528u
+#define PL_TEXT_MAX  16384u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
@@ -2431,11 +2432,19 @@ static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist co
 /* APF's datatable exactly as it stood before this core touched it. 1 KB, taken
  * once at boot, because by the time anyone can press a button our own 0190 has
  * already overwritten words 0..63. */
+/* 1 KB, and ONLY the Select+A dump ever reads it -- which is behind
+ * DEBUG_DIAG. In a release build this was a kilobyte of BSS taken from
+ * the heap Helix mallocs its decoder out of, to feed a screen that
+ * cannot be reached. */
+#if DEBUG_DIAG
 static uint32_t dt_snap[256];
+#endif
 
 static void dt_snapshot(void)
 {
+#if DEBUG_DIAG
     for (uint32_t w = 0; w < 256u; w++) dt_snap[w] = dt_read(w);
+#endif
 }
 
 /* APF's dataslot ID/size table, BOOT value against LIVE value.
@@ -2449,6 +2458,7 @@ static void dt_snapshot(void)
  * and LIVE still agree, the table survived and the fix holds. If LIVE has
  * turned into path characters, something is still writing over it.
  */
+#if DEBUG_DIAG
 static void dt_dump_boot(void)
 {
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
@@ -2530,6 +2540,8 @@ static void dt_dump_boot(void)
  * The old three-line block spanned 70 px and got away with it; this one spans
  * nearly 200. Clipped to UI_INNER_W so there is a real right margin -- the
  * previous FB_W - UI_MARGIN let a long line run to the very edge. */
+#endif
+
 static void ui_gs_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
 {
     fb_set_color(fg, ui_grad_at(y));
@@ -3820,6 +3832,12 @@ static void ui_draw_dynamic(void)
 #if IO_BENCH
         *q++ = 'I'; *q++ = 'O'; q = ui_dec(q, io_kbps);
         *q++ = 'K'; *q++ = 'B'; *q++ = ' ';
+        /* What newlib ACTUALLY took for the decoder, against what is there.
+         * The struct sizes sum to 23816; malloc asks _sbrk for more than the
+         * sum, and guessing the difference is what just cost a build. */
+        *q++ = 'H'; q = ui_dec(q, heap_used());
+        *q++ = '/'; q = ui_dec(q, heap_total());
+        *q++ = ' ';
 #endif
         *q++ = 'N'; q = ui_dec(q, pl_notify_n);
         *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
@@ -5861,6 +5879,7 @@ int main(void)
             }
         }
 
+#if DEBUG_DIAG
         /* Select+B: freeze on the raw 0190 struct. Press again to resume;
          * decoding continues throughout, only drawing is suspended. */
         if (dt_dump_req) {
@@ -5870,6 +5889,7 @@ int main(void)
             else              ui_draw_chrome();
             continue;
         }
+#endif
 
         if (pl_dump_req) {
             pl_dump_req = 0;
