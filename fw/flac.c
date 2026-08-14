@@ -173,6 +173,50 @@ static flac_err frame_header(flac_t *f)
 
 /* ------------------------------------------------------------- residual */
 
+/* Rice residuals, one at a time.
+ *
+ * The array-filling version below is fine for the buffered channel, but the
+ * STREAMED channel has to interleave residual decoding with reconstruction
+ * and output -- so it needs to pull values singly. Partition state is small:
+ * which partition, how many are left in it, and its parameter. */
+typedef struct {
+    uint32_t pbits, escape, parts, part, left, param, raw, order, per;
+} rice_t;
+
+static flac_err rice_init(flac_t *f, rice_t *r, uint32_t order)
+{
+    uint32_t method = bits(f, 2);
+    if (method > 1u) return FLAC_ERR_DATA;
+    r->pbits  = method ? 5u : 4u;
+    r->escape = method ? 31u : 15u;
+    uint32_t porder = bits(f, 4);
+    r->parts = 1u << porder;
+    if (f->blocksize % r->parts) return FLAC_ERR_DATA;
+    r->per   = f->blocksize / r->parts;
+    r->order = order;
+    r->part  = 0;
+    r->left  = 0;
+    return FLAC_OK;
+}
+
+static int32_t rice_next(flac_t *f, rice_t *r)
+{
+    if (!r->left) {                                   /* open next partition */
+        if (r->part >= r->parts) return 0;
+        r->left  = r->per - (r->part == 0u ? r->order : 0u);
+        r->param = bits(f, r->pbits);
+        r->raw   = (r->param == r->escape) ? bits(f, 5) : 0u;
+        r->part++;
+        if (!r->left) return rice_next(f, r);          /* empty partition */
+    }
+    r->left--;
+    if (r->param == r->escape) return sbits(f, r->raw);
+    uint32_t q = unary(f);
+    uint32_t v = (q << r->param) | bits(f, r->param);
+    return (v & 1u) ? -(int32_t)((v >> 1) + 1u) : (int32_t)(v >> 1);
+}
+
+
 /* Decodes `n` residuals starting at out[0]. Rice partitions are flat in the
  * bitstream, so this can run straight into the caller's reconstruction. */
 static flac_err residual(flac_t *f, uint32_t order, int32_t *out)
@@ -268,8 +312,6 @@ static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
     return FLAC_OK;
 }
 
-/* ---------------------------------------------------------------- frame */
-
 /* Scales a decoded sample of `bps` bits down to 16 for the DAC. The output
  * is 16/48 whatever the source, so this is not a quality choice -- it is the
  * interface. */
@@ -281,6 +323,82 @@ static int16_t to16(int32_t v, uint32_t bps)
     if (v < -32768) v = -32768;
     return (int16_t)v;
 }
+
+/* Decodes the SECOND channel while consuming the first from the same array,
+ * emitting decorrelated pairs as it goes.
+ *
+ * This is what makes the decoder fit. buf[i] holds channel 0 until the instant
+ * channel 1's sample i is reconstructed -- so reading it and then writing
+ * channel 1 over it costs nothing, and channel 1's own LPC history is exactly
+ * those overwritten entries. One blocksize buffer instead of two: 18432 bytes
+ * for the 4608-sample blocks on the test card, not 36864.
+ */
+static flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
+                                uint8_t m, flac_sink_fn sink, void *sctx)
+{
+    int32_t *buf = f->ch0;
+    uint32_t n = f->blocksize;
+
+    (void)bits(f, 1);
+    uint32_t type = bits(f, 6);
+    uint32_t wasted = 0;
+    if (bits(f, 1)) wasted = unary(f) + 1u;
+    bps -= wasted;
+
+    int16_t pcm[128];
+    uint32_t k = 0;
+    uint32_t i = 0;
+
+    /* Emits one pair and hands the buffer slot over to channel 1. */
+    #define EMIT(S) do {                                                           int32_t a_ = buf[i], s_ = (S), l_, r_;                                     if      (m == 8u)  { l_ = a_;             r_ = a_ - s_; }                  else if (m == 9u)  { r_ = s_;             l_ = s_ + a_; }                  else if (m == 10u) { int32_t mid_ = (a_ << 1) | (s_ & 1);                                       l_ = (mid_ + s_) >> 1;                                                     r_ = (mid_ - s_) >> 1; }                              else               { l_ = a_;             r_ = s_; }                       pcm[k * 2] = to16(l_, out_bps); pcm[k * 2 + 1] = to16(r_, out_bps);        buf[i] = s_;                                                               if (++k == 64u) { sink(sctx, pcm, k); k = 0; }                             i++;                                                                   } while (0)
+
+    if (type == 0u) {                              /* CONSTANT */
+        int32_t v = sbits(f, bps) << wasted;
+        while (i < n) EMIT(v);
+    } else if (type == 1u) {                       /* VERBATIM */
+        while (i < n) EMIT(sbits(f, bps) << wasted);
+    } else if (type >= 8u && type <= 12u) {        /* FIXED */
+        uint32_t order = type - 8u;
+        int32_t warm[4];
+        for (uint32_t j = 0; j < order; j++) warm[j] = sbits(f, bps);
+        rice_t r; flac_err e = rice_init(f, &r, order);
+        if (e) return e;
+        for (uint32_t j = 0; j < order; j++) EMIT(warm[j] << wasted);
+        const int8_t *c = fixed_coef[order];
+        while (i < n) {
+            int32_t p = 0;
+            for (uint32_t j = 0; j < order; j++) p += c[j] * (buf[i - 1u - j] >> wasted);
+            EMIT((rice_next(f, &r) + p) << wasted);
+        }
+    } else if (type >= 32u) {                      /* LPC */
+        uint32_t order = type - 31u;
+        int32_t warm[FLAC_MAX_ORDER];
+        for (uint32_t j = 0; j < order; j++) warm[j] = sbits(f, bps);
+        uint32_t prec  = bits(f, 4) + 1u;
+        int32_t  shift = sbits(f, 5);
+        if (prec == 16u || shift < 0) return FLAC_ERR_DATA;
+        int32_t coef[FLAC_MAX_ORDER];
+        for (uint32_t j = 0; j < order; j++) coef[j] = sbits(f, prec);
+        rice_t r; flac_err e = rice_init(f, &r, order);
+        if (e) return e;
+        for (uint32_t j = 0; j < order; j++) EMIT(warm[j] << wasted);
+        while (i < n) {
+            int64_t p = 0;
+            for (uint32_t j = 0; j < order; j++)
+                p += (int64_t)coef[j] * (buf[i - 1u - j] >> wasted);
+            EMIT((rice_next(f, &r) + (int32_t)(p >> shift)) << wasted);
+        }
+    } else {
+        return FLAC_ERR_DATA;
+    }
+    #undef EMIT
+
+    if (k) sink(sctx, pcm, k);
+    return f->eof ? FLAC_ERR_SHORT : FLAC_OK;
+}
+
+/* ---------------------------------------------------------------- frame */
+
 
 flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx)
 {
@@ -311,37 +429,10 @@ flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx)
         return FLAC_OK;
     }
 
-    /* Channel 1 streams: decode it whole into ch0's tail is not possible, so
-     * it goes through a small window and is emitted as it is produced. That
-     * is what keeps the working set at one blocksize instead of two. */
+    /* Channel 1 never gets a buffer of its own -- see subframe_stream(). */
     uint32_t bps1 = bps + ((m == 8u || m == 10u) ? 1u : 0u);
-
-    /* A second full buffer would defeat the point, so channel 1 is decoded
-     * into the same array in a second pass over a scratch window. The
-     * simplest correct arrangement that still fits: decode channel 1 into a
-     * window of the caller's buffer beyond blocksize if there is room,
-     * otherwise fall back to decoding it in place after emitting channel 0.
-     * For the first prototype, require the headroom and keep the code
-     * obvious. */
-    if (f->ch0_cap < n * 2u) return FLAC_ERR_UNSUPPORTED;
-    int32_t *ch1 = f->ch0 + n;
-    e = subframe(f, ch1, bps1);
+    e = subframe_stream(f, bps1, bps, m, sink, sink_ctx);
     if (e) return e;
-
-    int16_t pcm[128];
-    uint32_t k = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        int32_t a = f->ch0[i], b = ch1[i], l, r;
-        if      (m == 8u)  { l = a;         r = a - b; }        /* left/side  */
-        else if (m == 9u)  { r = b;         l = b + a; }        /* right/side */
-        else if (m == 10u) {                                     /* mid/side  */
-            int32_t mid = (a << 1) | (b & 1);
-            l = (mid + b) >> 1; r = (mid - b) >> 1;
-        } else             { l = a;         r = b; }             /* independent */
-        pcm[k * 2] = to16(l, bps); pcm[k * 2 + 1] = to16(r, bps);
-        if (++k == 64u) { sink(sink_ctx, pcm, k); k = 0; }
-    }
-    if (k) sink(sink_ctx, pcm, k);
 
     align_byte(f);
     (void)bits(f, 16);                              /* frame CRC-16 */

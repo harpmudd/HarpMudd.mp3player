@@ -11,7 +11,10 @@
  * every file on the test card uses, against a 26624-byte arena. They do not
  * fit and cannot be made to.
  *
- * This one buffers ONE channel and streams the other. Stereo decorrelation
+ * This one buffers ONE channel and streams the other, and the streamed one
+ * decodes into the SAME array it is consuming -- ch0[i] is read at exactly the
+ * instant ch1[i] is produced, and ch1's LPC history is the entries just
+ * overwritten. Total working set: blocksize x 4 bytes. Stereo decorrelation
  * needs both channels at the same sample index, and FLAC stores subframes
  * consecutively (all of channel 0, then all of channel 1) -- so channel 0 has
  * to be held, but channel 1 can be reconstructed a sample at a time and
