@@ -564,14 +564,21 @@ static void vol_apply(void)
  * pl_order and leaves pl_off alone, so "track 4 of 12" always means the same
  * track whether shuffled or not, and turning shuffle off resumes the file
  * order without reloading anything. */
-#define PL_MAX       128u        /* tracks; the index costs 4 bytes each */
+#define PL_MAX       256u        /* tracks; the index costs 4 bytes each */
 /* The .m3u text. 8 KB made PL_MAX unreachable in practice and therefore a lie:
  * a real playlist here averages 110 bytes a line, so the buffer ran out at ~74
- * tracks while the documentation promised 128. 16 KB covers 128 lines of up to
- * 128 bytes, which is longer than any sane "Artist - Title.mp3". Costs 8 KB of
- * BSS. If this ever needs to grow again, raise PL_MAX with it or the same
- * mismatch comes back the other way round. */
-#define PL_TEXT_MAX  16384u
+ * tracks while the documentation promised 128.
+ *
+ * RAISED TO 256 TRACKS / 32 KB for v1.3.0, keeping the two in step: 256 lines
+ * of up to 128 bytes is exactly 32768, so the cap the docs promise is the cap
+ * the buffer can actually hold. Costs 16912 bytes of BSS against 32960 free
+ * between the end of BSS and the reserved DMA buffers -- the linker ASSERTs
+ * that boundary, so overrunning it fails the build rather than corrupting a
+ * DMA target.
+ *
+ * Do not raise one without the other. That mismatch has already shipped once,
+ * in the direction that made the documented cap a lie. */
+#define PL_TEXT_MAX  32768u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
@@ -952,7 +959,9 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * source: flipping this to 1 brings back the speed row and the resume row,
  * which between them found four separate faults here, and the 1.2x seek defect
  * is still open. Cheaper to keep than to rewrite. */
-#define UI_SHOW_SPEED_DIAG 0
+/* TEMPORARY, with IO_BENCH: shows the throughput figure. Back to 0 before
+ * anything ships -- no diagnostic is ever shown to users. */
+#define UI_SHOW_SPEED_DIAG 1
 
 #define UI_MARGIN   20u
 #define UI_TITLE_Y  30u
@@ -3808,6 +3817,10 @@ static void ui_draw_dynamic(void)
          * playlist switch is under investigation: measured against the real
          * font, the full line clips past 296px once the counters reach two
          * digits, and N is already at 8. */
+#if IO_BENCH
+        *q++ = 'I'; *q++ = 'O'; q = ui_dec(q, io_kbps);
+        *q++ = 'K'; *q++ = 'B'; *q++ = ' ';
+#endif
         *q++ = 'N'; q = ui_dec(q, pl_notify_n);
         *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
         *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_sw_ct);
@@ -3861,6 +3874,27 @@ extern char _ring_start, _ring_size;
 #define RING_OFF     ((uint32_t)(uintptr_t)&_ring_start)
 #define RING_SIZE    ((uint32_t)(uintptr_t)&_ring_size)
 #define REFILL_CHUNK 4096u
+
+/* ---- TEMPORARY: sequential SD throughput benchmark ------------------------
+ *
+ * The ONE measurement the FLAC decision turns on. Everything else about FLAC
+ * is understood; whether the card can sustain ~112 KB/s is not, and 40 KB/s at
+ * MP3's 320 kbps is the most this core has ever had to hold.
+ *
+ * It has to be a BURST, not an observation of normal playback: during playback
+ * the refill rate is limited by DEMAND, so timing it would measure the bitrate
+ * of the file and report it as a capacity figure. This reads N chunks
+ * back-to-back with no decoding in between, which is the ceiling.
+ *
+ * Sequential on purpose. The ~480 ms the old size probe spent on ~20 reads is
+ * not representative -- those were random offsets that made APF re-walk the
+ * cluster chain each time.
+ *
+ * Lands in the tag scratch buffer, never the ring, so it cannot disturb audio.
+ * Runs ONCE a session. MUST go back to 0 before shipping. */
+#define IO_BENCH 1
+static uint16_t io_kbps;          /* measured sustained sequential read rate */
+static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
 
 static uint8_t * const ring = (uint8_t *)(uintptr_t)(UNCACHED + (uint32_t)(uintptr_t)&_ring_start);
 
@@ -4579,6 +4613,29 @@ static int refill_one(void)
 }
 
 
+#if IO_BENCH
+static void io_bench(uint32_t from)
+{
+    static uint8_t done;
+    if (done) return;
+    done = 1;
+
+    const uint32_t N = 32u;                 /* 128 KB, ~1 s at the low end */
+    uint32_t t0 = cycles(), got = 0;
+    for (uint32_t i = 0; i < N; i++) {
+        if (!target_read_slot(MP3_SLOT_ID, from + i * REFILL_CHUNK,
+                              TAG_OFF, REFILL_CHUNK)) break;
+        got += REFILL_CHUNK;
+    }
+    uint32_t dt = cycles() - t0;
+    io_bench_bytes = got;
+    io_kbps = (dt && got)
+            ? (uint16_t)(((uint64_t)got * (uint64_t)CLK_HZ)
+                         / ((uint64_t)dt * 1024u))
+            : 0u;
+}
+#endif
+
 /* Issue a read, then go back to decoding and collect it later.
  *
  * This is NOT an optimisation. Until the handshake was fixed the target
@@ -5273,6 +5330,12 @@ static int load_track(void)
     uint32_t t0 = cycles(), tphase = t0;
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
     ld_head = LD_MS(cycles() - tphase); tphase = cycles();
+#if IO_BENCH
+    /* Here specifically: the FIFO is flushed and the gap is already silent,
+     * so a one-off burst costs gap length rather than audio. */
+    io_bench(audio_start);
+    tphase = cycles();                      /* keep ld_size honest */
+#endif
     if (audio_start) { st0 |= (1u << 1); REG(R_STAT0) = st0; }
 
     /* The size probe is ~20 blocking reads -- measured at 480 ms, and it runs

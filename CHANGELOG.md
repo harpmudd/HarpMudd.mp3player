@@ -2,6 +2,10 @@
 
 What changed in each release, newest first.
 
+## v1.3.0 — unreleased
+
+- Playlists can hold **256 tracks**, up from 128.
+
 ## v1.2.0 — 13 August 2026
 
 - Resume now works with **any** playlist, not just `playlist.m3u` — it
