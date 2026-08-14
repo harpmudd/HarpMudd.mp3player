@@ -519,6 +519,10 @@ static uint32_t peak_amp;         /* max |sample| in the most recently decoded f
 
 enum { ID3_OK, ID3_NO_TAG, ID3_NO_FRAME, ID3_UNSUPPORTED_ENCODING };
 static int title_status;
+static uint8_t ui_warn_row;   /* draw the album/format row as a warning */
+/* The rejected file's rate. Mirrored because `fl` is declared with the FLAC
+ * glue, ~2000 lines below the card that has to name it. */
+static uint32_t fl_reject_hz;
 
 static char track_title[48];
 static char track_artist[48];
@@ -2014,7 +2018,10 @@ static void ui_draw_chrome(void)
         const char *yr = track_year;
         while (*yr && q < b + sizeof(b) - 1) *q++ = *yr++;
         *q = 0;
-        fb_set_color(UI_DIM, UI_PANEL);
+        /* This row doubles as the warning line for a file the core will not
+         * play. Grey reads as another piece of metadata; red reads as a
+         * problem, which is the entire point of putting it there. */
+        fb_set_color(ui_warn_row ? UI_RED : UI_DIM, UI_PANEL);
         fb_text_boxed(UI_MARGIN, y, b, TS_1X, TS_1X,
                       ui_text_w, UI_CARD_TEXT_R);
         y += FB_CELL(TS_1X) + 2u;
@@ -2736,17 +2743,33 @@ static uint8_t rate_unsupported;   /* set at load, consumed by the main loop */
  * deserves. */
 static void ui_rate_unsupported(void)
 {
-    /* Clear the tag fields so the card carries the reason instead. The title
-     * falls back to the filename on its own when track_title is empty, which
-     * is exactly what wants naming here. */
-    track_title[0]  = 0;
-    track_artist[0] = 0;
-    track_album[0]  = 0;
-    track_year[0]   = 0;
-    track_trk[0]    = 0;
+    /* KEEP the title and artist. flac_open parses the Vorbis comments during
+     * the metadata walk and the rate is only rejected afterwards, so the real
+     * tags are already in hand -- "Jerry Garcia / Alabama Getaway" with a
+     * reason under it beats a truncated filename and nothing else.
+     *
+     * The album row carries the reason instead, in red, naming the file's
+     * actual rate: "48kHz MAX" alone does not say what is wrong with THIS
+     * file, and the previous wording did not say it would not play at all. */
+    track_year[0] = 0;
+    track_trk[0]  = 0;
 
-    static const char msg[] = "HI-RES FLAC - 48kHz MAX";
-    for (uint32_t i = 0; i < sizeof(msg); i++) track_artist[i] = msg[i];
+    {
+        char *q = track_album;
+        const char *p1 = "WON'T PLAY - ";
+        while (*p1) *q++ = *p1++;
+
+        uint32_t khz = fl_reject_hz / 1000u, frac = (fl_reject_hz % 1000u) / 100u;
+        if (khz >= 100u) *q++ = (char)('0' + khz / 100u);
+        if (khz >= 10u)  *q++ = (char)('0' + (khz / 10u) % 10u);
+        *q++ = (char)('0' + khz % 10u);
+        if (frac) { *q++ = '.'; *q++ = (char)('0' + frac); }
+
+        const char *p2 = "kHz, 48 MAX";
+        while (*p2) *q++ = *p2++;
+        *q = 0;
+    }
+    ui_warn_row = 1u;
 
     ui_blank_wake();
     ui_draw_chrome();
@@ -2755,7 +2778,7 @@ static void ui_rate_unsupported(void)
      * does -- the difference is only what the user is looking at. */
     for (;;) {
         poll_input();
-        if (reload_pending) return;
+        if (reload_pending) { ui_warn_row = 0u; return; }
     }
 }
 
@@ -4900,6 +4923,20 @@ static int  refill_one(void);      /* blocking read, for flac_pull()   */
 
 static uint32_t flac_stall;        /* refills that came back empty          */
 
+/* UI cadence, decoupled from the decode frame.
+ *
+ * ui_draw_dynamic() is driven once per decoded frame, which is right for MP3
+ * -- 1152 samples is 26 ms, so ~38 a second. A FLAC frame is 4608 samples,
+ * 104 ms, so the SAME loop refreshes the whole UI at ~9.6 fps: every meter,
+ * marquee and clock at a quarter speed. That is what "sluggish" was, and it
+ * is structural rather than anything to do with the meters.
+ *
+ * Driven on elapsed time instead, matching MP3's rate. The check runs once per
+ * flac_emit call -- every 64 samples, ~1.45 ms -- so it costs one counter read
+ * per call and cannot be late by more than that. */
+#define FL_UI_PERIOD (CLK_HZ / 38u)
+static uint32_t fl_ui_next;
+
 static int flac_pull(void *ctx, uint8_t *dst, int n)
 {
     (void)ctx;
@@ -4925,6 +4962,25 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
          * corruption was the frame-header bug fixed in f0f6bac, and the loop
          * turned every failed read into a ~35-second retry chain. */
         refill_pump();
+
+        /* UI refresh from HERE as well as from flac_emit, sharing one deadline
+         * so the rate is unchanged.
+         *
+         * flac_emit only runs while the SECOND channel is being decoded --
+         * subframe() decodes all of channel 0 first and emits nothing, which
+         * is ~half of a 104 ms frame with no refresh at all, then a burst.
+         * That bunching is the "tad of sluggishness" left after the rate fix:
+         * the average was right, the spacing was not. flac_pull is called
+         * every 512 bytes, right through both channels, so it fills the gap.
+         *
+         * Gated on fl_buf, which is null until flac_open has returned and the
+         * block buffer is allocated -- so this never fires while metadata is
+         * still being walked and the card is half-populated. */
+        if (fl_buf && (int32_t)(cycles() - fl_ui_next) >= 0) {
+            fl_ui_next = cycles() + FL_UI_PERIOD;
+            if (!ui_dump_mode) ui_draw_dynamic();
+        }
+
         if (ring_rd >= ring_fill) {
             /* Dry. Pump and wait, the same as a full FIFO -- the decoder
              * cannot proceed and the CPU has nothing better to do. */
@@ -4989,19 +5045,6 @@ static int flac_restart(void)
 #define FL_METER_PAIRS 1152u
 static uint32_t fl_meter_n;
 
-/* UI cadence, decoupled from the decode frame.
- *
- * ui_draw_dynamic() is driven once per decoded frame, which is right for MP3
- * -- 1152 samples is 26 ms, so ~38 a second. A FLAC frame is 4608 samples,
- * 104 ms, so the SAME loop refreshes the whole UI at ~9.6 fps: every meter,
- * marquee and clock at a quarter speed. That is what "sluggish" was, and it
- * is structural rather than anything to do with the meters.
- *
- * Driven on elapsed time instead, matching MP3's rate. The check runs once per
- * flac_emit call -- every 64 samples, ~1.45 ms -- so it costs one counter read
- * per call and cannot be late by more than that. */
-#define FL_UI_PERIOD (CLK_HZ / 38u)
-static uint32_t fl_ui_next;
 
 /* `src`, not `pcm`: the file-scope pcm[] is the meter capture buffer, and a
  * parameter of that name would shadow it. */
@@ -5816,6 +5859,7 @@ static int load_track(void)
          * a single bad file break every load after it. */
         if (fl.rate > FLAC_MAX_RATE) {
             REG(R_STAT2) = 0xC3000000u | fl.rate;
+            fl_reject_hz = fl.rate;
             dec = MP3InitDecoder();
             track_fmt = FMT_MP3;
             rate_unsupported = 1u;
