@@ -5062,10 +5062,24 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
     }
 
     for (uint32_t i = 0; i < frames; i++) {
-        if (fl_meter_n < FL_METER_PAIRS) {
-            pcm[fl_meter_n * 2u]      = src[i * 2];
-            pcm[fl_meter_n * 2u + 1u] = src[i * 2 + 1];
-            fl_meter_n++;
+        /* Fill CONTINUOUSLY and flush every FL_METER_PAIRS, rather than
+         * grabbing the head of each frame and dropping the rest.
+         *
+         * This was the real "delayed, not realtime" fault, and it was in the
+         * DATA, not the redraw. meters_feed() ran once per FLAC frame -- 9.6 a
+         * second against MP3's 38 -- from the first 1152 of 4608 pairs, so the
+         * peaks changed nine times a second and three quarters of the audio
+         * was never looked at. Repainting faster cannot help a number that is
+         * not moving.
+         *
+         * At 1152 pairs the flush interval is 26 ms, which is exactly MP3's
+         * frame, so both formats now drive the meters at the same rate through
+         * the same code. Ignoring frame boundaries keeps the interval even. */
+        pcm[fl_meter_n * 2u]      = src[i * 2];
+        pcm[fl_meter_n * 2u + 1u] = src[i * 2 + 1];
+        if (++fl_meter_n == FL_METER_PAIRS) {
+            meters_feed(pcm, (int)(FL_METER_PAIRS * 2u), 1);
+            fl_meter_n = 0;
         }
         int32_t l = src[i * 2], r = src[i * 2 + 1];
         if (fade_left) {
@@ -7020,9 +7034,8 @@ int main(void)
             fl_dec_cyc  += (cycles() - t_frame)
                          - ((fl_idle_cyc - idle0) + (fl_io_cyc - io0));
             fl_dec_samp += fl.blocksize;
-            /* Same meters, same code as MP3 -- see meters_feed(). */
-            if (fl_meter_n) { meters_feed(pcm, (int)(fl_meter_n * 2u), 1); }
-            fl_meter_n = 0;
+            /* Meters are fed from flac_emit on a fixed 1152-pair interval,
+             * not here: once per frame is 9.6 Hz and looks delayed. */
             if (fe == FLAC_END || fe == FLAC_ERR_SHORT) {
                 if (pl_advance_auto()) { ui_mode_dirty = 1; continue; }
                 if (pl_count && rep_mode == REP_OFF &&
