@@ -118,7 +118,66 @@ be underestimated.
 
 ---
 
-## The one measurement
+## MEASURED 2026-08-14 — throughput passes, comfortably
+
+**736 KB/s sequential.** FLAC needs ~112 KB/s, so that is a **6.5× margin** —
+far past the 200 KB/s I set as the comfortable threshold.
+
+**Throughput is not the constraint.** The thing that could have ruled FLAC out
+outright does not.
+
+Two corollaries worth having:
+
+- The ring holding only 0.29 s at FLAC rates matters much less when the card
+  refills it 6.5× faster than it drains.
+- Even a 3149 kbps hi-res file (394 KB/s) is inside the measured ceiling, which
+  I did not expect.
+
+## The REAL constraint is RAM, and it is worse than this document first said
+
+The original estimate here — "~16 KB block buffer" — assumed 16-bit storage.
+A FLAC decoder does not work in 16-bit. Residuals and LPC intermediates are
+32-bit, so the working buffers are **blocksize × channels × 4 bytes**:
+
+| | blocksize | working buffers |
+|---|---|---|
+| CD rip, 16/44.1 | 4096 | **32,768 B** |
+| the sample on the card, 24/96 | 4608 | **36,864 B** |
+
+Against a decoder arena of **26,624 bytes**, all of which Helix currently needs
+23,824 of. **A conventional FLAC decoder does not fit**, and no amount of
+shuffling the playlist buffer changes that — the gap is ~10 KB, not 2.
+
+### The way through: decode as a stream, not a block
+
+FLAC does not actually require the whole block resident. Residuals arrive in
+Rice partitions, and LPC prediction needs only the last `order` samples of
+history — 32 at most. So a decoder can work a partition at a time, apply LPC
+with a rolling history, and push PCM to the FIFO as it is produced.
+
+Working set then falls to a few hundred bytes plus the FIFO staging buffer,
+and blocksize stops mattering at all.
+
+The cost is that no off-the-shelf decoder does this. libFLAC and dr_flac both
+allocate per-block buffers, so this means a purpose-written decoder: roughly
+800–1200 lines for the 16-bit path. That is the real scope of the feature, and
+it is why "FLAC is cheaper than MP3 to decode" was never the useful fact.
+
+## About the sample file
+
+`Circles Around the Sun - Third Sunrise Over Gliese.flac` is **24-bit / 96 kHz,
+blocksize 4608, 3149 kbps average, 6.4 minutes, 144 MB**, with a SEEKTABLE, a
+Vorbis comment written by Mutagen, and a 59 KB embedded PICTURE.
+
+It is the hardest case, and this document had already scoped it out: the output
+is 16/48 regardless, so 24/96 buys nothing audible while costing **2.2× the
+decode work** of a CD rip and needing 36,864 bytes of working buffers.
+
+**A 16-bit / 44.1 kHz CD rip is the target to develop against.** The hi-res
+file is still useful later — as the thing that must be *rejected cleanly*
+rather than played badly.
+
+## The original gating measurement (now answered)
 
 **Can the card sustain ~112 KB/s sequential?**
 
