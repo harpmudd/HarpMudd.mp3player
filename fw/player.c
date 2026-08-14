@@ -7050,6 +7050,11 @@ int main(void)
                     if (fl.max_blocksize)
                         frames = (uint32_t)(((uint64_t)tgt * (uint64_t)fl.rate)
                                             / (uint64_t)fl.max_blocksize);
+                    /* Must follow the rebase, and must equal it: the clock
+                     * accumulator fires on `frames != ui_last_frames`, so a
+                     * stale value here spends a phantom frame -- and the
+                     * sentinel 0xFFFFFFFF would guarantee one. */
+                    ui_last_frames = frames;
                     if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
                     if (paused) { ui_draw_dynamic(); continue; }
                 }
@@ -7250,8 +7255,18 @@ int main(void)
             }
             if (fe != FLAC_OK) { errs++; REG(R_STAT2) = 0xC2000000u | fe; }
             frames++;
-            ui_sec = fl.rate ? (uint32_t)((uint64_t)frames * fl.blocksize
-                                          / fl.rate) : 0;
+            /* The clock is NOT set here. ui_draw_dynamic() already advances
+             * ui_sec by an accumulator whenever `frames` moves, and this line
+             * recomputed it independently -- two writers, the same nominal
+             * rate, different rounding, so they disagreed by a second
+             * depending on which ran last. That was the +-1s twitch on the
+             * progress row, and driving the UI more often made it worse by
+             * running the accumulator far more often.
+             *
+             * The accumulator is also the cheaper of the two: samp_per_frame
+             * is fl.max_blocksize and samprate is fl.rate, so it is adds and
+             * compares in place of a 64-bit divide (__udivdi3, hundreds of
+             * cycles on RV32) once per frame. */
             st0 |= (1u << 3);
             REG(R_STAT0) = st0;
             if (!ui_dump_mode) ui_draw_dynamic();
