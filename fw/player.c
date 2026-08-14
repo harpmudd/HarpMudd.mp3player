@@ -4753,6 +4753,26 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
     (void)ctx;
     int got = 0;
     while (got < n) {
+        /* Collect any finished read and let the next one start, BEFORE asking
+         * whether the ring is dry.
+         *
+         * Reads used to be started only inside the full-FIFO wait in
+         * flac_emit, which works while there is idle time to wait in and does
+         * nothing once there is not. Measured: Pink Floyd has D27 of idle and
+         * shows O0, while every 24-bit file has D0 and pays O27..O39. Demand
+         * against the measured 736 KB/s is 28/42/53%, against measured O of
+         * 27/35/39 -- so the card was never slow. The reads were simply never
+         * STARTED until the ring had already run dry, and by then the only
+         * option left is a blocking one. O is a CONSEQUENCE of D reaching
+         * zero, and it compounds.
+         *
+         * This is safe against the blocking path: target_read_start_slot()
+         * already calls refill_drain(), so there is exactly one command in
+         * flight ever. An earlier build blamed corruption here on a race and
+         * added a drain loop of its own -- the race did not exist, the
+         * corruption was the frame-header bug fixed in f0f6bac, and the loop
+         * turned every failed read into a ~35-second retry chain. */
+        refill_pump();
         if (ring_rd >= ring_fill) {
             /* Dry. Pump and wait, the same as a full FIFO -- the decoder
              * cannot proceed and the CPU has nothing better to do. */

@@ -359,3 +359,35 @@ Garcia to ~112 and Circles to ~143, both still over. If that holds, the honest
 shape for this release is FLAC up to 48 kHz — which covers essentially every CD
 rip — and a clear on-screen refusal for hi-res files rather than letting them
 play badly.
+
+---
+
+## MEASURED 2026-08-14 (second pass) — after the bit reader
+
+With the frame-header bug fixed and the bit reader working on valid input:
+
+| file | format | L before | **L after** | R | P | D | O | L+O |
+|---|---|---|---|---|---|---|---|---|
+| Pink Floyd | 16/44.1 | 76 | **74** | 60 | 6 | 27 | 0 | 74 |
+| Psychedelic Furs | 24/44.1 | 95 | **80** | 67 | 11 | 0 | 27 | **107** |
+
+The bit reader helps in proportion to coded bits per sample, exactly as the
+bitrate model predicts: Pink Floyd at 9.6 bits/sample gains 2 points, the Furs
+at 18.5 gains 15. It is a 1.3x on the Rice pass, not the 1.6x predicted — the
+prediction was optimistic and the measurement stands.
+
+**The Furs now decodes in 80% of realtime and is sunk entirely by 27% of I/O.**
+Seven percent over the line, with the whole overage on the I/O side.
+
+### A correction worth keeping
+
+The corruption in 67efaa8 — LPC orders of 21 and 18, R at 0, files leaving the
+FLAC path — was diagnosed as a race between the async and blocking read paths.
+That race does not exist: target_read_start_slot() already calls
+refill_drain(), so there is exactly one command in flight ever. The real cause
+was the frame-header bug (f0f6bac), which shipped in the same build.
+
+Two costs came from getting that wrong. The "fix" for the imaginary race turned
+every failed read into a ~35-second blocking retry chain, and the genuinely
+working I/O change was reverted alongside it on suspicion. Bundling two changes
+meant neither could be judged, and the wrong one was blamed.
