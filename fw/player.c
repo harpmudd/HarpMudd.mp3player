@@ -569,21 +569,33 @@ static void vol_apply(void)
  * pl_order and leaves pl_off alone, so "track 4 of 12" always means the same
  * track whether shuffled or not, and turning shuffle off resumes the file
  * order without reloading anything. */
-#define PL_MAX       128u        /* tracks; the index costs 4 bytes each */
+#define PL_MAX       256u        /* tracks; the index costs 4 bytes each */
 /* The .m3u text. 8 KB made PL_MAX unreachable in practice and therefore a lie:
  * a real playlist here averages 110 bytes a line, so the buffer ran out at ~74
  * tracks while the documentation promised 128.
  *
- * RAISED TO 256 TRACKS / 32 KB for v1.3.0, keeping the two in step: 256 lines
- * of up to 128 bytes is exactly 32768, so the cap the docs promise is the cap
- * the buffer can actually hold. Costs 16912 bytes of BSS against 32960 free
- * between the end of BSS and the reserved DMA buffers -- the linker ASSERTs
- * that boundary, so overrunning it fails the build rather than corrupting a
- * DMA target.
+ * RAISED TO 256 TRACKS / 20 KB for v1.3.0, keeping the two in step. 20 KB is
+ * ~80 characters a line at 256 tracks -- short of the 128 the old comment
+ * promised, and the honest number rather than an aspiration.
  *
- * Do not raise one without the other. That mismatch has already shipped once,
+ * It took three attempts to size this, because the space it grows into was
+ * never free space:
+ *
+ *   1. Sized against the whole BSS-to-DMA gap. That gap is the HEAP. Left
+ *      15680 bytes where newlib needed more, MP3InitDecoder() returned 0, and
+ *      every track showed LOAD FAILED. The build passed.
+ *   2. Sized against Helix's struct sum of 23816 plus a margin. Also failed,
+ *      at 25232 -- newlib's own overhead was the missing term and it was
+ *      never visible.
+ *   3. Measured. A23824/26624 on hardware, once fw/alloc.c replaced newlib's
+ *      allocator with a fixed arena. Helix's true cost is 23824, the arena is
+ *      a fixed 26624, and what is left over is genuinely free.
+ *
+ * So: do not raise either of these against an address gap. Raise them against
+ * the leftover the linker reports, and keep 1 KB for the token heap. And do
+ * not raise one without the other -- that mismatch has already shipped once,
  * in the direction that made the documented cap a lie. */
-#define PL_TEXT_MAX  16384u
+#define PL_TEXT_MAX  20480u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was

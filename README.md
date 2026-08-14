@@ -176,8 +176,8 @@ framework bugs that had to be found first — is in
 - **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
   skipped rather than shown wrong — re-save as baseline if a cover doesn't
   appear. See [ROADMAP.md](ROADMAP.md).
-- **Playlists are capped at 256 tracks**, or 22 KB of `.m3u` text — whichever
-  comes first, which allows about 88 characters per line. A playlist that runs
+- **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
+  comes first, which allows about 80 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
 - **Sometimes a playlist pick doesn't register straight away.** It loads on
   its own a few seconds later; if it doesn't, pick it again. Seen when
