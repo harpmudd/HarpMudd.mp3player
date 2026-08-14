@@ -284,7 +284,7 @@ if __name__ == '__main__':
     # An all-zero digest is FLAC's "not computed", not a mismatch. Every
     # 24-bit file on the test card has one -- the tagging pipeline zeroes it --
     # so reporting MISMATCH here would be a false alarm on most of the corpus.
-    if si['md5'] == b' ' * 16:
+    if si['md5'] == bytes(16):
         print("  STREAMINFO md5 ABSENT -- the encoder stored none")
         print(f"  decoded    md5 {digest.hex()}")
         print("  ==> CANNOT VERIFY arithmetic; but the parse is exact:")

@@ -556,6 +556,20 @@ static uint32_t paused, volume = 65u;    /* overridden by the saved setting     
 #define FADE_SAMPLES 2048u
 static uint32_t fade_left;
 static uint8_t  under_shadow;   /* underrun already faded this flush epoch */
+static uint32_t pcm_under_n;    /* underrun EDGES since boot, for the diag  */
+/* Where the CPU's second actually goes, so the hiccup can be ATTRIBUTED
+ * instead of guessed at. Three outcomes, three different fixes:
+ *
+ *   idle high  -- the decoder finishes early and waits on a full FIFO. The
+ *                 CPU is fine; a hiccup then is the ring or the SD read.
+ *   io high    -- the decoder is blocked in flac_pull waiting for bytes. The
+ *                 ring is too small or the reads are too slow.
+ *   both ~0    -- the decoder cannot keep up. Only optimisation helps.
+ *
+ * Cycles, not iterations: a wait iteration and a decode iteration are not the
+ * same size, and comparing counts of them would prove nothing. */
+static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
+static uint8_t  fl_idle_pct, fl_io_pct;    /* last completed second         */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -999,7 +1013,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  *
  * Lands in the tag scratch buffer, never the ring, so it cannot disturb audio.
  * Runs ONCE a session. MUST go back to 0 before shipping. */
-#define IO_BENCH 1
+#define IO_BENCH 0
 /* Defined HERE, above every user. It lived next to REFILL_CHUNK, ~90 lines
  * BELOW the diagnostic row that tests it -- so `#if IO_BENCH` in the row saw
  * an undefined name, evaluated it as 0, and dropped the readout with no
@@ -3867,37 +3881,32 @@ static void ui_draw_dynamic(void)
      * investigations are closed, so their fields are gone. */
     if (ui_sec != ui_last_spd) {
         ui_last_spd = ui_sec;
+        /* Latch and reset the attribution for the second just finished. */
+        fl_idle_pct = (uint8_t)(fl_idle_cyc / (CLK_HZ / 100u));
+        fl_io_pct   = (uint8_t)(fl_io_cyc   / (CLK_HZ / 100u));
+        if (fl_idle_pct > 99u) fl_idle_pct = 99u;
+        if (fl_io_pct   > 99u) fl_io_pct   = 99u;
+        fl_idle_cyc = fl_io_cyc = 0u;
         char b[64], *q = b;
         /* The speed prefix this row was built for is dropped while the
          * playlist switch is under investigation: measured against the real
          * font, the full line clips past 296px once the counters reach two
          * digits, and N is already at 8. */
-#if IO_BENCH
-        *q++ = 'I'; *q++ = 'O'; q = ui_dec(q, io_kbps);
-        *q++ = 'K'; *q++ = 'B'; *q++ = ' ';
-        /* What newlib ACTUALLY took for the decoder, against what is there.
-         * The struct sizes sum to 23816; malloc asks _sbrk for more than the
-         * sum, and guessing the difference is what just cost a build. */
-        *q++ = 'A'; q = ui_dec(q, arena_used());
-        *q++ = '/'; q = ui_dec(q, arena_total());
-        *q++ = ' ';
-#endif
-        *q++ = 'N'; q = ui_dec(q, pl_notify_n);
-        *q++ = ' '; *q++ = 'L'; q = ui_dec(q, pl_load_n);
-        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_sw_ct);
-        /* The playlist side read 1010 three times running, so its history is
-         * spent -- one current copy is enough. The row's remaining width goes
-         * to the TRACK loads, which is where the fault now has to be. */
-        *q++ = ' ';
-        q = ui_hex2(q, (uint8_t)(pl_sw_hist[2] >> 8));
-        q = ui_hex2(q, (uint8_t)pl_sw_hist[2]);
-        *q++ = ' '; *q++ = 'K';
-        for (uint32_t i = 0; i < 3u; i++) {
-            *q++ = ' ';
-            *q++ = (char)('0' + ((tk_hist[i] >> 8) & 0xFu));
-            *q++ = (char)('0' + ((tk_hist[i] >> 4) & 0xFu));
-            *q++ = (char)('0' + (tk_hist[i] & 0xFu));
-        }
+        /* The playlist fields are gone: that investigation closed with the
+         * poll fix confirmed on hardware, and this row is now the only way to
+         * tell WHY a FLAC file hiccups.
+         *
+         * D = idle, waiting on a full FIFO -- spare CPU.
+         * O = blocked in flac_pull waiting for bytes -- starved of input.
+         * U = sticky underruns, the audible fault itself.
+         *
+         * Read D and O together. High D with underruns means the decoder is
+         * fast enough and the ring is the problem; both near zero means the
+         * decoder is not fast enough. Those need opposite fixes, and without
+         * this row the two are indistinguishable from the couch. */
+        *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
+        *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
+        *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -4720,7 +4729,10 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
              * Metadata skipping needs real progress: the hi-res file on the
              * test card carries 59 KB of picture and 151 KB of padding before
              * its first audio frame. */
-            if (!refill_one() || ring_rd >= ring_fill) {
+            uint32_t t0 = cycles();
+            int ok = refill_one();
+            fl_io_cyc += cycles() - t0;
+            if (!ok || ring_rd >= ring_fill) {
                 if (++flac_stall > 8u) break;       /* genuine end of file */
                 continue;
             }
@@ -4729,7 +4741,21 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
         uint32_t avail = ring_fill - ring_rd;
         uint32_t take  = ((uint32_t)(n - got) < avail) ? (uint32_t)(n - got)
                                                        : avail;
-        for (uint32_t i = 0; i < take; i++) dst[got + i] = ring[ring_rd + i];
+        /* The ring is UNCACHED, so every byte here is a bus transaction.
+         * Copying words cuts that by four. Both cursors are 4-aligned in the
+         * steady state -- flac_pull asks for 512 at a time and ring_rd
+         * advances by what it took -- so the fast path is the normal one, and
+         * the byte loop stays for the ends. */
+        uint32_t i = 0;
+        if ((((uintptr_t)dst + (uint32_t)got) & 3u) == 0u &&
+            ((uintptr_t)&ring[ring_rd] & 3u) == 0u) {
+            uint32_t       *dw = (uint32_t *)(void *)(dst + got);
+            const uint32_t *sw = (const uint32_t *)(const void *)&ring[ring_rd];
+            uint32_t w = take >> 2;
+            for (uint32_t j = 0; j < w; j++) dw[j] = sw[j];
+            i = w << 2;
+        }
+        for (; i < take; i++) dst[got + i] = ring[ring_rd + i];
         ring_rd += take;
         got     += (int)take;
     }
@@ -4769,9 +4795,13 @@ static void flac_emit(void *ctx, const int16_t *pcm, uint32_t frames)
             r = (r * g) >> 8;
             fade_left--;
         }
-        while (PCM_FULL(REG(R_PCM_ST))) {
-            poll_input();
-            refill_pump();
+        if (PCM_FULL(REG(R_PCM_ST))) {
+            uint32_t t0 = cycles();
+            do {
+                poll_input();
+                refill_pump();
+            } while (PCM_FULL(REG(R_PCM_ST)));
+            fl_idle_cyc += cycles() - t0;
         }
         REG(R_AUDIO) = ((uint32_t)(uint16_t)(int16_t)r << 16)
                      | (uint32_t)(uint16_t)(int16_t)l;
@@ -6660,6 +6690,14 @@ int main(void)
              * pushes to the FIFO through the two adapters, so this loop keeps
              * its existing shape -- UI, input and end-of-track all still run
              * between frames. */
+            /* The MP3 loop has this net a few lines further down; the FLAC
+             * loop needs its own, and the count is what tells the diag row a
+             * hiccup actually happened rather than was imagined. */
+            if (!under_shadow && pcm_underrun()) {
+                under_shadow = 1u;
+                pcm_under_n++;
+                fade_left    = FADE_SAMPLES;
+            }
             flac_err fe = flac_decode_frame(&fl, flac_emit, 0);
             if (fe == FLAC_END || fe == FLAC_ERR_SHORT) {
                 if (pl_advance_auto()) { ui_mode_dirty = 1; continue; }
@@ -6737,6 +6775,7 @@ int main(void)
          * licence to underrun. */
         if (!under_shadow && pcm_underrun()) {
             under_shadow = 1u;
+            pcm_under_n++;
             fade_left    = FADE_SAMPLES;
         }
 
