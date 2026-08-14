@@ -41,7 +41,7 @@ player)
       $HELIX/real/hufftabs.c $HELIX/real/imdct.c $HELIX/real/polyphase.c \
       $HELIX/real/scalfact.c $HELIX/real/stproc.c $HELIX/real/subband.c \
       $HELIX/real/trigtabs.c \
-      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $ROOT/third_party/picojpeg/picojpeg.c"
+      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $ROOT/third_party/picojpeg/picojpeg.c $FW/flac.o"
     INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
     ;;
 *)
@@ -57,6 +57,18 @@ esac
 # compiled, which is the exact opposite of what this script exists for.
 # Deleting the elf first means a failure can never fall back to an old one.
 rm -f "$FW/fw.elf"
+# The FLAC decoder is compiled -Os and the rest -O2 on purpose. Its text is
+# 10602 bytes at -O2 against 6182 at -Os, and those 4420 bytes are the
+# difference between the image fitting below the DMA buffers and not. The hot
+# MP3 path keeps -O2: it needs 45.7 MHz of 60 and cannot afford the loss.
+# If FLAC turns out CPU-bound, this is the first thing to revisit.
+rm -f "$FW/flac.o"
+if ! "$GCC" -march=rv32im -mabi=ilp32 -mno-relax -Os -ffreestanding -c         -o "$FW/flac.o" "$FW/flac.c" > "$FW/build.log" 2>&1; then
+    cat "$FW/build.log" >&2
+    echo "*** flac.c FAILED TO COMPILE ***" >&2
+    exit 1
+fi
+
 if ! "$GCC" $CFLAGS $INC -T "$FW/link.ld" -o "$FW/fw.elf" $SRCS -lm \
         > "$FW/build.log" 2>&1; then
     grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true

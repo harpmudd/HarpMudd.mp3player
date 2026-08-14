@@ -33,7 +33,15 @@
  * for a future decoder that is larger. FLAC's block buffer is ~16 KB against
  * Helix's 8708-byte SubbandInfo, so a swap needs headroom here, not a second
  * arena -- that is the whole point of sizing it once. */
-#define ARENA_BYTES 26624u
+/* 24576, sized from the MEASURED peak rather than a guess: A23824/26624 on
+ * hardware, so Helix's real high-water mark is 23824 and this leaves 752.
+ * The FLAC decoder needs less -- one blocksize of int32 (18432 for the
+ * 4608-sample blocks on the test card) plus its state -- so the two swap
+ * inside this without either being the binding case.
+ *
+ * It was 26624; the 2048 came back because the FLAC decoder's CODE has to be
+ * resident alongside Helix's, and total RAM is image + heap, not just data. */
+#define ARENA_BYTES 24576u
 
 static uint8_t  arena[ARENA_BYTES] __attribute__((aligned(8)));
 static uint32_t arena_next;

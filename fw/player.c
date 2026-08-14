@@ -595,7 +595,7 @@ static void vol_apply(void)
  * the leftover the linker reports, and keep 1 KB for the token heap. And do
  * not raise one without the other -- that mismatch has already shipped once,
  * in the direction that made the documented cap a lie. */
-#define PL_TEXT_MAX  20480u
+#define PL_TEXT_MAX  16384u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
@@ -4621,6 +4621,16 @@ static void target_flush_slot_cache(void)
     target_read_slot(FW_SLOT_ID, 0, TAG_OFF, 512);
 }
 
+#include "flac.h"
+
+/* Which decoder the current track needs. Detected from the file's first four
+ * bytes, not its extension -- a .flac that is really an MP3 should play, and a
+ * mislabelled file should not silently fail. */
+enum { FMT_MP3 = 0, FMT_FLAC };
+static uint8_t  track_fmt;
+static flac_t   fl;
+static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
+
 #include "art.inc"
 #include "playlist.inc"
 #include "settings.inc"
@@ -4674,6 +4684,66 @@ static void io_bench(uint32_t from)
             : 0u;
 }
 #endif
+
+static void refill_pump(void);     /* defined below; the glue needs it */
+
+/* ---------------------------------------------------------- FLAC glue ---
+ *
+ * Two adapters, and nothing else: the decoder is format logic, the firmware
+ * owns the ring and the FIFO, and neither should know about the other.
+ *
+ * The shapes already exist in the MP3 path. flac_pull() consumes the ring the
+ * way MP3Decode does; flac_emit() pushes samples the way the frame loop does,
+ * including servicing input and refills from inside the full-FIFO wait --
+ * which is where this CPU spends most of its time and the only reason the
+ * decoder keeps up. */
+
+static uint32_t flac_stall;        /* refills that came back empty          */
+
+static int flac_pull(void *ctx, uint8_t *dst, int n)
+{
+    (void)ctx;
+    int got = 0;
+    while (got < n) {
+        if (ring_rd >= ring_fill) {
+            /* Dry. Pump and wait, the same as a full FIFO -- the decoder
+             * cannot proceed and the CPU has nothing better to do. */
+            refill_pump();
+            if (ring_rd >= ring_fill) {
+                if (++flac_stall > 4096u) break;    /* genuine end of file */
+                continue;
+            }
+        }
+        flac_stall = 0;
+        uint32_t avail = ring_fill - ring_rd;
+        uint32_t take  = ((uint32_t)(n - got) < avail) ? (uint32_t)(n - got)
+                                                       : avail;
+        for (uint32_t i = 0; i < take; i++) dst[got + i] = ring[ring_rd + i];
+        ring_rd += take;
+        got     += (int)take;
+    }
+    return got;
+}
+
+static void flac_emit(void *ctx, const int16_t *pcm, uint32_t frames)
+{
+    (void)ctx;
+    for (uint32_t i = 0; i < frames; i++) {
+        int32_t l = pcm[i * 2], r = pcm[i * 2 + 1];
+        if (fade_left) {
+            int32_t g = (int32_t)((FADE_SAMPLES - fade_left) >> 3);
+            l = (l * g) >> 8;
+            r = (r * g) >> 8;
+            fade_left--;
+        }
+        while (PCM_FULL(REG(R_PCM_ST))) {
+            poll_input();
+            refill_pump();
+        }
+        REG(R_AUDIO) = ((uint32_t)(uint16_t)(int16_t)r << 16)
+                     | (uint32_t)(uint16_t)(int16_t)l;
+    }
+}
 
 /* Issue a read, then go back to decoding and collect it later.
  *
