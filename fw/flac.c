@@ -242,69 +242,117 @@ static const uint16_t blk_tab[16] = {
     256, 512, 1024, 2048, 4096, 8192, 16384, 32768
 };
 
-static flac_err frame_header(flac_t *f)
+/* CRC-8 over the frame header, poly x^8+x^2+x^1+x^0 (0x07), init 0.
+ *
+ * Bitwise rather than a 256-byte table: a header is ~6 bytes, so this runs
+ * about 48 iterations per frame against 256 bytes of rodata that would have to
+ * come out of ~1.8 KB of remaining link slack. */
+static uint8_t flac_crc8(const uint8_t *p, uint32_t n)
 {
-    /* Sync is 14 bits of 1s followed by a zero. Scan for it rather than
-     * assuming alignment: a decoder that has lost sync must be able to find
-     * the next frame, and the CRC check is what makes that safe. */
-    uint32_t tries = 0;
-    for (;;) {
-        if (!need(f, 15)) return FLAC_ERR_SHORT;
-        uint32_t peek = (f->bitacc >> (f->bitcnt - 15u)) & 0x7FFFu;
-        if ((peek >> 1) == 0x3FFEu) break;
-        f->bitcnt--;                                   /* slide one bit */
-        if (++tries > (1u << 22)) return FLAC_ERR_SYNC;
+    uint8_t c = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (uint32_t b = 0; b < 8u; b++)
+            c = (uint8_t)((c & 0x80u) ? ((c << 1) ^ 0x07u) : (c << 1));
     }
-    (void)bits(f, 14);                                 /* sync            */
-    (void)bits(f, 1);                                  /* reserved        */
-    (void)bits(f, 1);                                  /* blocking strategy */
+    return c;
+}
 
-    uint32_t bs_code = bits(f, 4);
-    uint32_t sr_code = bits(f, 4);
-    f->ch_mode       = (uint8_t)bits(f, 4);
-    (void)bits(f, 3);                                  /* sample size     */
-    (void)bits(f, 1);                                  /* reserved        */
+/* Parses a header at the CURRENT byte-aligned position and VERIFIES its CRC.
+ *
+ * The bit reader cannot rewind, so a rejected candidate leaves the position
+ * wherever parsing stopped -- which is fine: the caller simply keeps scanning,
+ * and the next real frame is found from there.
+ */
+static flac_err parse_frame_header(flac_t *f)
+{
+    uint8_t  h[16];
+    uint32_t n = 0;
+
+#define HBYTE() do { if (!need(f, 8)) return FLAC_ERR_SHORT;                                        h[n++] = (uint8_t)bits(f, 8); } while (0)
+
+    HBYTE(); HBYTE(); HBYTE(); HBYTE();          /* sync, bs/sr, ch/size */
+
+    uint32_t bs_code = (uint32_t)(h[2] >> 4);
+    uint32_t sr_code = (uint32_t)(h[2] & 0x0Fu);
+    f->ch_mode       = (uint8_t)(h[3] >> 4);
 
     /* UTF-8 coded frame or sample number: leading ones give the length. */
-    /* Read through the BIT READER, not byte(), which bypasses the reservoir.
-     *
-     * The old comment here said a raw byte read was correct because the
-     * accumulator is byte-aligned at this point -- true only while refills
-     * were one byte at a time and the residue happened to land at zero. A
-     * four-byte refill can leave up to 32 bits still held, and byte() reads
-     * straight past them: the frame number comes from the wrong offset, the
-     * blocksize that follows is garbage, and the file "loads but does not
-     * play". Byte-ALIGNED is not the same as reservoir-EMPTY.
-     *
-     * Reading through bits(8) is correct at any residue, which is also what
-     * the reference decoder in tools/ does -- and why the host check passed
-     * this bug straight through. */
-    if (!need(f, 8)) return FLAC_ERR_SHORT;
-    int c = (int)bits(f, 8);
+    HBYTE();
+    uint8_t  c = h[n - 1u];
     uint32_t extra = 0;
-    if      ((c & 0x80) == 0x00) extra = 0;
-    else if ((c & 0xE0) == 0xC0) extra = 1;
-    else if ((c & 0xF0) == 0xE0) extra = 2;
-    else if ((c & 0xF8) == 0xF0) extra = 3;
-    else if ((c & 0xFC) == 0xF8) extra = 4;
-    else if ((c & 0xFE) == 0xFC) extra = 5;
-    else if ((c & 0xFF) == 0xFE) extra = 6;
-    for (uint32_t i = 0; i < extra; i++) {
-        if (!need(f, 8)) return FLAC_ERR_SHORT;
-        (void)bits(f, 8);
-    }
+    if      ((c & 0x80u) == 0x00u) extra = 0;
+    else if ((c & 0xE0u) == 0xC0u) extra = 1;
+    else if ((c & 0xF0u) == 0xE0u) extra = 2;
+    else if ((c & 0xF8u) == 0xF0u) extra = 3;
+    else if ((c & 0xFCu) == 0xF8u) extra = 4;
+    else if ((c & 0xFEu) == 0xFCu) extra = 5;
+    else if ((c & 0xFFu) == 0xFEu) extra = 6;
+    else return FLAC_ERR_DATA;                   /* 0xFF is not a valid lead */
+    for (uint32_t i = 0; i < extra; i++) HBYTE();
 
-    if      (bs_code == 6u) f->blocksize = bits(f, 8) + 1u;
-    else if (bs_code == 7u) f->blocksize = bits(f, 16) + 1u;
+    uint32_t bsi = n;
+    if      (bs_code == 6u) { HBYTE(); }
+    else if (bs_code == 7u) { HBYTE(); HBYTE(); }
+    if      (sr_code == 12u) { HBYTE(); }
+    else if (sr_code == 13u || sr_code == 14u) { HBYTE(); HBYTE(); }
+#undef HBYTE
+
+    if (!need(f, 8)) return FLAC_ERR_SHORT;
+    uint8_t stored = (uint8_t)bits(f, 8);
+    if (flac_crc8(h, n) != stored) return FLAC_ERR_DATA;
+
+    if      (bs_code == 6u) f->blocksize = (uint32_t)h[bsi] + 1u;
+    else if (bs_code == 7u) f->blocksize = (((uint32_t)h[bsi] << 8)
+                                            | (uint32_t)h[bsi + 1u]) + 1u;
     else                    f->blocksize = blk_tab[bs_code];
-
-    if      (sr_code == 12u) (void)bits(f, 8);
-    else if (sr_code == 13u || sr_code == 14u) (void)bits(f, 16);
-
-    (void)bits(f, 8);                                  /* header CRC-8 */
 
     if (!f->blocksize || f->blocksize > f->ch0_cap) return FLAC_ERR_DATA;
     return FLAC_OK;
+}
+
+/* Finds the next frame header.
+ *
+ * During sequential playback frames abut, so this never actually searches --
+ * which is why playback was clean while SEEKING was not. Seeking is the only
+ * path that lands mid-stream and has to look, and the search had no real
+ * defence: any 14-bit sync pattern at any bit offset was accepted, with only a
+ * blocksize range check behind it.
+ *
+ * Measured on the test files: scanning forward for the bit pattern alone hits
+ * a FALSE sync inside the audio data within a handful of frames, every time.
+ * That is what a seek was locking onto, and the garbage that followed is what
+ * "seek doesn't work well" was.
+ *
+ * Two defences, both cheap:
+ *   - frames are byte-ALIGNED, so a candidate at any other offset is false by
+ *     construction. Also lets the scan step a byte at a time instead of a bit.
+ *   - the header carries a CRC-8, which was being read and discarded.
+ */
+static flac_err frame_header(flac_t *f)
+{
+    uint32_t tries = 0;
+    for (;;) {
+        if (!need(f, 15)) return FLAC_ERR_SHORT;
+
+        if ((f->bitcnt & 7u) != 0u) {            /* re-align, never mid-byte */
+            f->bitcnt -= (f->bitcnt & 7u);
+            continue;
+        }
+
+        uint32_t peek = (uint32_t)((f->bitacc >> (f->bitcnt - 15u)) & 0x7FFFu);
+        if ((peek >> 1) == 0x3FFEu) {
+            flac_err e = parse_frame_header(f);
+            if (e == FLAC_OK)        return FLAC_OK;
+            if (e == FLAC_ERR_SHORT) return e;
+            /* CRC or fields rejected it. Position is wherever parsing
+             * stopped; carry on looking from there. */
+        } else {
+            f->bitcnt -= 8u;                     /* next byte */
+        }
+
+        if (++tries > (1u << 20)) return FLAC_ERR_SYNC;
+    }
 }
 
 /* ------------------------------------------------------------- residual */
