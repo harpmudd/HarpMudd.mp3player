@@ -4690,6 +4690,7 @@ static void io_bench(uint32_t from)
 
 static void refill_pump(void);     /* defined below; the glue needs it */
 static int  prefill(void);         /* likewise, for flac_restart()     */
+static int  refill_one(void);      /* blocking read, for flac_pull()   */
 
 /* ---------------------------------------------------------- FLAC glue ---
  *
@@ -4712,9 +4713,15 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
         if (ring_rd >= ring_fill) {
             /* Dry. Pump and wait, the same as a full FIFO -- the decoder
              * cannot proceed and the CPU has nothing better to do. */
-            refill_pump();
-            if (ring_rd >= ring_fill) {
-                if (++flac_stall > 4096u) break;    /* genuine end of file */
+            /* refill_one, not refill_pump: this is a BLOCKING read, and it
+             * has to be. refill_pump only issues a request and returns, so
+             * spinning on it here would depend on the main loop collecting --
+             * which cannot happen, because the main loop is inside this call.
+             * Metadata skipping needs real progress: the hi-res file on the
+             * test card carries 59 KB of picture and 151 KB of padding before
+             * its first audio frame. */
+            if (!refill_one() || ring_rd >= ring_fill) {
+                if (++flac_stall > 8u) break;       /* genuine end of file */
                 continue;
             }
         }
@@ -5289,6 +5296,11 @@ static int read_track_head(void)
         track_fmt   = FMT_FLAC;
         audio_start = 0;
         ring_rd     = 0;
+        /* The head read above put bytes [0, REFILL_CHUNK) in the ring, so the
+         * next refill must continue from there. Without this file_pos keeps
+         * whatever the previous track left and every refill reads the wrong
+         * part of the file. */
+        file_pos    = REFILL_CHUNK;
         track_title[0] = 0; track_artist[0] = 0;
         track_album[0] = 0; track_year[0]   = 0; track_trk[0] = 0;
         title_status   = ID3_NO_TAG;      /* filename fallback shows the name */
@@ -5456,6 +5468,17 @@ static int read_track_head(void)
  * a reload. ONE function deliberately -- two copies of this drift apart. */
 static int load_track(void)
 {
+    /* Release the FLAC buffer FIRST. This runs before the format is known --
+     * detection needs the file's head, which read_track_head() has not fetched
+     * yet -- so Helix is rebuilt on every load and handed back below if the
+     * track turns out to be FLAC.
+     *
+     * Order is load-bearing. Rebuilding Helix while an 18 KB FLAC buffer was
+     * still live asked the arena for 42 KB of 24, MP3InitDecoder() returned 0,
+     * and EVERY load failed from the first FLAC attempt onwards -- including
+     * MP3s, which is how it presented. */
+    if (fl_buf) { free(fl_buf); fl_buf = 0; }
+
     /* Helix carries bit-reservoir state internally, so a fresh instance is
      * needed rather than just resetting our own bookkeeping. */
     if (dec) MP3FreeDecoder(dec);
@@ -5497,8 +5520,13 @@ static int load_track(void)
         static int32_t probe_cap;
         probe_cap = (int32_t)(ARENA_LIMIT / sizeof(int32_t));
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
-        if (fe != FLAC_OK && fe != FLAC_ERR_UNSUPPORTED) {
+        if (fe != FLAC_OK) {
+            /* Hand the arena back to Helix rather than leaving the core with
+             * no decoder -- otherwise one bad file breaks every load after
+             * it, which is exactly what happened. */
             REG(R_STAT2) = 0xC0000000u | (uint32_t)fe;
+            dec = MP3InitDecoder();
+            track_fmt = FMT_MP3;
             return 0;
         }
         fl_buf = (int32_t *)malloc((size_t)fl.max_blocksize * sizeof(int32_t));
@@ -5515,12 +5543,6 @@ static int load_track(void)
         rate_set       = 1;
         pcm_rate_apply(fl.rate);
         flac_stall     = 0;
-    } else if (fl_buf) {
-        /* Coming back to MP3: give the space back and rebuild Helix. */
-        free(fl_buf);
-        fl_buf = 0;
-        if (!dec) dec = MP3InitDecoder();
-        if (!dec) { REG(R_STAT2) = 0xF0000000u; return 0; }
     }
 #if IO_BENCH
     /* Here specifically: the FIFO is flushed and the gap is already silent,
