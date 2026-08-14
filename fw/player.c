@@ -578,7 +578,7 @@ static void vol_apply(void)
  *
  * Do not raise one without the other. That mismatch has already shipped once,
  * in the direction that made the documented cap a lie. */
-#define PL_TEXT_MAX  32768u
+#define PL_TEXT_MAX  22528u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was

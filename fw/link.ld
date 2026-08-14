@@ -5,7 +5,7 @@
  *
  * Layout, low -> high:
  *   .text/.rodata/.data/.bss
- *   heap            (Helix mallocs its ~34 KB decoder instance here)
+ *   heap            (Helix mallocs its 23816-byte decoder instance here)
  *   MP3 ring buffer (32 KB, RESERVED -- APF DMAs into it)
  *   stack           (16 KB)
  *
@@ -56,4 +56,15 @@ SECTIONS {
 	/* Fail the link rather than silently overlapping if the image ever grows
 	 * past the reserved regions. */
 	ASSERT(_heap_start < _tag_start, "firmware image collides with reserved DMA buffers")
+
+	/* The gap between BSS and the DMA buffers IS the heap, and Helix mallocs
+	 * 23816 bytes of it for the decoder instance -- so BSS fitting is not the
+	 * same as the core working. Growing a static buffer into that space once
+	 * left a 15 KB heap: BSS still fit, the linker was satisfied, the build
+	 * passed, and MP3InitDecoder() would have returned 0 with no audio at
+	 * all. Caught by checking the number, not by any tool.
+	 *
+	 * 24576 rather than 23816 exactly, to cover malloc per-chunk headers
+	 * across the eight allocations and leave a little room. */
+	ASSERT(_heap_end - _heap_start >= 24576, "heap too small for the decoder -- a static buffer has grown into it")
 }

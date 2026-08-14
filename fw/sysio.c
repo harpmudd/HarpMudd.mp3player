@@ -1,4 +1,4 @@
-/* Minimal newlib syscall stubs. Helix's MP3InitDecoder() mallocs its ~34 KB
+/* Minimal newlib syscall stubs. Helix's MP3InitDecoder() mallocs its 23816 B
  * decoder instance, so a working _sbrk is mandatory; the rest are stubs that
  * exist only to satisfy the linker. */
 
