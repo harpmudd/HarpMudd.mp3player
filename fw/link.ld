@@ -66,5 +66,13 @@ SECTIONS {
 	 *
 	 * 24576 rather than 23816 exactly, to cover malloc per-chunk headers
 	 * across the eight allocations and leave a little room. */
-	ASSERT(_heap_end - _heap_start >= 24576, "heap too small for the decoder -- a static buffer has grown into it")
+	/* 1 KB, not 24. The decoder no longer allocates from here: fw/alloc.c
+	 * overrides malloc with a fixed arena, because newlib consumed the whole
+	 * 33936-byte heap to serve 23816 bytes of Helix structs and refused to
+	 * work at 25232 -- an overhead that could not be sized against.
+	 *
+	 * The guard that matters now is ARENA_BYTES in alloc.c, which is exact.
+	 * This one only keeps a token heap so a stray newlib path that reaches
+	 * _sbrk has somewhere to go rather than returning -1 in a corner. */
+	ASSERT(_heap_end - _heap_start >= 1024, "no room left for even a token heap")
 }

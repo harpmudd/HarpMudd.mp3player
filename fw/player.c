@@ -127,8 +127,8 @@
  * instance before allocating the new one, so newlib should hand back the same
  * ~34 KB block every time and this should sit flat no matter how many tracks
  * are loaded. If it climbs per reload, something genuinely is not being freed. */
-extern unsigned int heap_used(void);
-extern unsigned int heap_total(void);
+extern unsigned int arena_used(void);
+extern unsigned int arena_total(void);
 
 #define CLK_HZ      60000000u   /* clk_sys; UI timing needs it before playback does */
 
@@ -3864,8 +3864,8 @@ static void ui_draw_dynamic(void)
         /* What newlib ACTUALLY took for the decoder, against what is there.
          * The struct sizes sum to 23816; malloc asks _sbrk for more than the
          * sum, and guessing the difference is what just cost a build. */
-        *q++ = 'H'; q = ui_dec(q, heap_used());
-        *q++ = '/'; q = ui_dec(q, heap_total());
+        *q++ = 'A'; q = ui_dec(q, arena_used());
+        *q++ = '/'; q = ui_dec(q, arena_total());
         *q++ = ' ';
 #endif
         *q++ = 'N'; q = ui_dec(q, pl_notify_n);

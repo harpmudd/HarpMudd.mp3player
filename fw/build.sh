@@ -41,7 +41,7 @@ player)
       $HELIX/real/hufftabs.c $HELIX/real/imdct.c $HELIX/real/polyphase.c \
       $HELIX/real/scalfact.c $HELIX/real/stproc.c $HELIX/real/subband.c \
       $HELIX/real/trigtabs.c \
-      $FW/start.S $FW/player.c $FW/sysio.c $ROOT/third_party/picojpeg/picojpeg.c"
+      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $ROOT/third_party/picojpeg/picojpeg.c"
     INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
     ;;
 *)
