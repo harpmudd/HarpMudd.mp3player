@@ -4683,26 +4683,8 @@ static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
 /* Slide unconsumed bytes down and pull in ONE chunk. Compaction keeps Helix's
  * input pointer arithmetic simple -- it wants a flat span, not a wrap. */
-static void refill_pump(void);   /* defined below; refill_one drains it */
-
 static int refill_one(void)
 {
-    /* Let any in-flight async read LAND before touching the ring.
-     *
-     * A pending read's destination was computed from the ring_fill of the
-     * moment it started, and the compaction below MOVES the ring and rewrites
-     * ring_fill -- so the read would complete into the wrong offset, and the
-     * blocking read that follows would be a second transfer into the same
-     * region. Both corrupt the stream rather than fail cleanly.
-     *
-     * The hazard was always here; it only became constant when refill_pump()
-     * started being called from flac_pull() on every 512-byte pull. What it
-     * looked like on hardware: LPC orders of 21 and 18 where the same files
-     * had read 6 and 11, R falling to 0 because subframe() rejected the
-     * garbage before residual() ever ran, and two files dropping out of the
-     * FLAC path entirely. Corrupt input, diagnosed as a decoder fault. */
-    while (rd_pending) refill_pump();
-
     if (ring_fill + REFILL_CHUNK > RING_SIZE) {
         if (ring_rd == 0) return 1;                 /* genuinely full */
 
@@ -4749,6 +4731,7 @@ static void io_bench(uint32_t from)
 }
 #endif
 
+static void refill_pump(void);     /* defined below; the glue needs it */
 static int  prefill(void);         /* likewise, for flac_restart()     */
 static int  refill_one(void);      /* blocking read, for flac_pull()   */
 
@@ -4770,20 +4753,6 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
     (void)ctx;
     int got = 0;
     while (got < n) {
-        /* Collect any finished read and let the next one start, BEFORE asking
-         * whether the ring is dry.
-         *
-         * This used to happen only inside the full-FIFO wait in flac_emit --
-         * which is fine while there is idle time to wait in, and useless the
-         * moment there is not. Measured: Pink Floyd has D24 of idle and shows
-         * O0, while every 24-bit file has D0 and pays O23..O39. The reads were
-         * never slow; they were just never STARTED until the ring had already
-         * run dry, at which point the only option left is a blocking one.
-         *
-         * flac_pull is called once per 512 bytes consumed, so at the worst
-         * measured rate this offers ~770 chances a second to keep a 4 KB read
-         * in flight against the ~96 completions that rate actually needs. */
-        refill_pump();
         if (ring_rd >= ring_fill) {
             /* Dry. Pump and wait, the same as a full FIFO -- the decoder
              * cannot proceed and the CPU has nothing better to do. */
