@@ -5022,6 +5022,123 @@ static uint32_t fl_cap;            /* max_blocksize, kept across reopens */
  * Reopening from byte 0 re-reads the metadata, which is a few hundred bytes
  * and only happens on a reposition. Simpler and surer than trying to record
  * where the audio began and restore the reader's bit position to match. */
+/* ---- FLAC seek support -------------------------------------------------
+ *
+ * Byte-proportional seeking cannot work on FLAC, and the test files say so
+ * numerically: between two seek points of the Psychedelic Furs file the rate
+ * is 164 KB/s, and between the next two it is 213 KB/s. A single average
+ * applied across a track that varies by 30% lands somewhere different every
+ * time -- "jumps all over the place" is exactly what that produces.
+ *
+ * The SEEKTABLE gives sample -> byte pairs, so the fix is to INTERPOLATE
+ * between the two points bracketing the target rather than extrapolate one
+ * global rate across the whole file. Within a ~10 second interval the rate is
+ * near enough constant for the landing to be accurate.
+ *
+ * Seeking straight to a seek point would be exact but useless: the points are
+ * ~10 s apart on every one of these files, so a 5 s seek would frequently not
+ * move at all.
+ *
+ * The table is left in the FILE and read into tagbuf at seek time -- 227
+ * points fit a 4 KB read, and holding it in BSS would want ~1.8 KB of the
+ * ~1.8 KB of link slack that remains.
+ */
+static uint32_t fl_seek_off;      /* absolute offset of the SEEKTABLE body  */
+static uint32_t fl_seek_pts;      /* 18-byte points; 0 = no table           */
+static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
+
+static uint32_t fl_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+}
+
+/* Walks the metadata blocks by absolute file offset, recording the seek table
+ * and where the audio actually begins. Same shape as art_find_flac_picture();
+ * both read through tagbuf rather than the ring, so neither disturbs playback. */
+static void flac_scan_metadata(void)
+{
+    fl_seek_off = fl_seek_pts = fl_first_frame = 0;
+
+    if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 4u)) return;
+    if (tagbuf[0] != 'f' || tagbuf[1] != 'L' ||
+        tagbuf[2] != 'a' || tagbuf[3] != 'C') return;
+
+    uint32_t off = 4u;
+    for (uint32_t guard = 0; guard < 64u; guard++) {
+        if (!target_read_slot(MP3_SLOT_ID, off, TAG_OFF, 4u)) return;
+        uint32_t last = (uint32_t)(tagbuf[0] >> 7);
+        uint32_t type = (uint32_t)(tagbuf[0] & 0x7Fu);
+        uint32_t len  = ((uint32_t)tagbuf[1] << 16)
+                      | ((uint32_t)tagbuf[2] << 8) | (uint32_t)tagbuf[3];
+        uint32_t body = off + 4u;
+
+        if (type == 3u && len >= 18u) {
+            uint32_t pts = len / 18u;
+            if (pts > TAG_SIZE / 18u) pts = TAG_SIZE / 18u;
+            fl_seek_off = body;
+            fl_seek_pts = pts;
+        }
+        off = body + len;
+        if (last) { fl_first_frame = off; return; }
+    }
+}
+
+/* Byte offset for a target SAMPLE, interpolated between bracketing points.
+ * Returns 0 if there is no usable table, leaving the caller on the
+ * byte-proportional path. Offsets in the table are relative to the first
+ * audio frame, not to the start of the file. */
+static uint32_t flac_seek_byte(uint64_t want)
+{
+    if (!fl_first_frame) return 0;
+
+    /* No seek table -- Pink Floyd on the test card has none. Interpolate
+     * across the whole file instead, which is still better than the generic
+     * byte path in two ways: it starts at the first AUDIO frame rather than at
+     * byte 0 (67 KB inside the metadata for that file, which the decoder would
+     * then have to scan through), and it is ABSOLUTE, so each target second
+     * maps to one fixed offset instead of accumulating error over repeats. */
+    if (!fl_seek_pts) {
+        if (!track_secs || !fl.rate || slot_size <= fl_first_frame) return 0;
+        uint64_t span = (uint64_t)slot_size - fl_first_frame;
+        uint64_t tot  = (uint64_t)track_secs * (uint64_t)fl.rate;
+        if (!tot) return 0;
+        if (want > tot) want = tot;
+        return fl_first_frame + (uint32_t)(span * want / tot);
+    }
+
+    uint32_t n = fl_seek_pts * 18u;
+    if (!target_read_slot(MP3_SLOT_ID, fl_seek_off, TAG_OFF, n)) return 0;
+
+    uint32_t lo_s = 0, lo_b = 0;
+    int have_lo = 0;
+    for (uint32_t i = 0; i < fl_seek_pts; i++) {
+        const uint8_t *e = &tagbuf[i * 18u];
+        /* Placeholder points carry an all-ones sample number. The high words
+         * are checked rather than assumed zero: a real 32-bit overflow would
+         * be 27 hours of audio, but a placeholder is common. */
+        if (fl_be32(e) == 0xFFFFFFFFu || fl_be32(e + 8u) != 0u) continue;
+        if (fl_be32(e) != 0u) continue;              /* sample above 2^32 */
+        uint32_t smp = fl_be32(e + 4u);
+        uint32_t byt = fl_be32(e + 12u);
+
+        if ((uint64_t)smp <= want) { lo_s = smp; lo_b = byt; have_lo = 1; continue; }
+
+        /* First point past the target: interpolate across this interval. */
+        if (have_lo && smp > lo_s) {
+            uint64_t span_s = (uint64_t)smp - lo_s;
+            uint64_t span_b = (uint64_t)byt - lo_b;
+            uint64_t into   = want - lo_s;
+            return fl_first_frame + lo_b + (uint32_t)(span_b * into / span_s);
+        }
+        break;
+    }
+
+    /* Past the last point, or only one usable point: fall back to that point
+     * exactly rather than extrapolating a rate that is not measured here. */
+    return have_lo ? fl_first_frame + lo_b : 0u;
+}
+
 static int flac_restart(void)
 {
     ring_fill = 0; ring_rd = 0; file_pos = 0;
@@ -5910,6 +6027,7 @@ static int load_track(void)
         pcm_rate_apply(fl.rate);
         flac_stall     = 0;
         flac_tick      = cycles;   /* profiling hook, dev builds only */
+        flac_scan_metadata();      /* seek table + where audio starts */
         fl_rate_hz     = fl.rate;
     }
 #if IO_BENCH
@@ -6893,6 +7011,51 @@ int main(void)
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
             uint32_t want;
 
+            /* FLAC with a seek table works in TIME, not bytes: the target
+             * second is exact, and flac_seek_byte() interpolates the offset
+             * between the two points bracketing it. The byte path below stays
+             * for FLAC files with no table -- Pink Floyd on the test card is
+             * one -- and for MP3, where it has a great deal of history in it. */
+            if (track_fmt == FMT_FLAC && fl_first_frame && fl.rate) {
+                uint32_t secs = seek_secs ? seek_secs : 5u;
+                uint32_t tgt;
+                if (seek_req == 1u) {
+                    tgt = ui_sec + secs;
+                    /* Leave three seconds so the end is audible and the track
+                     * finishes normally, the same rule the byte path uses. */
+                    uint32_t last = (track_secs > 3u) ? track_secs - 3u : 0u;
+                    if (tgt > last) tgt = last;
+                } else {
+                    tgt = (ui_sec > secs) ? ui_sec - secs : 0u;
+                }
+
+                uint32_t at = flac_seek_byte((uint64_t)tgt * (uint64_t)fl.rate);
+                seek_req = 0;
+                if (at && at != file_pos) {
+                    file_pos = at;
+                    stopped  = 0;
+                    ui_sec      = tgt;
+                    ui_sec_acc  = 0;
+                    ui_last_sec = 0xFFFFFFFFu;
+                    ui_prog_sec = 0xFFFFFFFFu;
+                    meas_pos0   = file_pos;
+                    meas_sec0   = ui_sec;
+
+                    pcm_flush();
+                    refill_drain();
+                    ring_fill = 0; ring_rd = 0;
+                    flac_flush_input(&fl);
+                    flac_stall = 0;
+                    fl_meter_n = 0;
+                    if (fl.max_blocksize)
+                        frames = (uint32_t)(((uint64_t)tgt * (uint64_t)fl.rate)
+                                            / (uint64_t)fl.max_blocksize);
+                    if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
+                    if (paused) { ui_draw_dynamic(); continue; }
+                }
+                goto seek_done;
+            }
+
             if (seek_req == 1u) {
                 /* Forward stops short of the end. Backward has always clamped
                  * to audio_start; forward never did, so holding it walked
@@ -6983,6 +7146,7 @@ int main(void)
                 if (!prefill()) { st0 |= (1u << 4); REG(R_STAT0) = st0; }
                 if (paused) { ui_draw_dynamic(); continue; }
             }
+        seek_done: ;
         }
 
         /* Nothing to decode. poll_input() and the reload handling above still
