@@ -583,6 +583,12 @@ static uint32_t fl_emit_cyc;               /* output path, minus the wait   */
  * different answers, and D reports both as 0. */
 static uint32_t fl_dec_cyc, fl_dec_samp;
 static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
+/* Why the last flac_open() failed, and how many times. The first load of a
+ * track has failed several times across builds and then succeeded on a retry,
+ * which is the kind of fault that gets guessed at for hours -- flac_err says
+ * which of MAGIC/STREAMINFO/UNSUPPORTED/SYNC/DATA/SHORT it actually was. */
+static uint8_t  fl_open_err;
+static uint8_t  fl_open_fails;
 static uint16_t fl_load_pct;               /* uncapped: 100 = exactly realtime */
 static uint8_t  fl_res_pct;                /* Rice's share of channel 0        */
 static uint8_t  fl_idle_pct, fl_io_pct, fl_emit_pct;
@@ -4002,6 +4008,8 @@ static void ui_draw_dynamic(void)
         *q++ = ' '; *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
+        *q++ = ' '; *q++ = 'F'; q = ui_dec(q, fl_open_err);
+        *q++ = '/'; q = ui_dec(q, fl_open_fails);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -4981,12 +4989,35 @@ static int flac_restart(void)
 #define FL_METER_PAIRS 1152u
 static uint32_t fl_meter_n;
 
+/* UI cadence, decoupled from the decode frame.
+ *
+ * ui_draw_dynamic() is driven once per decoded frame, which is right for MP3
+ * -- 1152 samples is 26 ms, so ~38 a second. A FLAC frame is 4608 samples,
+ * 104 ms, so the SAME loop refreshes the whole UI at ~9.6 fps: every meter,
+ * marquee and clock at a quarter speed. That is what "sluggish" was, and it
+ * is structural rather than anything to do with the meters.
+ *
+ * Driven on elapsed time instead, matching MP3's rate. The check runs once per
+ * flac_emit call -- every 64 samples, ~1.45 ms -- so it costs one counter read
+ * per call and cannot be late by more than that. */
+#define FL_UI_PERIOD (CLK_HZ / 38u)
+static uint32_t fl_ui_next;
+
 /* `src`, not `pcm`: the file-scope pcm[] is the meter capture buffer, and a
  * parameter of that name would shadow it. */
 static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
 {
     (void)ctx;
     uint32_t t_in = cycles(), idle0 = fl_idle_cyc;
+
+    /* Safe here: ui_draw_dynamic() performs no I/O and cannot re-enter the
+     * decoder. It reads position from `frames`, which has not been advanced
+     * for the frame in flight, so the clock trails by at most one frame. */
+    if ((int32_t)(t_in - fl_ui_next) >= 0) {
+        fl_ui_next = t_in + FL_UI_PERIOD;
+        if (!ui_dump_mode) ui_draw_dynamic();
+    }
+
     for (uint32_t i = 0; i < frames; i++) {
         if (fl_meter_n < FL_METER_PAIRS) {
             pcm[fl_meter_n * 2u]      = src[i * 2];
@@ -5769,6 +5800,8 @@ static int load_track(void)
 
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
         if (fe != FLAC_OK) {
+            fl_open_err = (uint8_t)fe;      /* shown on the diag row */
+            fl_open_fails++;
             /* Hand the arena back to Helix rather than leaving the core with
              * no decoder -- otherwise one bad file breaks every load after
              * it, which is exactly what happened. */
