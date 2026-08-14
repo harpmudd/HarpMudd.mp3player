@@ -386,6 +386,13 @@ with the throughput measurement in hand, and with eyes open about the payoff.
 
 ## FLAC — plausible, gated on one measurement
 
+**Full analysis: [docs/FLAC.md](docs/FLAC.md)** (written 2026-08-13). The
+benchmark that answers the gating question is built and waiting on the v1.3.0
+branch behind `IO_BENCH`; it reports on the diag row as `IO<n>KB`. Read it
+before building anything else, and read the heap warning in that document --
+the FLAC decoder must share Helix's heap, not add to it, and getting that wrong
+produces a core that cannot decode at all while the build still passes.
+
 The decode itself is the easy part: FLAC is Rice decoding plus an LPC filter,
 with no MDCT and no synthesis filterbank, so it is materially cheaper than MP3
 and integer throughout. No FPU needed, which is the usual killer on a soft core.
