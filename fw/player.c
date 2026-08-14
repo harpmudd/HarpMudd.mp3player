@@ -4753,6 +4753,20 @@ static int flac_pull(void *ctx, uint8_t *dst, int n)
     (void)ctx;
     int got = 0;
     while (got < n) {
+        /* Collect any finished read and let the next one start, BEFORE asking
+         * whether the ring is dry.
+         *
+         * This used to happen only inside the full-FIFO wait in flac_emit --
+         * which is fine while there is idle time to wait in, and useless the
+         * moment there is not. Measured: Pink Floyd has D24 of idle and shows
+         * O0, while every 24-bit file has D0 and pays O23..O39. The reads were
+         * never slow; they were just never STARTED until the ring had already
+         * run dry, at which point the only option left is a blocking one.
+         *
+         * flac_pull is called once per 512 bytes consumed, so at the worst
+         * measured rate this offers ~770 chances a second to keep a 4 KB read
+         * in flight against the ~96 completions that rate actually needs. */
+        refill_pump();
         if (ring_rd >= ring_fill) {
             /* Dry. Pump and wait, the same as a full FIFO -- the decoder
              * cannot proceed and the CPU has nothing better to do. */

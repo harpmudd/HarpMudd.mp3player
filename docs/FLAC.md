@@ -298,3 +298,64 @@ Two of these were nearly bugs and are worth recording: capping the reservoir at
 63 bits matters because `1 << bitcnt` is undefined at 64, and the first version
 of the leading-zero count scanned bit by bit, which would have made `unary()`
 *slower* than what it replaced.
+
+---
+
+## MEASURED 2026-08-14 — where the cycles actually go
+
+The correction above was still reasoning from bitrate rather than from cycles.
+These are cycles, taken on hardware with the decoder byte-identical to the
+build that plays a CD rip cleanly.
+
+`L` is decode cost as a percent of realtime and is **not capped at 100** — the
+point of it. `R` is the Rice/bit-reader pass as a share of channel 0 against
+the reconstruction pass. `P` is the LPC order. `D` is idle, `O` is blocked on
+the card.
+
+| file | format | L | R | P | D | O | **L+O** |
+|---|---|---|---|---|---|---|---|
+| MP3 (control) | — | — | — | — | 11 | 0 | — |
+| Pink Floyd | 16/44.1 | 76 | 64 | 6 | 24 | 0 | **76** |
+| Psychedelic Furs | 24/44.1 | **95** | 70 | 11 | 0 | 23 | **118** |
+| Jerry Garcia | 24/88.2 | 157 | 76 | 5 | 0 | 35 | **192** |
+| Circles Around the Sun | 24/96 | 191 | 67 | 11 | 0 | 39 | **230** |
+
+The MP3 row is the control and the reason the rest can be trusted. MP3 at 1×
+was independently measured at ~45.7 MHz of 60, predicting about 24% idle; D
+reads 11–13. An earlier round of readings showed D0 on *every* file including
+one that played perfectly, which is what a broken instrument looks like — that
+build had a regression, and its numbers were discarded rather than explained.
+
+### Three things this says that guessing did not
+
+**The Furs decodes in 95% of realtime.** It fits. What breaks it is the 23% of
+I/O stacked on top. For that file the decoder was never the wall, and every
+estimate up to this point — including the bitrate correction above — had aimed
+at the wrong thing.
+
+**O is not the card being slow.** Demand against the measured 736 KB/s: the
+Furs 204 KB/s = 28%, Garcia 313 = 42%, Circles 393 = 53%, against measured O of
+23, 35 and 39. It is transfer time the CPU *blocks* on. Pink Floyd shows O0
+because D24 of idle lets the async pump run inside the full-FIFO wait — so
+**O is a consequence of D reaching 0, and it compounds**: once decode saturates,
+refills stop being started early and the only ones left are blocking.
+
+**R of 64–76% puts the bit reader on top**, and its share rises with bitrate.
+That is the same conclusion the bitrate correlation reached, now with a
+number behind it rather than an inference.
+
+### What follows
+
+Two fixes, aimed at the two measured bottlenecks, each independently visible on
+the row — L for decode, O for I/O:
+
+1. `refill_pump()` from `flac_pull()`, so reads are started while decoding
+   rather than only inside an idle wait that no longer exists.
+2. The 64-bit reservoir and `clz`-based `unary()`, reinstated as plain C with
+   none of the parts that caused the regression.
+
+Predicted, so it can be wrong on the record: Furs to about L70 and playable,
+Garcia to ~112 and Circles to ~143, both still over. If that holds, the honest
+shape for this release is FLAC up to 48 kHz — which covers essentially every CD
+rip — and a clear on-screen refusal for hi-res files rather than letting them
+play badly.

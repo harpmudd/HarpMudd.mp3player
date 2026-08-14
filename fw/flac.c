@@ -22,14 +22,32 @@ static int byte(flac_t *f)
     return f->buf[f->pos++];
 }
 
-/* MSB-first bit reader. The reservoir holds at most 24 bits so a 32-bit
- * accumulator can always take another byte without shifting anything out. */
+/* MSB-first bit reader over a 64-bit reservoir, refilled four bytes at a time.
+ *
+ * Aimed by measurement, not by guess: the Rice/bit-reader pass is 64-76% of
+ * channel 0's decode (R on the diagnostic row), and its share RISES with
+ * bitrate -- which is also why 24-bit files cost what they do. They carry
+ * ~18.5 coded bits per sample against ~9.6 for a CD rip, so the reader does
+ * roughly twice the work while the arithmetic barely changes.
+ *
+ * 64 bits keeps the refill guard at <=31, so the reservoir can never exceed 63
+ * and (1 << bitcnt) below is always defined. */
 static int need(flac_t *f, uint32_t n)
 {
     while (f->bitcnt < n) {
+        if (f->pos + 4u <= f->have && f->bitcnt <= 31u) {
+            f->bitacc = (f->bitacc << 32)
+                      | ((uint64_t)f->buf[f->pos] << 24)
+                      | ((uint64_t)f->buf[f->pos + 1u] << 16)
+                      | ((uint64_t)f->buf[f->pos + 2u] << 8)
+                      |  (uint64_t)f->buf[f->pos + 3u];
+            f->pos += 4u;
+            f->bitcnt += 32u;
+            continue;
+        }
         int b = byte(f);
         if (b < 0) return 0;
-        f->bitacc = (f->bitacc << 8) | (uint32_t)b;
+        f->bitacc = (f->bitacc << 8) | (uint64_t)b;
         f->bitcnt += 8;
     }
     return 1;
@@ -38,11 +56,10 @@ static int need(flac_t *f, uint32_t n)
 static uint32_t bits(flac_t *f, uint32_t n)
 {
     if (!n) return 0;
-    if (!need(f, n)) return 0;
+    if (f->bitcnt < n && !need(f, n)) return 0;
     f->bitcnt -= n;
-    uint32_t v = (f->bitacc >> f->bitcnt) & (n == 32u ? 0xFFFFFFFFu
-                                                      : ((1u << n) - 1u));
-    return v;
+    return (uint32_t)((f->bitacc >> f->bitcnt)
+                      & (n == 32u ? 0xFFFFFFFFu : ((1u << n) - 1u)));
 }
 
 /* Sign-extend an n-bit two's complement value. */
@@ -54,16 +71,31 @@ static int32_t sbits(flac_t *f, uint32_t n)
     return (int32_t)v;
 }
 
-/* Unary: count zeros up to the first 1. Used by every Rice residual. */
+/* Unary: count zeros up to the first 1. Every Rice residual calls this, so it
+ * is the hottest function in the decoder.
+ *
+ * Scans the whole reservoir at once. __builtin_clzll is a few instructions;
+ * the previous version cost a call to need() and a shift PER ZERO BIT. An
+ * intermediate attempt that found the high bit by shifting was discarded
+ * before it ever built -- that is one iteration per bit of the RESERVOIR,
+ * which is slower than the loop it was meant to replace. */
 static uint32_t unary(flac_t *f)
 {
     uint32_t n = 0;
     for (;;) {
-        if (!need(f, 1)) return n;
-        f->bitcnt--;
-        if ((f->bitacc >> f->bitcnt) & 1u) return n;
-        n++;
-        if (n > 1u << 20) return n;          /* corrupt stream, do not hang */
+        if (!f->bitcnt && !need(f, 1)) return n;
+
+        uint64_t win = f->bitacc & (((uint64_t)1 << f->bitcnt) - 1u);
+        if (win) {
+            uint32_t lead = (uint32_t)__builtin_clzll(win) - (64u - f->bitcnt);
+            n += lead;
+            f->bitcnt -= lead + 1u;          /* the zeros and the 1 */
+            return n;
+        }
+
+        n += f->bitcnt;                      /* all zeros -- consume them all */
+        f->bitcnt = 0;
+        if (n > (1u << 20)) return n;        /* corrupt stream, do not hang */
     }
 }
 
