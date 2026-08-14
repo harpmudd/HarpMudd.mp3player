@@ -88,6 +88,29 @@ class CBits:
     def align(self):
         self.n -= self.n & 7
 
+    def raw_byte(self):
+        """Models byte() in the C: reads the BUFFER, bypassing the reservoir.
+
+        This is the gap that let a real bug through. frame_header() used a raw
+        byte read for the UTF-8 frame number, correct only while the reservoir
+        happened to be empty there; the reference reader in flac_verify.py
+        reads the same field through bits(8), so it could never reproduce the
+        fault. A model that quietly does the right thing where the C does the
+        risky thing cannot fail, and a check that cannot fail proves nothing.
+
+        Kept even though the C no longer calls it there, so that reintroducing
+        a raw read is caught rather than passed.
+        """
+        if self.n:
+            raise AssertionError(
+                "raw byte read with %d bits still in the reservoir -- this is "
+                "the frame-header bug" % self.n)
+        if self.p >= len(self.d):
+            raise EOFError
+        v = self.d[self.p]
+        self.p += 1
+        return v
+
     # frame_header() in flac_verify pokes .acc/.n directly for the sync scan;
     # it masks acc as it goes, which is harmless here -- dropping bits ABOVE
     # the window cannot change any value the reader returns.

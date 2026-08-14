@@ -176,10 +176,21 @@ static flac_err frame_header(flac_t *f)
     (void)bits(f, 1);                                  /* reserved        */
 
     /* UTF-8 coded frame or sample number: leading ones give the length. */
-    int c = byte(f);
-    if (c < 0) return FLAC_ERR_SHORT;
-    /* the accumulator is byte-aligned here, so a raw byte read is correct
-     * only after flushing whole bytes out of it */
+    /* Read through the BIT READER, not byte(), which bypasses the reservoir.
+     *
+     * The old comment here said a raw byte read was correct because the
+     * accumulator is byte-aligned at this point -- true only while refills
+     * were one byte at a time and the residue happened to land at zero. A
+     * four-byte refill can leave up to 32 bits still held, and byte() reads
+     * straight past them: the frame number comes from the wrong offset, the
+     * blocksize that follows is garbage, and the file "loads but does not
+     * play". Byte-ALIGNED is not the same as reservoir-EMPTY.
+     *
+     * Reading through bits(8) is correct at any residue, which is also what
+     * the reference decoder in tools/ does -- and why the host check passed
+     * this bug straight through. */
+    if (!need(f, 8)) return FLAC_ERR_SHORT;
+    int c = (int)bits(f, 8);
     uint32_t extra = 0;
     if      ((c & 0x80) == 0x00) extra = 0;
     else if ((c & 0xE0) == 0xC0) extra = 1;
@@ -188,7 +199,10 @@ static flac_err frame_header(flac_t *f)
     else if ((c & 0xFC) == 0xF8) extra = 4;
     else if ((c & 0xFE) == 0xFC) extra = 5;
     else if ((c & 0xFF) == 0xFE) extra = 6;
-    for (uint32_t i = 0; i < extra; i++) if (byte(f) < 0) return FLAC_ERR_SHORT;
+    for (uint32_t i = 0; i < extra; i++) {
+        if (!need(f, 8)) return FLAC_ERR_SHORT;
+        (void)bits(f, 8);
+    }
 
     if      (bs_code == 6u) f->blocksize = bits(f, 8) + 1u;
     else if (bs_code == 7u) f->blocksize = bits(f, 16) + 1u;
