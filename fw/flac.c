@@ -103,11 +103,99 @@ static void align_byte(flac_t *f) { f->bitcnt -= f->bitcnt & 7u; }
 
 /* ------------------------------------------------------------ metadata */
 
+/* ---- Vorbis comments (metadata block type 4) ---------------------------
+ *
+ * Structurally trivial next to ID3v2 -- no frame table, no unsynchronisation,
+ * no per-frame encoding byte, no v2.2/v2.3/v2.4 divergence. Just a vendor
+ * string, a count, and that many "KEY=value" entries, every length a 32-bit
+ * LITTLE-endian field. (Little-endian: the one place FLAC departs from the
+ * big-endian convention of everything else in the format, because the block
+ * is inherited wholesale from Vorbis.)
+ *
+ * Values are UTF-8. They are copied as raw bytes and truncated to fit, which
+ * matches what the ID3 path already does -- the font is Latin-1, so anything
+ * outside it renders as substitutes either way, and the filename fallback is
+ * the better answer for those files. */
+static uint32_t le32(flac_t *f)
+{
+    uint32_t a = bits(f, 8), b = bits(f, 8), c = bits(f, 8), d = bits(f, 8);
+    return a | (b << 8) | (c << 16) | (d << 24);
+}
+
+/* Case-insensitive match of "KEY=" at the head of the entry. */
+static int key_is(const char *buf, uint32_t n, const char *key)
+{
+    uint32_t i = 0;
+    for (; key[i]; i++) {
+        if (i >= n) return 0;
+        char c = buf[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        if (c != key[i]) return 0;
+    }
+    return i < n && buf[i] == '=';
+}
+
+static void tag_copy(char *dst, uint32_t cap, const char *src, uint32_t n)
+{
+    if (!dst || !cap) return;
+    uint32_t j = 0;
+    while (j < n && j + 1u < cap) { dst[j] = src[j]; j++; }
+    dst[j] = 0;
+}
+
+static void vorbis_comments(flac_t *f, uint32_t length)
+{
+    uint32_t used = 0;
+    uint32_t vlen = le32(f); used += 4u;
+    for (uint32_t i = 0; i < vlen && used < length; i++, used++) (void)bits(f, 8);
+    if (used + 4u > length) return;
+
+    uint32_t count = le32(f); used += 4u;
+    /* A corrupt count must not turn into a long spin over a short block. */
+    if (count > 1024u) count = 1024u;
+
+    for (uint32_t c = 0; c < count && used + 4u <= length; c++) {
+        uint32_t n = le32(f); used += 4u;
+        if (n > length - used) n = length - used;
+
+        /* Only the head of an entry is worth holding: the longest key of
+         * interest is ALBUMARTIST, and the values are truncated to the tag
+         * buffers anyway. Anything past this is skipped in place. */
+        char e[80];
+        uint32_t keep = n < sizeof(e) ? n : (uint32_t)sizeof(e);
+        for (uint32_t i = 0; i < keep; i++) e[i] = (char)bits(f, 8);
+        for (uint32_t i = keep; i < n; i++) (void)bits(f, 8);
+        used += n;
+
+        const char *v = e;
+        uint32_t    vn = keep;
+        if      (key_is(e, keep, "TITLE"))       { v += 6; vn = keep - 6u;
+                                                   tag_copy(f->tag_title,  f->tag_cap, v, vn); }
+        else if (key_is(e, keep, "ARTIST"))      { v += 7; vn = keep - 7u;
+                                                   tag_copy(f->tag_artist, f->tag_cap, v, vn); }
+        else if (key_is(e, keep, "ALBUM"))       { v += 6; vn = keep - 6u;
+                                                   tag_copy(f->tag_album,  f->tag_cap, v, vn); }
+        else if (key_is(e, keep, "DATE"))        { v += 5; vn = keep - 5u;
+                                                   tag_copy(f->tag_year,   8u, v, vn > 4u ? 4u : vn); }
+        else if (key_is(e, keep, "TRACKNUMBER")) { v += 12; vn = keep - 12u;
+                                                   tag_copy(f->tag_trk,    8u, v, vn); }
+    }
+    for (; used < length; used++) (void)bits(f, 8);
+}
+
 flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
                    int32_t *ch0, uint32_t ch0_cap)
 {
+    /* The caller sets the tag pointers before this call; zeroing the struct
+     * would throw them away, so they are carried across. */
+    char *t_ti = f->tag_title,  *t_ar = f->tag_artist, *t_al = f->tag_album;
+    char *t_yr = f->tag_year,   *t_tk = f->tag_trk;
+    uint32_t t_cap = f->tag_cap;
+
     for (uint32_t i = 0; i < sizeof(*f); i++) ((uint8_t *)f)[i] = 0;
     f->read = read; f->ctx = ctx; f->ch0 = ch0; f->ch0_cap = ch0_cap;
+    f->tag_title = t_ti; f->tag_artist = t_ar; f->tag_album = t_al;
+    f->tag_year  = t_yr; f->tag_trk    = t_tk; f->tag_cap   = t_cap;
 
     if (bits(f, 32) != 0x664C6143u) return FLAC_ERR_MAGIC;   /* "fLaC" */
 
@@ -137,6 +225,8 @@ flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
             if (f->bps != 16u && f->bps != 24u && f->bps != 8u &&
                 f->bps != 20u) return FLAC_ERR_UNSUPPORTED;
             if (f->max_blocksize > ch0_cap) return FLAC_ERR_UNSUPPORTED;
+        } else if (type == 4u) {                             /* VORBIS_COMMENT */
+            vorbis_comments(f, length);
         } else {
             for (uint32_t i = 0; i < length; i++) (void)bits(f, 8);
         }

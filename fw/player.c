@@ -2723,9 +2723,34 @@ static void ui_load_failed(void)
 #define FLAC_MAX_RATE 48000u
 static uint8_t rate_unsupported;   /* set at load, consumed by the main loop */
 
+/* Shown ON THE TRACK CARD rather than as a takeover screen. The card is
+ * already where this player explains what is loaded, the filename still reads
+ * as the title, and the layout does not jump -- a full-screen LOAD FAILED for
+ * a file that is perfectly good is a heavier response than the situation
+ * deserves. */
 static void ui_rate_unsupported(void)
 {
-    ui_failed_msg("HI-RES FLAC NOT SUPPORTED", "48kHz MAX - 44.1kHz IS TYPICAL");
+    /* Clear the tag fields so the card carries the reason instead. The title
+     * falls back to the filename on its own when track_title is empty, which
+     * is exactly what wants naming here. */
+    track_title[0]  = 0;
+    track_artist[0] = 0;
+    track_album[0]  = 0;
+    track_year[0]   = 0;
+    track_trk[0]    = 0;
+
+    static const char msg[] = "HI-RES FLAC - 48kHz MAX";
+    for (uint32_t i = 0; i < sizeof(msg); i++) track_artist[i] = msg[i];
+
+    ui_blank_wake();
+    ui_draw_chrome();
+
+    /* Stay alive so a reload can rescue us, exactly as the failure screen
+     * does -- the difference is only what the user is looking at. */
+    for (;;) {
+        poll_input();
+        if (reload_pending) return;
+    }
 }
 
 /* Called from the main loop every frame. Under rev 6 this had to be throttled
@@ -4029,6 +4054,91 @@ static uint8_t * const tagbuf = (uint8_t *)(uintptr_t)(UNCACHED + (uint32_t)(uin
 static uint32_t st0;
 static short pcm[MAX_NCHAN * MAX_NGRAN * MAX_NSAMP];
 
+/* Feeds every meter from one frame of interleaved PCM.
+ *
+ * Lifted out of the MP3 loop so the FLAC path drives the SAME nine meters
+ * rather than growing a second, subtly different implementation of them. Takes
+ * the buffer explicitly: MP3 hands it Helix's output, FLAC hands it a window
+ * captured in flac_emit. */
+static void meters_feed(const short *pcm, int n, int stereo)
+{
+    /* Real amplitude, not a proxy: max |sample| over the frame just
+     * decoded, so the meter reflects what is actually playing. */
+    {
+        int32_t pk = 0, pkl = 0, pkr = 0;
+        for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
+            int32_t l = pcm[i];        if (l < 0) l = -l;
+            int32_t r = stereo ? pcm[i + 1] : l; if (r < 0) r = -r;
+            if (l > pkl) pkl = l;
+            if (r > pkr) pkr = r;
+        }
+        pk = (pkl > pkr) ? pkl : pkr;
+        peak_amp = (uint32_t)pk;
+        peak_l   = (uint32_t)pkl;
+        peak_r   = (uint32_t)pkr;
+
+        /* Even spread across the frame, so the trace covers the whole
+         * period rather than clustering at its start. */
+        uint32_t pairs = (uint32_t)(stereo ? (n / 2) : n);
+        uint32_t step  = pairs / SCOPE_N;
+        if (step && pk > 0) {
+            /* AUTO-GAIN, normalised to this frame's peak.
+             *
+             * A fixed shift was sized for full-scale samples, and real
+             * music sits far below that -- mid/side landed a couple of
+             * pixels from centre and the trace was a smudge. Scaling to the
+             * peak makes the shape readable at any level, which is the
+             * whole point: this mode shows correlation, not loudness. The
+             * L/R bars already show loudness.
+             *
+             * One divide per frame, then a shift per point. Averages rather
+             * than sums, so mid and side each span +-pk and the reciprocal
+             * maps them exactly onto the box. */
+            int32_t scale = ((int32_t)SCOPE_UNIT << 15) / (int32_t)pk;
+            scope_head = (uint8_t)((scope_head + 1u) % SCOPE_HIST);
+            signed char *sx = scope_x[scope_head], *sy = scope_y[scope_head];
+            for (uint32_t k = 0; k < SCOPE_N; k++) {
+                uint32_t idx = k * step;
+                int32_t l = pcm[stereo ? idx * 2u : idx];
+                int32_t r = stereo ? pcm[idx * 2u + 1u] : l;
+                int32_t mid  = (l + r) / 2;      /* mono -> x = 0 */
+                int32_t side = (l - r) / 2;
+                sx[k] = (signed char)((side * scale) >> 15);
+                sy[k] = (signed char)((mid  * scale) >> 15);
+            }
+
+            /* Oscilloscope columns, same normalisation. Min and max over
+             * each slice rather than a single sample: point-sampling a
+             * waveform at 64 points aliases badly and the trace jumps
+             * about; the envelope is stable and shows the real shape. */
+            uint32_t need = WAVE_COLS * WAVE_SPAN;
+            if (pairs > need) {
+                /* Trigger: first rising crossing of zero, searched only in
+                 * the slack between the window and the frame so there is
+                 * always a full window left to draw. */
+                uint32_t trig = 0, limit = pairs - need;
+                int32_t prev = 0;
+                for (uint32_t i2 = 0; i2 < limit; i2++) {
+                    int32_t l = pcm[stereo ? i2 * 2u : i2];
+                    int32_t rr = stereo ? pcm[i2 * 2u + 1u] : l;
+                    int32_t m = (l + rr) / 2;
+                    if (prev < 0 && m >= 0) { trig = i2; break; }
+                    prev = m;
+                }
+                for (uint32_t c = 0; c < WAVE_COLS; c++) {
+                    uint32_t idx = trig + c * WAVE_SPAN;
+                    int32_t l = pcm[stereo ? idx * 2u : idx];
+                    int32_t rr = stereo ? pcm[idx * 2u + 1u] : l;
+                    int32_t m = (l + rr) / 2;
+                    wav_v[c] = (signed char)((m * scale) >> 15);
+                }
+            }
+        }
+    }
+
+}
+
+
 /* ------------------------------------------------------------- controls --
  * A / Start : play-pause          Left / Right      : tap  = seek -/+ ~5 s
  * Up / Down : volume                                  hold = previous/next
@@ -4858,12 +4968,32 @@ static int flac_restart(void)
     return 1;
 }
 
-static void flac_emit(void *ctx, const int16_t *pcm, uint32_t frames)
+/* Stereo pairs of the current FLAC frame captured for the meters, and how
+ * many. The buffer is Helix's output array, which is idle for the whole of a
+ * FLAC track -- the decoder is freed at load. Reusing it costs nothing and
+ * keeps the meters on one code path; a buffer of its own would not fit
+ * anyway, with ~1.8 KB of link slack left.
+ *
+ * The first 1152 pairs of a 4608-sample frame, which is 26 ms of every 104 ms.
+ * They have to be CONTIGUOUS rather than spread across the frame: the
+ * oscilloscope searches for a zero crossing to trigger on and then walks
+ * WAVE_COLS * WAVE_SPAN consecutive samples. */
+#define FL_METER_PAIRS 1152u
+static uint32_t fl_meter_n;
+
+/* `src`, not `pcm`: the file-scope pcm[] is the meter capture buffer, and a
+ * parameter of that name would shadow it. */
+static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
 {
     (void)ctx;
     uint32_t t_in = cycles(), idle0 = fl_idle_cyc;
     for (uint32_t i = 0; i < frames; i++) {
-        int32_t l = pcm[i * 2], r = pcm[i * 2 + 1];
+        if (fl_meter_n < FL_METER_PAIRS) {
+            pcm[fl_meter_n * 2u]      = src[i * 2];
+            pcm[fl_meter_n * 2u + 1u] = src[i * 2 + 1];
+            fl_meter_n++;
+        }
+        int32_t l = src[i * 2], r = src[i * 2 + 1];
         if (fade_left) {
             int32_t g = (int32_t)((FADE_SAMPLES - fade_left) >> 3);
             l = (l * g) >> 8;
@@ -5625,6 +5755,18 @@ static int load_track(void)
          * buffer is sized from max_blocksize once it is known. */
         static int32_t probe_cap;
         probe_cap = (int32_t)(ARENA_LIMIT / sizeof(int32_t));
+
+        /* Tags come out of the Vorbis comment block during the metadata walk,
+         * straight into the same fields the ID3 path fills -- so the card,
+         * the marquees and the idle screen need to know nothing about format.
+         * Set BEFORE flac_open, which is where the walk happens. */
+        fl.tag_title  = track_title;
+        fl.tag_artist = track_artist;
+        fl.tag_album  = track_album;
+        fl.tag_year   = track_year;
+        fl.tag_trk    = track_trk;
+        fl.tag_cap    = sizeof(track_title);
+
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
         if (fe != FLAC_OK) {
             /* Hand the arena back to Helix rather than leaving the core with
@@ -6801,6 +6943,9 @@ int main(void)
             fl_dec_cyc  += (cycles() - t_frame)
                          - ((fl_idle_cyc - idle0) + (fl_io_cyc - io0));
             fl_dec_samp += fl.blocksize;
+            /* Same meters, same code as MP3 -- see meters_feed(). */
+            if (fl_meter_n) { meters_feed(pcm, (int)(fl_meter_n * 2u), 1); }
+            fl_meter_n = 0;
             if (fe == FLAC_END || fe == FLAC_ERR_SHORT) {
                 if (pl_advance_auto()) { ui_mode_dirty = 1; continue; }
                 if (pl_count && rep_mode == REP_OFF &&
@@ -6884,79 +7029,7 @@ int main(void)
         int n = fi.outputSamps;                  /* interleaved L,R */
         int stereo = (fi.nChans == 2);
 
-        /* Real amplitude, not a proxy: max |sample| over the frame just
-         * decoded, so the meter reflects what is actually playing. */
-        {
-            int32_t pk = 0, pkl = 0, pkr = 0;
-            for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
-                int32_t l = pcm[i];        if (l < 0) l = -l;
-                int32_t r = stereo ? pcm[i + 1] : l; if (r < 0) r = -r;
-                if (l > pkl) pkl = l;
-                if (r > pkr) pkr = r;
-            }
-            pk = (pkl > pkr) ? pkl : pkr;
-            peak_amp = (uint32_t)pk;
-            peak_l   = (uint32_t)pkl;
-            peak_r   = (uint32_t)pkr;
-
-            /* Even spread across the frame, so the trace covers the whole
-             * period rather than clustering at its start. */
-            uint32_t pairs = (uint32_t)(stereo ? (n / 2) : n);
-            uint32_t step  = pairs / SCOPE_N;
-            if (step && pk > 0) {
-                /* AUTO-GAIN, normalised to this frame's peak.
-                 *
-                 * A fixed shift was sized for full-scale samples, and real
-                 * music sits far below that -- mid/side landed a couple of
-                 * pixels from centre and the trace was a smudge. Scaling to the
-                 * peak makes the shape readable at any level, which is the
-                 * whole point: this mode shows correlation, not loudness. The
-                 * L/R bars already show loudness.
-                 *
-                 * One divide per frame, then a shift per point. Averages rather
-                 * than sums, so mid and side each span +-pk and the reciprocal
-                 * maps them exactly onto the box. */
-                int32_t scale = ((int32_t)SCOPE_UNIT << 15) / (int32_t)pk;
-                scope_head = (uint8_t)((scope_head + 1u) % SCOPE_HIST);
-                signed char *sx = scope_x[scope_head], *sy = scope_y[scope_head];
-                for (uint32_t k = 0; k < SCOPE_N; k++) {
-                    uint32_t idx = k * step;
-                    int32_t l = pcm[stereo ? idx * 2u : idx];
-                    int32_t r = stereo ? pcm[idx * 2u + 1u] : l;
-                    int32_t mid  = (l + r) / 2;      /* mono -> x = 0 */
-                    int32_t side = (l - r) / 2;
-                    sx[k] = (signed char)((side * scale) >> 15);
-                    sy[k] = (signed char)((mid  * scale) >> 15);
-                }
-
-                /* Oscilloscope columns, same normalisation. Min and max over
-                 * each slice rather than a single sample: point-sampling a
-                 * waveform at 64 points aliases badly and the trace jumps
-                 * about; the envelope is stable and shows the real shape. */
-                uint32_t need = WAVE_COLS * WAVE_SPAN;
-                if (pairs > need) {
-                    /* Trigger: first rising crossing of zero, searched only in
-                     * the slack between the window and the frame so there is
-                     * always a full window left to draw. */
-                    uint32_t trig = 0, limit = pairs - need;
-                    int32_t prev = 0;
-                    for (uint32_t i2 = 0; i2 < limit; i2++) {
-                        int32_t l = pcm[stereo ? i2 * 2u : i2];
-                        int32_t rr = stereo ? pcm[i2 * 2u + 1u] : l;
-                        int32_t m = (l + rr) / 2;
-                        if (prev < 0 && m >= 0) { trig = i2; break; }
-                        prev = m;
-                    }
-                    for (uint32_t c = 0; c < WAVE_COLS; c++) {
-                        uint32_t idx = trig + c * WAVE_SPAN;
-                        int32_t l = pcm[stereo ? idx * 2u : idx];
-                        int32_t rr = stereo ? pcm[idx * 2u + 1u] : l;
-                        int32_t m = (l + rr) / 2;
-                        wav_v[c] = (signed char)((m * scale) >> 15);
-                    }
-                }
-            }
-        }
+        meters_feed(pcm, n, stereo);
 
         for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
             int32_t l = pcm[i];

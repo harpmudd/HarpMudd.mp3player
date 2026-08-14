@@ -55,6 +55,12 @@ typedef struct {
     uint32_t      bitcnt;
     int           eof;
 
+    /* ---- tag destinations, set by the caller BEFORE flac_open ----
+     * Left null to skip tag parsing entirely. tag_cap sizes title/artist/album;
+     * year and track are fixed 8-byte fields, matching the ID3 path. */
+    char         *tag_title, *tag_artist, *tag_album, *tag_year, *tag_trk;
+    uint32_t      tag_cap;
+
     /* ---- from STREAMINFO ---- */
     uint32_t      rate;
     uint8_t       channels;
