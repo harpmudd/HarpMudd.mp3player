@@ -577,6 +577,53 @@ What each answer would mean:
    Still the biggest perceived win. Not the least work — it lands in the audio
    continuity path that took longest to stabilise.
 
+## Meters sit pegged on loud music — PEAK drives the bars (v1.4.0)
+
+User report 2026-08-15: "for many songs many of the meters are peaked out, very
+evident on the bar meters. Is the baseline set too high?" The instinct is right
+and the cause is one level down: it is not the baseline, it is what DRIVES the
+bar.
+
+`peak_amp` is max|sample| over the block, and `amp = peak_amp * UI_WAVE_H /
+32768` maps it linearly. On a modern master the peak of any 26 ms block is near
+full scale almost continuously, so the bar lives in its top few pixels.
+
+Measured on three real tracks, per 1152-sample block:
+
+| track | bar from PEAK | bar from AVERAGE |
+|---|---|---|
+| Pink Floyd | max 37, p90 17 | max 12, p90 5 |
+| Jerry Garcia | max 46, p90 41 | max 16, p90 12 |
+| Circles Around the Sun | max 8, p90 6 | max 3, p90 1 |
+
+Peak runs ~3x average, consistently. Those samples are quiet INTROS so nothing
+pegs in them; the loud body of the same masters puts per-block peak at 0.9-1.0
+FS, which is bar 65-72 of 72.
+
+### The fix
+
+Real meters split the two: VU averages, PPM peaks. Ours uses peak for the bar
+AND the hold marker.
+
+Drive the bar from the mean of |sample| -- one add per sample in a loop that
+already runs, one divide per block -- and leave `wave_pk` on peak so the hold
+marker still means what it says. Then apply a gain so a loud passage lands
+around 75-85% of height with room left to move: average sits near 0.2-0.35 FS
+on loud material, so roughly 2.5x.
+
+Cheap in code, maybe 100 bytes. Not cheap in TUNING: this changes the look of
+all ten meters at once, and the magic eye took about eight rounds to get right.
+Preview it as ASCII against real audio before any firmware build -- that is how
+the eye was tuned without burning hardware cycles.
+
+### Also record
+
+Peaks became an accumulated MAXIMUM across the display frame in v1.3.0
+(082babf), where they were previously a plain assignment that dropped half the
+chunks. That is correct -- no transient is lost -- but it does read very
+slightly higher, so a small part of the pegging is new in v1.3.0 rather than
+inherited.
+
 ## Absolute paths in a playlist — supported in code, NEVER tested
 
 `pl_open_into()` treats an entry beginning with `/` as absolute and replaces
