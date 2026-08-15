@@ -171,9 +171,6 @@ The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
 the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
 on headphones from a handheld it isn't a difference you're going to hear.
 
-New in v1.3.0 — if you have a file that won't play, please
-[open an issue](../../issues) with its format.
-
 ## How it works
 
 There's no audio decoder chip in the Pocket, so the FPGA is loaded with a
