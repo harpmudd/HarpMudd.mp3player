@@ -1893,7 +1893,25 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
     m->scale = scale;
     m->pos   = 0;
     m->next  = cycles() + CLK_HZ;          /* hold at the start first */
-    m->on    = (fb_text_width(m->text, scale) > ui_text_w);
+
+    /* Scroll when the PAINTED text overruns, not when its advances do.
+     *
+     * fb_text_width sums advances, but fb_char paints a whole CELL -- 32 px at
+     * 2x against an average advance near 22 -- so the final glyph reaches up to
+     * a cell past where the advance total says the text ends. A title could
+     * therefore pass the fits-check, have its last cell clipped at
+     * UI_CARD_TEXT_R, and never scroll because nothing thought it overflowed.
+     *
+     * Measured on real titles: "Come All Ye Faithful" is 348 advance-pixels
+     * against a 352 budget -- inside it by four -- yet paints to 390 against a
+     * right edge of 380. "Alabama Getaway" is 312 and paints to 342, which
+     * genuinely fits and correctly stays still. */
+    uint32_t adv_w = fb_text_width(m->text, scale);
+    uint32_t last  = i ? fb_adv(m->text[i - 1u], scale) : 0u;
+    uint32_t painted = (adv_w > last) ? (adv_w - last + FB_CELL(scale))
+                                      : FB_CELL(scale);
+    m->on = (adv_w > ui_text_w) ||
+            (UI_MARGIN + painted > UI_CARD_TEXT_R);
 }
 
 /* One step. Repaints the whole row first, because the window that follows may
