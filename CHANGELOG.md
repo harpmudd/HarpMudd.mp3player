@@ -4,12 +4,13 @@ What changed in each release, newest first.
 
 ## v1.3.0 — unreleased
 
-- **FLAC playback.** Lossless files play alongside MP3s, with their tags,
-  album art and meters, and the same seeking. Up to 48 kHz and 24-bit, which
-  covers CD rips and most of what people have — see the README for what plays
-  and what doesn't.
-- Hi-res FLAC above 48 kHz says so on screen, naming the file's own rate,
-  instead of playing badly.
+- **FLAC playback** — up to 48 kHz, 16 or 24-bit. Lossless files play
+  alongside MP3s with their tags, album art, meters and seeking. That range
+  covers CD rips and most libraries; hi-res files are turned away with the
+  reason on screen, naming the file's own rate, rather than playing badly.
+
+  FLAC is new in this release. If you have a file that won't play, please open
+  an issue with its format — it helps.
 - **Playlists work in subfolders.** Keep an album in its own folder with a
   playlist beside it and it plays — an `Artists/Album/tracks` library needs no
   rearranging. Previously the first track played and the rest failed to open.

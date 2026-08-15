@@ -48,6 +48,23 @@ Anything outside the table is refused with the reason on screen rather than
 played badly, because a file decoding at 150% of realtime sounds broken in a
 way a listener cannot distinguish from a damaged file or a broken core.
 
+## The meter cadence, which is not a bug
+
+FLAC meters do not move as evenly as MP3's, and they will not be made to.
+
+subframe() decodes ALL of channel 0 emitting nothing -- a stereo pair cannot be
+reconstructed until channel 1 arrives, and buffering one channel rather than
+two is the only reason this decoder fits the arena. So ~40 ms of every 104 ms
+frame produces no meter data at all. MP3's frames are 1152 samples and its
+longest gap is 23 ms.
+
+Three fixes were made around this and all of them were about not WASTING the
+information that exists -- an even UI refresh, peaks accumulated as a maximum
+instead of overwritten, and a deadline that was dead for 18 seconds at a time.
+None of them can create information that has not been decoded yet. What is
+left is the format's frame size meeting a memory-constrained decoder, and the
+only real cures are a larger arena or a faster CPU.
+
 ## Two bugs worth remembering
 
 **The frame header CRC-8 is not optional.** During sequential playback frames

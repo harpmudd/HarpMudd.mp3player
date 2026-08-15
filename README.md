@@ -193,6 +193,11 @@ FLAC files play alongside MP3s — same tags, album art, meters and seeking. Jus
 drop them in with everything else; the core reads the file itself rather than
 trusting the extension.
 
+FLAC is new in v1.3.0. It has been tested against a limited set of files, and
+encoders vary more than you would think — if you have one that won't play,
+please [open an issue](../../issues) with its format. That is more useful than
+anything else you could send.
+
 **What plays**
 
 | | supported |
