@@ -2304,7 +2304,11 @@ static void ui_wave_frame(void)
 
 static void ui_wave_anim_start(void)
 {
-    wv_on = 1u; wv_next = 0; wv_rng = cycles() | 1u;
+    /* cycles(), not 0 -- ui_wave_anim_tick() compares
+     * (int32_t)(cycles() - wv_next) < 0, which against 0 is just the sign of
+     * the counter, so this animation was dead for the same half of every
+     * 71.6 s wrap as the loading dots beside it. */
+    wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
     wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
     wv_tr    = 0;
     for (uint32_t i = 0; i < UI_WAVE_N; i++) wv_h[i] = 0;
@@ -2425,7 +2429,13 @@ static void ui_boot_note(const char *msg)
 {
     ui_boot_msg  = msg;
     ui_boot_t    = 0;
-    ui_boot_next = 0;                       /* first tick paints immediately */
+    /* cycles(), not 0. The tick tests (int32_t)(cycles() - ui_boot_next) < 0,
+     * which with 0 reduces to the SIGN OF THE COUNTER -- so for the half of
+     * every 71.6 s wrap where cycles() is above 2^31 the tick returned early,
+     * never painted, and never updated the deadline either. The dots were dead
+     * for the whole of roughly every other load, which is why they were
+     * "rarely seen". Same fault as fl_ui_next and pl_poll_at in c501764. */
+    ui_boot_next = cycles();                /* first tick paints immediately */
     /* WIPE FIRST. On the splash this row is empty so it never mattered, but in
      * the player it is the transport row -- PLAYING, the repeat and shuffle
      * arrows, the EQ name -- and writing over it left the old glyphs showing
