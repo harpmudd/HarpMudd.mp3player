@@ -6064,6 +6064,27 @@ static int load_track(void)
     track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
     bytes_per_sec = 16000u;
     paused = 0;
+    /* Arm the free-running-counter deadlines from NOW.
+     *
+     * Both are compared as `(int32_t)(cycles() - deadline) >= 0`, which is the
+     * right way to handle a 32-bit counter that wraps every 71.6 s -- but only
+     * once the deadline holds a real timestamp. Left at 0, the comparison
+     * reduces to the sign of cycles() itself, so a track loaded while the
+     * counter sits in its upper half reads NEGATIVE and the timer does not
+     * fire until the counter wraps: up to 35.8 seconds, ~18 on average.
+     *
+     * That is not theoretical. It was reported as the FLAC meters flowing
+     * slowly and out of time for about 17 seconds and then snapping into
+     * place -- the wrap. With fl_ui_next dead, ui_draw_dynamic() ran only once
+     * per FLAC frame, 9.6 Hz, scrolling the bars at 4.8. */
+    fl_ui_next = cycles();
+    tk_poll_at = cycles() + CLK_HZ * 2u;
+    /* pl_poll_at had the same fault, and it matters more than the meters: it
+     * is only ever assigned INSIDE the `if` that tests it, so from boot it sat
+     * at 0 and the playlist identity poll -- the recovery for a pick the core
+     * misses -- was dead for up to 35.8 seconds. That is exactly the window in
+     * which someone is choosing playlists. */
+    pl_poll_at = cycles() + CLK_HZ * 3u;
     /* `stopped` is sticky and was cleared in exactly ONE place -- the A handler,
      * on un-pause. A new track starts PLAYING, so leaving it set meant the
      * first A press paused while the transport still read STOPPED, and it took
