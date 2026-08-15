@@ -6190,7 +6190,17 @@ static int load_track(void)
 
         track_hz       = fl.rate;
         samprate       = fl.rate;
-        track_kbps     = 0;
+        track_kbps     = 0;      /* computed after the size probe, below */
+        /* The format row's third field. On an MP3 it names the encoder; for a
+         * lossless file the bit depth is the equivalent fact, and it is the
+         * one thing about a FLAC that the rate does not already say. */
+        {
+            char *q = track_encoder;
+            *q++ = 'F'; *q++ = 'L'; *q++ = 'A'; *q++ = 'C'; *q++ = ' ';
+            q = ui_dec(q, fl.bps);
+            *q++ = '-'; *q++ = 'b'; *q++ = 'i'; *q++ = 't';
+            *q = 0;
+        }
         /* Seek distance falls back to bytes_per_sec until the size probe lands
          * slot_size, and the 16000 default would make every FLAC seek about
          * six times too short. Estimate from the uncompressed rate instead:
@@ -6240,6 +6250,14 @@ static int load_track(void)
          * they actually were. Deleting this only traded away the instant,
          * accurate total time. It was never the click. */
         slot_size = probe_file_size();
+    /* FLAC's bitrate is only knowable once the file SIZE is -- the stream
+     * carries a duration but never a rate, and it is variable anyway, so this
+     * is the average over the whole file. It has to be here rather than in the
+     * format branch above, which runs before the probe. */
+    if (track_fmt == FMT_FLAC && track_secs && slot_size > fl_first_frame) {
+        uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
+        track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
+    }
     ld_size = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Cover art BEFORE the chrome, because whether it exists decides the
