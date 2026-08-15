@@ -1,10 +1,12 @@
 # MP3 Player — Analogue Pocket
 
-An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, ID3 tags, ten
+A music player for the Analogue Pocket. Pick a track or a playlist and the core
+decodes and plays it straight off the SD card, with album art, tags, ten
 switchable meters, an eight-preset equalizer, a progress bar, settings
 persistence and optional resume — it can pick up where you left off in a
 playlist.
+
+Plays **MP3** and **FLAC**.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
@@ -13,8 +15,8 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 ## Installing
 
 Copy the `Cores`, `Platforms` and `Assets` folders onto the root of your
-Pocket's SD card, merging with what's already there. Then drop your `.mp3`
-files into:
+Pocket's SD card, merging with what's already there. Then drop your `.mp3` and
+`.flac` files into:
 
 ```text
 /Assets/mp3player/common/
@@ -31,7 +33,8 @@ playlist it finds. Pick another once with **Load Playlist** and that becomes
 the one that loads from then on.
 
 With no `playlist.m3u` and nothing remembered you get a getting-started screen;
-press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
+press **Analogue** and choose **Load MP3** (which opens `.flac` files too) or
+**Load Playlist**. The same menu
 switches either at any time, and whatever you pick starts playing.
 
 | Pocket | Action |
@@ -83,8 +86,32 @@ Rhinestone Eyes.mp3
 /Music/Albums/Demon Days/01 Intro.mp3
 ```
 
-Bare names are relative to that folder; a leading `/` is from the card root.
-Lines starting with `#` are ignored, so exported playlists work as-is.
+Bare names are relative to the folder **the playlist itself is in**; a leading
+`/` is from the card root. Lines starting with `#` are ignored, so exported
+playlists work as-is.
+
+### A library in folders
+
+If your music is already organised as `Artist/Album/tracks`, leave it that way.
+Put a playlist in each album folder next to its tracks, pick it with **Load
+Playlist**, and it plays — bare filenames resolve against that folder, so
+nothing needs moving or renaming.
+
+You don't have to write them. `tools/make_album_playlists.py` in this repo
+walks a library and drops a `playlist.m3u` into every folder that contains
+music:
+
+```text
+python tools/make_album_playlists.py "D:/Assets/mp3player/common"
+```
+
+Run it again after adding albums; it leaves existing playlists alone unless you
+pass `--force`.
+
+The core can't do this for itself, and the reason is worth stating plainly: the
+Pocket gives a core no way to list a folder's contents. A core can only open a
+file whose exact name it already has, which is precisely what a playlist
+supplies.
 
 Any other name is picked with **Load Playlist**, and becomes the one that loads
 at launch from then on.
@@ -102,11 +129,11 @@ not how many lines the file has.
 
 <img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
-- **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
-  files that carry nothing else. A file with no readable tag shows its
-  filename, which is usually the song name anyway.
-- **Album art** from the tag's embedded image — baseline JPEG only; tracks
-  without it don't show the panel.
+- **Title and artist** from the tag — ID3v2 on MP3s, falling back to ID3v1 on
+  older files, and Vorbis comments on FLAC. A file with no readable tag shows
+  its filename, which is usually the song name anyway.
+- **Album art** from the tag's embedded image, on both formats — baseline JPEG
+  only; tracks without it don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
   oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
   peak dots and a magic eye.
@@ -160,11 +187,44 @@ It resets to off each launch, and it dims rather than powers down: a core can't
 reach the Pocket's backlight, so this is for a dark room rather than for saving
 battery.
 
+## FLAC
+
+FLAC files play alongside MP3s — same tags, album art, meters and seeking. Just
+drop them in with everything else; the core reads the file itself rather than
+trusting the extension.
+
+**What plays**
+
+| | supported |
+|---|---|
+| Sample rate | up to **48 kHz** (44.1 kHz and 48 kHz included) |
+| Bit depth | 8, 16, 20 and 24-bit |
+| Channels | mono and stereo |
+
+That covers CD rips and the great majority of FLAC libraries. What it rules out
+is **hi-res** — 88.2, 96, 176.4 and 192 kHz — along with 32-bit and
+multichannel files.
+
+Anything the core can't play says so on screen, naming the file's own format,
+rather than playing badly and leaving you to guess.
+
+**Why 48 kHz?** The decoder runs in software on a CPU built into the FPGA, and
+lossless decoding is far heavier than MP3. Measured on real files, a 24-bit
+44.1 kHz track uses about 80% of the time available; at 88.2 kHz the same music
+needs 150% and at 96 kHz 180% — half again to nearly twice what the chip can
+do. It isn't a setting that can be raised.
+
+If you want a hi-res album on the Pocket, convert it to 44.1 or 48 kHz. It is
+still lossless at that point, and on headphones from a handheld the difference
+is not one you are going to hear.
+
 ## How it works
 
-There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a RISC-V
-CPU and the decoder runs on it as software, with the audio queue and the
-equalizer built as hardware around it.
+There's no audio decoder chip in the Pocket, so the FPGA is loaded with a
+RISC-V CPU and the decoders run on it as software, with the audio queue and the
+equalizer built as hardware around it. MP3 uses the Helix decoder; FLAC is
+decoded by a streaming decoder written for this core, because the usual
+libraries need more memory per block than the whole arena holds.
 
 If that sounds interesting, the longer version — including the two Analogue
 framework bugs that had to be found first — is in
@@ -173,15 +233,17 @@ framework bugs that had to be found first — is in
 ## Known limitations
 
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
+- **FLAC up to 48 kHz.** Hi-res files are turned away with the reason on
+  screen; see [FLAC](#flac) for why, and what to convert them to.
 - **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
   skipped rather than shown wrong — re-save as baseline if a cover doesn't
   appear. See [ROADMAP.md](ROADMAP.md).
 - **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
   comes first, which allows about 80 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **Sometimes a playlist pick doesn't register straight away.** It loads on
-  its own a few seconds later; if it doesn't, pick it again. Seen when
-  switching from one playlist to another.
+- **Sometimes a pick doesn't register straight away.** The core checks the
+  slot every couple of seconds and picks it up on its own; if it doesn't,
+  choose it again. Seen when switching between playlists or tracks.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.

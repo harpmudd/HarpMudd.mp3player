@@ -1,11 +1,78 @@
-# FLAC on this core — the complete picture
+# FLAC on this core
 
-The most-requested feature. This is what it would actually take, what it would
-actually give you, and the one number that decides it.
+FLAC shipped in v1.3.0. This file is two things, in order: **what the decoder
+does and where its limits come from**, and then the working record of how those
+limits were found — kept because several confident predictions in it turned out
+to be wrong, and the corrections are the useful part.
 
 ---
 
-## The short version
+## What it does
+
+A streaming decoder written for this core (`fw/flac.c`). libFLAC and dr_flac
+both allocate working buffers per BLOCK — blocksize x channels x 4 bytes, which
+is 36,864 for the 4608-sample blocks these files use, against a 24,576-byte
+arena. They do not fit and cannot be made to.
+
+This one buffers ONE channel and streams the other into the same array: `ch0[i]`
+is read at exactly the instant `ch1[i]` is produced, and channel 1's LPC history
+is the entries just overwritten. Working set is blocksize x 4 bytes, half what
+the obvious structure needs.
+
+## The limits, and where each comes from
+
+| | limit | why |
+|---|---|---|
+| Sample rate | **48 kHz** | CPU. Measured, see below. |
+| Bit depth | 8, 16, 20, 24 | no conversion path for 32-bit |
+| Channels | mono, stereo | the decoder is two-channel by construction |
+| Block size | 6144 samples | the arena is 24,576 bytes at 4 bytes a sample |
+| Container | native FLAC | no Ogg demuxer |
+
+**The rate ceiling is measured, not chosen.** Decode cost as a percentage of
+realtime, with I/O excluded:
+
+| file | format | cost |
+|---|---|---|
+| Pink Floyd — The Show Must Go On | 16/44.1 | **74%** |
+| Psychedelic Furs — The Boy That Invented Rock & Roll | 24/44.1 | **80%** |
+| Jerry Garcia — Alabama Getaway | 24/88.2 | **150%** |
+| Circles Around the Sun — Third Sunrise Over Gliese | 24/96 | **180%** |
+
+Cost tracks sample rate almost exactly. 48 kHz lands near 87% for 24-bit, which
+fits; 88.2 kHz would need the decoder to be half again faster, and the largest
+single optimisation available — a 64-bit bit reservoir — bought 1.3x on one of
+its two passes. It is not a setting that can be raised.
+
+Anything outside the table is refused with the reason on screen rather than
+played badly, because a file decoding at 150% of realtime sounds broken in a
+way a listener cannot distinguish from a damaged file or a broken core.
+
+## Two bugs worth remembering
+
+**The frame header CRC-8 is not optional.** During sequential playback frames
+abut, so the sync scan never runs — seeking is the only path that lands
+mid-stream and searches. Scanning for the 14-bit sync pattern alone hits a
+FALSE sync inside audio data within a handful of frames on every test file.
+Requiring byte alignment and verifying the CRC is what made seeking usable.
+
+**Seeking must use the SEEKTABLE.** Between two seek points of one test file
+the rate is 164 KB/s, and between the next two it is 213 KB/s. A single average
+across a 30% swing lands somewhere different every press. Interpolating between
+the two points bracketing the target is what fixed it; files with no seek table
+interpolate across the whole file, anchored at the first audio frame.
+
+---
+
+# The working record
+
+Everything below is the investigation as it happened, including the parts that
+were wrong. The estimates in the next section were superseded by the
+measurements above — they are kept because how they failed is instructive.
+
+---
+
+## The short version (SUPERSEDED — see the measurements above)
 
 **Decoding FLAC is the easy part.** It is Rice coding plus an LPC filter — all
 integer, no MDCT, no synthesis filterbank. It is *cheaper* than MP3, and the
@@ -23,9 +90,9 @@ hear*, because it changes how much risk is worth taking.
 
 ---
 
-## The three budgets
+## The three budgets (SUPERSEDED — CPU was the binding one, not I/O)
 
-### 1. CPU — comfortable
+### 1. CPU — comfortable (WRONG: it is the binding constraint)
 
 | | |
 |---|---|
@@ -50,7 +117,7 @@ the FLAC decoder replaces Helix rather than joining it.
 That fits in the same envelope. **But it must genuinely share** — see the
 warning below, because this exact space just bit us.
 
-### 3. Throughput — THE UNKNOWN
+### 3. Throughput — THE UNKNOWN (answered: 736 KB/s, never the problem)
 
 | | |
 |---|---|

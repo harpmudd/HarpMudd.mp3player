@@ -4,6 +4,18 @@ What changed in each release, newest first.
 
 ## v1.3.0 — unreleased
 
+- **FLAC playback.** Lossless files play alongside MP3s, with their tags,
+  album art and meters, and the same seeking. Up to 48 kHz and 24-bit, which
+  covers CD rips and most of what people have — see the README for what plays
+  and what doesn't.
+- Hi-res FLAC above 48 kHz says so on screen, naming the file's own rate,
+  instead of playing badly.
+- **Playlists work in subfolders.** Keep an album in its own folder with a
+  playlist beside it and it plays — an `Artists/Album/tracks` library needs no
+  rearranging. Previously the first track played and the rest failed to open.
+- `tools/make_album_playlists.py` writes a playlist into every album folder of
+  a library, so a collection of any size needs one command rather than one
+  playlist typed per album.
 - Playlists can hold **256 tracks**, up from 128.
 
 ## v1.2.0 — 13 August 2026
