@@ -4,29 +4,58 @@ What changed in each release, newest first.
 
 ## v1.3.0 — unreleased
 
+**New**
+
 - **FLAC playback** — up to 48 kHz, 16 or 24-bit. Lossless files play
-  alongside MP3s with their tags, album art, meters and seeking. That range
-  covers CD rips and most libraries; hi-res files are turned away with the
-  reason on screen, naming the file's own rate, rather than playing badly.
+  alongside MP3s with their tags, album art, meters and seeking, and the core
+  reads the file itself rather than trusting the extension. That range covers
+  CD rips and most libraries.
 
   FLAC is new in this release. If you have a file that won't play, please open
   an issue with its format — it helps.
+- **A file the core can't play now says why**, on the track card, naming the
+  file's own format — `HI-RES 88.2kHz - PLAYS 48kHz MAX` — instead of failing
+  with a generic message or playing badly. Covers sample rate, bit depth,
+  channel count and block size.
 - **Playlists work in subfolders.** Keep an album in its own folder with a
-  playlist beside it and it plays — an `Artists/Album/tracks` library needs no
-  rearranging. Previously the first track played and the rest failed to open.
+  playlist beside it, or keep the playlist in `/Assets/mp3player/common/` and
+  name tracks in folders below it. An `Artist/Album/tracks` library needs no
+  rearranging.
+- **Playlists can hold 256 tracks**, up from 128.
 - `tools/make_album_playlists.py` writes a playlist into every album folder of
   a library, so a collection of any size needs one command rather than one
   playlist typed per album.
-- Playlists can hold **256 tracks**, up from 128.
-- A pick that didn't register should now be rarer: the track slot is re-checked
-  the way the playlist slot already was, and a timing fault that could leave
-  both checks inactive for the first few seconds after a load is fixed.
-- Fixed: the loading `...` animation was invisible about half the time, and the
-  meters could run slowly and out of time for the first several seconds of a
-  track — the same timing fault in four places.
-- Fixed: faint flicker on the mirrored-bars and peak-dots meters.
-- Fixed: FLAC tracks showed nothing on the format line, and long FLAC titles
-  didn't scroll.
+
+**Changed**
+
+- Meters are more accurate on both formats. Loudness peaks were being sampled
+  rather than accumulated, so about half of them never reached the display;
+  they all count now.
+- Long titles scroll in more cases. A title could sit just inside the width
+  budget, have its last character clipped anyway, and never scroll — because
+  the check measured the text's spacing rather than the space it actually
+  paints into.
+
+**Fixed**
+
+- A playlist or track pick that didn't register should now be rarer. The track
+  slot is re-checked the way the playlist slot already was, and a timing fault
+  that could leave both checks inactive for the first several seconds after a
+  load is fixed. Still listed under Known limitations — it was never
+  reproducible on demand, so it is not being declared gone.
+- The loading `...` animation was invisible about half the time, and the meters
+  could run slowly and out of time for the first several seconds of a track.
+  The same timing fault in four places: a deadline that read as *never* rather
+  than *now*, depending on where a free-running counter happened to be.
+- The first press of **A** on a freshly loaded track said STOPPED instead of
+  PAUSED, and took another play/pause to correct itself.
+- Faint flicker on the mirrored-bars and peak-dots meters when the bars moved
+  quickly. Both were blanking a whole column and painting the bar back into it,
+  so each bar was drawn twice a frame.
+- FLAC tracks showed nothing on the format line where MP3s show bitrate and
+  encoder. They now show `1635 kbps - 44.1 kHz - FLAC 24-bit`.
+- The previous track's album art stayed on screen behind the message for a file
+  that couldn't be played.
 
 ## v1.2.0 — 13 August 2026
 
