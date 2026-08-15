@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.3.0 — unreleased
+## v1.3.0 — 15 August 2026
 
 - **FLAC playback** — up to 48 kHz, 16 or 24-bit, with tags, album art, meters
   and seeking. Covers CD rips and most libraries.
