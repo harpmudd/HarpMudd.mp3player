@@ -22,9 +22,6 @@ What changed in each release, newest first.
   name tracks in folders below it. An `Artist/Album/tracks` library needs no
   rearranging.
 - **Playlists can hold 256 tracks**, up from 128.
-- `tools/make_album_playlists.py` writes a playlist into every album folder of
-  a library, so a collection of any size needs one command rather than one
-  playlist typed per album.
 
 **Changed**
 

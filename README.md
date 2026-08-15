@@ -6,8 +6,6 @@ switchable meters, an eight-preset equalizer, a progress bar, settings
 persistence and optional resume — it can pick up where you left off in a
 playlist.
 
-Plays **MP3** and **FLAC**.
-
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
@@ -33,9 +31,10 @@ playlist it finds. Choose a different one with **Load Playlist** and it becomes
 the one that loads from then on, so you only have to pick it once.
 
 With no `playlist.m3u` and nothing remembered you get a getting-started screen;
-press **Analogue** and choose **Load MP3** (which opens `.flac` files too) or
-**Load Playlist**. The same menu
+press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
 switches either at any time, and whatever you pick starts playing.
+
+The controls:
 
 | Pocket | Action |
 |---|---|
@@ -59,25 +58,20 @@ Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
-Volume, accent color, repeat, shuffle, the meter and the EQ preset are
-remembered between sessions, and the controls and **Core Settings** stay in
-step. **Where you were in a playlist can be remembered too** — the track and
-your position in it. That one is off until you ask for it: switch on **Resume
-playback** in Core Settings.
+Volume, accent color, repeat, shuffle, the meter and the EQ preset carry over
+between sessions, in step with **Core Settings**. **Where you were in a
+playlist can be remembered too** — switch on **Resume playback** in Core
+Settings. It holds one place, for the last playlist you used, and **Load MP3**
+records no position at all — so for an audiobook, use a playlist; a one-line
+`.m3u` is enough.
 
-Only one place is remembered, for the last playlist you used. Switch to another
-list and the first one starts over next time.
-
-**Load MP3** records no position at all, so for an audiobook use a playlist — a
-one-line `.m3u` is enough.
-
-The album art panel and the screen-blank timeout reset each launch. Everything
+The album art panel and screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
 
 ## Playlists
 
-Make a plain text file with one track per line and save it as `playlist.m3u` in
+A plain text file with one track per line, saved as `playlist.m3u` in
 `/Assets/mp3player/common/`:
 
 ```text
@@ -86,45 +80,13 @@ Rhinestone Eyes.mp3
 Demon Days/01 Intro.mp3
 ```
 
-Names are relative to the folder **the playlist itself is in**, so they can
-name tracks beside it or in a subfolder under it. Lines starting with `#` are
-ignored, so exported playlists work as-is.
+Names are relative to the folder the playlist is in, so a playlist can sit
+beside its tracks in an album folder or in `common/` naming tracks below it.
+Either works, so an `Artist/Album` library needs no rearranging. Lines starting
+with `#` are ignored, so exported playlists work as-is.
 
-### A library in folders
-
-If your music is already organised as `Artist/Album/tracks`, leave it that way.
-Put a playlist in each album folder next to its tracks, pick it with **Load
-Playlist**, and it plays — filenames resolve against that folder, so nothing
-needs moving or renaming.
-
-A playlist can also stay in `/Assets/mp3player/common/` and name tracks in
-subfolders below it:
-
-```text
-Goose - Shenanigans/01 So Ready.mp3
-Goose - Shenanigans/02 Madhuvan.mp3
-```
-
-Either arrangement works; use whichever suits how you already keep music.
-
-You don't have to write them. `tools/make_album_playlists.py` in this repo
-walks a library and drops a `playlist.m3u` into every folder that contains
-music:
-
-```text
-python tools/make_album_playlists.py "D:/Assets/mp3player/common"
-```
-
-Run it again after adding albums; it leaves existing playlists alone unless you
-pass `--force`.
-
-The core can't do this for itself, and the reason is worth stating plainly: the
-Pocket gives a core no way to list a folder's contents. A core can only open a
-file whose exact name it already has, which is precisely what a playlist
-supplies.
-
-Any other name is picked with **Load Playlist**, and becomes the one that loads
-at launch from then on.
+Any other filename is picked with **Load Playlist** and becomes the one that
+loads at launch from then on.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
@@ -132,31 +94,27 @@ repeats a track until the rest have played; with **Repeat all**, each pass round
 the list is freshly shuffled.
 
 A misspelled or missing filename costs that one track — the core steps over it
-and says how many it skipped. The count on screen is what will actually play,
-not how many lines the file has.
+and says how many it skipped.
 
 ## What it shows
 
 <img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
-- **Title and artist** from the tag — ID3v2 on MP3s, falling back to ID3v1 on
-  older files, and Vorbis comments on FLAC. A file with no readable tag shows
-  its filename, which is usually the song name anyway.
-- **Album art** from the tag's embedded image, on both formats — baseline JPEG
-  only; tracks without it don't show the panel.
+- **Title and artist** from the file's tag. One with no readable tag shows its
+  filename, which is usually the song name anyway.
+- **Album art** from the tag's embedded image — baseline JPEG only; tracks
+  without it don't show the panel.
 - **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
   oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
   peak dots and a magic eye.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
-- **The encoder that made the file**, beside the bitrate and sample rate —
-  `128 kbps - 44.1 kHz - LAME3.100`. MP3s without a LAME tag just show the
-  format; FLAC uses that spot for its bit depth, `1635 kbps - 44.1 kHz -
-  FLAC 24-bit`.
+- **Bitrate and sample rate**, with the encoder that made the file where it
+  says so — `128 kbps - 44.1 kHz - LAME3.100`.
 
-MP3: CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate,
-mono or stereo. FLAC is covered [below](#flac).<br clear="right">
+CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
+stereo, plus FLAC — see [below](#flac).<br clear="right">
 
 ## Equalizer
 
@@ -180,67 +138,47 @@ loud the music seems.
 ## Playback speed
 
 Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
-rises with the speed, so music sounds wrong. Off every launch — it isn't
-remembered.
-
-1.2× is the whole range — that's the CPU, not a choice. Double speed means
-decoding twice as many frames a second, past what the 60 MHz can do.
+rises with the speed, so music sounds wrong. Off every launch. 1.2× is the
+whole range — double speed would mean decoding twice as many frames a second,
+past what the CPU can do.
 
 ## Screen blanking
 
 **Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
-goes black after that long with no button pressed, and any button wakes it
+goes black after that long without a button press, and any button wakes it
 without doing anything else — reaching for a sleeping player shouldn't pause
-it. Playback carries on regardless, and nothing but a button press brings the
-screen back.
-
-It resets to off each launch, and it dims rather than powers down: a core can't
-reach the Pocket's backlight, so this is for a dark room rather than for saving
-battery.
+it. Playback carries on regardless. Resets to off each launch, and it blacks
+the picture rather than powering down: a core can't reach the Pocket's
+backlight, so it's for a dark room, not for battery.
 
 ## FLAC
 
-FLAC files play alongside MP3s — same tags, album art, meters and seeking. Just
-drop them in with everything else; the core reads the file itself rather than
-trusting the extension.
-
-FLAC is new in v1.3.0. It has been tested against a limited set of files, and
-encoders vary more than you would think — if you have one that won't play,
-please [open an issue](../../issues) with its format. That is more useful than
-anything else you could send.
-
-**What plays**
+Drop `.flac` files in with everything else and they play the same way — tags,
+album art, meters, seeking.
 
 | | supported |
 |---|---|
-| Sample rate | up to **48 kHz** (44.1 kHz and 48 kHz included) |
+| Sample rate | up to **48 kHz** |
 | Bit depth | 8, 16, 20 and 24-bit |
 | Channels | mono and stereo |
 
-That covers CD rips and the great majority of FLAC libraries. What it rules out
-is **hi-res** — 88.2, 96, 176.4 and 192 kHz — along with 32-bit and
-multichannel files.
+That covers CD rips and most libraries. Hi-res — 88.2, 96, 176.4 and 192 kHz —
+is out, along with 32-bit and multichannel. Anything the core can't play says
+so on screen and names the file's own format, so you aren't left guessing.
 
-Anything the core can't play says so on screen, naming the file's own format,
-rather than playing badly and leaving you to guess.
+The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
+80% of the time available, and the same music at 96 kHz needs nearly twice what
+the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
+on headphones from a handheld it isn't a difference you're going to hear.
 
-**Why 48 kHz?** The decoder runs in software on a CPU built into the FPGA, and
-lossless decoding is far heavier than MP3. Measured on real files, a 24-bit
-44.1 kHz track uses about 80% of the time available; at 88.2 kHz the same music
-needs 150% and at 96 kHz 180% — half again to nearly twice what the chip can
-do. It isn't a setting that can be raised.
-
-If you want a hi-res album on the Pocket, convert it to 44.1 or 48 kHz. It is
-still lossless at that point, and on headphones from a handheld the difference
-is not one you are going to hear.
+New in v1.3.0 — if you have a file that won't play, please
+[open an issue](../../issues) with its format.
 
 ## How it works
 
 There's no audio decoder chip in the Pocket, so the FPGA is loaded with a
 RISC-V CPU and the decoders run on it as software, with the audio queue and the
-equalizer built as hardware around it. MP3 uses the Helix decoder; FLAC is
-decoded by a streaming decoder written for this core, because the usual
-libraries need more memory per block than the whole arena holds.
+equalizer built as hardware around it.
 
 If that sounds interesting, the longer version — including the two Analogue
 framework bugs that had to be found first — is in
