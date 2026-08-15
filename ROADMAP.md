@@ -577,6 +577,75 @@ What each answer would mean:
    Still the biggest perceived win. Not the least work — it lands in the audio
    continuity path that took longest to stabilise.
 
+## Playlist overlay — hold a button, browse the list, pick a track (v1.4.0)
+
+Requested 2026-08-15. Hold a button, see the playlist, scroll it, choose a
+track. Agreed as the headline enhancement for 1.4.0.
+
+### Most of it already exists
+
+This is the unusual case where the hard parts are done and the missing piece is
+presentation:
+
+| need | already there |
+|---|---|
+| the track NAMES, in RAM | `pl_text[16384]`, the .m3u text itself |
+| where each name starts | `pl_off[PL_MAX]`, byte offset per track |
+| shuffle-aware ordering | `pl_order[]` |
+| play an arbitrary index | `pl_play_at(i)` — the skip path already calls it |
+| hold-to-act input | `PL_HOLD_MS`, used by Left/Right scrub and hold-A |
+| text and rect drawing | the engine, with `fb_text_boxed` clipping |
+
+So a name is `&pl_text[pl_off[i]]` and playing it is `pl_play_at(i)`. What has
+to be written is the overlay itself: a draw routine for N rows with a
+highlight, a selection index with Up/Down, and a modal input state that
+suspends the normal button meanings while it is open. Plus a full repaint on
+dismiss, which `ui_gradient()` + `ui_draw_chrome()` already do.
+
+### The binding constraint is SPACE, and it is binding NOW
+
+Measured at v1.3.0: **link slack is 1024 bytes, exactly the floor the
+`link.ld` heap assert allows.** The next addition of any size fails the link.
+That is not a warning about the future; it is the state today.
+
+Largest consumers, from `nm --size-sort`:
+
+| | | |
+|---|---|---|
+| `arena` | 24576 | BSS, sized by Helix's measured 23824 peak — 752 spare |
+| `ui_draw_dynamic.part.0` | 19212 | TEXT, the ten meters |
+| `pl_text` | 16384 | BSS, the .m3u text |
+| `main` | 12148 | TEXT |
+| `load_track` | 11908 | TEXT |
+| `art_acc` | 11040 | BSS, the art scaling accumulator |
+| `xmp3_huffTable` | 8484 | RODATA |
+
+**Do not assume SDRAM is the escape.** It holds the framebuffer and the art
+stash, but those are reached through the DRAWING ENGINE — see the SDRAM->SDRAM
+block move, whose source rides in the colour registers. Whether the CPU can
+load and store SDRAM directly is UNVERIFIED, and `pl_text` has to be parsed by
+the CPU. Prove that before planning around it.
+
+Candidates that do not depend on that question, cheapest first:
+
+1. **`art_acc` overlapping the arena.** 11 KB used only while artwork decodes,
+   and artwork decodes at load. Whether it is disjoint from the decoder's
+   lifetime needs checking against `load_track`'s ordering — if it is, this is
+   the single biggest win available.
+2. **Cold code at `-Os`.** `load_track` and the boot paths are not hot;
+   `ui_draw_dynamic` and the decoders must stay `-O2`. Per-file flags, the way
+   `flac.c` is already handled — NOT `__attribute__((optimize))`, which was
+   tried on the FLAC decoder and nearly doubled the object.
+3. **Trim a meter.** Ten is generous, and they are the largest single text
+   item. Unpopular, and a last resort.
+
+### Order of work
+
+Reclaim space FIRST, and land it as its own build with no behaviour change, so
+a regression there is unambiguous. Then build the overlay against a known
+budget. Attempting them together means a link failure mid-feature with two
+suspects, which is how this branch lost most of a day already.
+
 ## Hold-A for 1.2x is too easy to trigger by accident
 
 A user reported a track playing at "double speed". The likely cause is not a
