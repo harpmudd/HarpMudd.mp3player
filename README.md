@@ -22,9 +22,9 @@ Pocket's SD card, merging with what's already there. Then drop your `.mp3` and
 /Assets/mp3player/common/
 ```
 
-They can live anywhere on the card; that folder is just where the browser
-starts. `mp3player.rom` is the firmware and has to stay there — the core won't
-start without it.
+They can live in subfolders under that path — an `Artist/Album` layout works
+as-is, and is what most people already have. `mp3player.rom` is the firmware
+and has to stay in that folder — the core won't start without it.
 
 ## Playing
 
@@ -83,19 +83,29 @@ Make a plain text file with one track per line and save it as `playlist.m3u` in
 ```text
 Feel Good Inc.mp3
 Rhinestone Eyes.mp3
-/Music/Albums/Demon Days/01 Intro.mp3
+Demon Days/01 Intro.mp3
 ```
 
-Bare names are relative to the folder **the playlist itself is in**; a leading
-`/` is from the card root. Lines starting with `#` are ignored, so exported
-playlists work as-is.
+Names are relative to the folder **the playlist itself is in**, so they can
+name tracks beside it or in a subfolder under it. Lines starting with `#` are
+ignored, so exported playlists work as-is.
 
 ### A library in folders
 
 If your music is already organised as `Artist/Album/tracks`, leave it that way.
 Put a playlist in each album folder next to its tracks, pick it with **Load
-Playlist**, and it plays — bare filenames resolve against that folder, so
-nothing needs moving or renaming.
+Playlist**, and it plays — filenames resolve against that folder, so nothing
+needs moving or renaming.
+
+A playlist can also stay in `/Assets/mp3player/common/` and name tracks in
+subfolders below it:
+
+```text
+Goose - Shenanigans/01 So Ready.mp3
+Goose - Shenanigans/02 Madhuvan.mp3
+```
+
+Either arrangement works; use whichever suits how you already keep music.
 
 You don't have to write them. `tools/make_album_playlists.py` in this repo
 walks a library and drops a `playlist.m3u` into every folder that contains
@@ -141,11 +151,12 @@ not how many lines the file has.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
 - **The encoder that made the file**, beside the bitrate and sample rate —
-  `128 kbps - 44.1 kHz - LAME3.100`. Files without a LAME tag just show the
-  format.
+  `128 kbps - 44.1 kHz - LAME3.100`. MP3s without a LAME tag just show the
+  format; FLAC uses that spot for its bit depth, `1635 kbps - 44.1 kHz -
+  FLAC 24-bit`.
 
-CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
-stereo.<br clear="right">
+MP3: CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate,
+mono or stereo. FLAC is covered [below](#flac).<br clear="right">
 
 ## Equalizer
 

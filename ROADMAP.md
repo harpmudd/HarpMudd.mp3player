@@ -577,6 +577,22 @@ What each answer would mean:
    Still the biggest perceived win. Not the least work — it lands in the audio
    continuity path that took longest to stabilise.
 
+## Absolute paths in a playlist — supported in code, NEVER tested
+
+`pl_open_into()` treats an entry beginning with `/` as absolute and replaces
+the template path outright, and the README documented that with an example
+pointing outside the core's own folder (`/Music/Albums/...`). Removed at the
+v1.3.0 release audit: the code path has never once been run, and it compounds a
+second unknown -- whether APF will open anything outside
+`/Assets/mp3player/common/` at all.
+
+Both questions settle in one hardware session: put one absolute entry in a test
+playlist, once inside the core's folder and once outside it. If the inside case
+works the claim can come back for relative-to-root paths; if the outside case
+works too, the "music can live anywhere on the card" line can come back with
+it. Until then the README claims only what has been played: names relative to
+the playlist's own folder, including subfolders under it.
+
 ## Playlist overlay — hold a button, browse the list, pick a track (v1.4.0)
 
 Requested 2026-08-15. Hold a button, see the playlist, scroll it, choose a
