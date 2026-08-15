@@ -79,3 +79,4 @@ sim/*.vvp
 # dist/Cores/HarpMudd.Mp3Player/ and is written there by package.py.
 /bitstream.rbf_r
 /*.rbf
+fw/*.o

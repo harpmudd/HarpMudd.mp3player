@@ -17,7 +17,8 @@
                 "deferload": true,
                 "parameters": "0x1",
                 "extensions": [
-                    "mp3"
+                    "mp3",
+                    "flac"
                 ]
             },
             {

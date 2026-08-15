@@ -2,6 +2,24 @@
 
 What changed in each release, newest first.
 
+## v1.3.0 — 15 August 2026
+
+- **FLAC playback** — up to 48 kHz, 16 or 24-bit, with tags, album art, meters
+  and seeking. Covers CD rips and most libraries.
+- A file the core can't play now says **why**, naming its own format, instead of
+  failing generically.
+- **Playlists work in subfolders**, so an `Artist/Album` library needs no
+  rearranging.
+- Playlists can hold **256 tracks**, up from 128.
+- Meters are more accurate — about half the loudness peaks never used to reach
+  the display.
+- Long titles scroll in more cases; some were clipped instead.
+- Fixed: a playlist or track pick that didn't register should now be rarer.
+- Fixed: the loading `...` animation was invisible about half the time.
+- Fixed: the first press of **A** on a freshly loaded track said STOPPED
+  instead of PAUSED.
+- Fixed: faint flicker on the mirrored-bars and peak-dots meters.
+
 ## v1.2.0 — 13 August 2026
 
 - Resume now works with **any** playlist, not just `playlist.m3u` — it

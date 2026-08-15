@@ -34,8 +34,20 @@ core updaters poll constantly, so that zeroes the asset's download count and
 briefly removes the file they are fetching. Delete only when the attached zip
 itself has to change.
 
+**Version lives in TWO files and both must move:**
+
+- `fw/player.c` — `APP_VER`, which is the version on the splash screen
+- `dist/Cores/HarpMudd.Mp3Player/core.json` — `version`, which is what the
+  Pocket shows in its core list, plus `date_release`
+
+`fw/build.sh` now compares the two and FAILS the build if they disagree, so the
+splash and the core list cannot drift again — they did through the whole of
+v1.3.0's development, with a card in hand announcing 1.2.0. It cannot check
+`date_release`, since only a human knows the release date; it prints it on
+every build instead so it cannot be forgotten quietly.
+
 Also at release time: add the date to the changelog entry, which is left off
-until a version is actually tagged.
+until a version is actually tagged, and set `date_release` to the same day.
 
 # Defects
 
@@ -386,6 +398,13 @@ with the throughput measurement in hand, and with eyes open about the payoff.
 
 ## FLAC — plausible, gated on one measurement
 
+**Full analysis: [docs/FLAC.md](docs/FLAC.md)** (written 2026-08-13). The
+benchmark that answers the gating question is built and waiting on the v1.3.0
+branch behind `IO_BENCH`; it reports on the diag row as `IO<n>KB`. Read it
+before building anything else, and read the heap warning in that document --
+the FLAC decoder must share Helix's heap, not add to it, and getting that wrong
+produces a core that cannot decode at all while the build still passes.
+
 The decode itself is the easy part: FLAC is Rice decoding plus an LPC filter,
 with no MDCT and no synthesis filterbank, so it is materially cheaper than MP3
 and integer throughout. No FPU needed, which is the usual killer on a soft core.
@@ -569,6 +588,138 @@ What each answer would mean:
 
    Still the biggest perceived win. Not the least work — it lands in the audio
    continuity path that took longest to stabilise.
+
+## Meters sit pegged on loud music — PEAK drives the bars (v1.4.0)
+
+User report 2026-08-15: "for many songs many of the meters are peaked out, very
+evident on the bar meters. Is the baseline set too high?" The instinct is right
+and the cause is one level down: it is not the baseline, it is what DRIVES the
+bar.
+
+`peak_amp` is max|sample| over the block, and `amp = peak_amp * UI_WAVE_H /
+32768` maps it linearly. On a modern master the peak of any 26 ms block is near
+full scale almost continuously, so the bar lives in its top few pixels.
+
+Measured on three real tracks, per 1152-sample block:
+
+| track | bar from PEAK | bar from AVERAGE |
+|---|---|---|
+| Pink Floyd | max 37, p90 17 | max 12, p90 5 |
+| Jerry Garcia | max 46, p90 41 | max 16, p90 12 |
+| Circles Around the Sun | max 8, p90 6 | max 3, p90 1 |
+
+Peak runs ~3x average, consistently. Those samples are quiet INTROS so nothing
+pegs in them; the loud body of the same masters puts per-block peak at 0.9-1.0
+FS, which is bar 65-72 of 72.
+
+### The fix
+
+Real meters split the two: VU averages, PPM peaks. Ours uses peak for the bar
+AND the hold marker.
+
+Drive the bar from the mean of |sample| -- one add per sample in a loop that
+already runs, one divide per block -- and leave `wave_pk` on peak so the hold
+marker still means what it says. Then apply a gain so a loud passage lands
+around 75-85% of height with room left to move: average sits near 0.2-0.35 FS
+on loud material, so roughly 2.5x.
+
+Cheap in code, maybe 100 bytes. Not cheap in TUNING: this changes the look of
+all ten meters at once, and the magic eye took about eight rounds to get right.
+Preview it as ASCII against real audio before any firmware build -- that is how
+the eye was tuned without burning hardware cycles.
+
+### Also record
+
+Peaks became an accumulated MAXIMUM across the display frame in v1.3.0
+(082babf), where they were previously a plain assignment that dropped half the
+chunks. That is correct -- no transient is lost -- but it does read very
+slightly higher, so a small part of the pegging is new in v1.3.0 rather than
+inherited.
+
+## Absolute paths in a playlist — supported in code, NEVER tested
+
+`pl_open_into()` treats an entry beginning with `/` as absolute and replaces
+the template path outright, and the README documented that with an example
+pointing outside the core's own folder (`/Music/Albums/...`). Removed at the
+v1.3.0 release audit: the code path has never once been run, and it compounds a
+second unknown -- whether APF will open anything outside
+`/Assets/mp3player/common/` at all.
+
+Both questions settle in one hardware session: put one absolute entry in a test
+playlist, once inside the core's folder and once outside it. If the inside case
+works the claim can come back for relative-to-root paths; if the outside case
+works too, the "music can live anywhere on the card" line can come back with
+it. Until then the README claims only what has been played: names relative to
+the playlist's own folder, including subfolders under it.
+
+## Playlist overlay — hold a button, browse the list, pick a track (v1.4.0)
+
+Requested 2026-08-15. Hold a button, see the playlist, scroll it, choose a
+track. Agreed as the headline enhancement for 1.4.0.
+
+### Most of it already exists
+
+This is the unusual case where the hard parts are done and the missing piece is
+presentation:
+
+| need | already there |
+|---|---|
+| the track NAMES, in RAM | `pl_text[16384]`, the .m3u text itself |
+| where each name starts | `pl_off[PL_MAX]`, byte offset per track |
+| shuffle-aware ordering | `pl_order[]` |
+| play an arbitrary index | `pl_play_at(i)` — the skip path already calls it |
+| hold-to-act input | `PL_HOLD_MS`, used by Left/Right scrub and hold-A |
+| text and rect drawing | the engine, with `fb_text_boxed` clipping |
+
+So a name is `&pl_text[pl_off[i]]` and playing it is `pl_play_at(i)`. What has
+to be written is the overlay itself: a draw routine for N rows with a
+highlight, a selection index with Up/Down, and a modal input state that
+suspends the normal button meanings while it is open. Plus a full repaint on
+dismiss, which `ui_gradient()` + `ui_draw_chrome()` already do.
+
+### The binding constraint is SPACE, and it is binding NOW
+
+Measured at v1.3.0: **link slack is 1024 bytes, exactly the floor the
+`link.ld` heap assert allows.** The next addition of any size fails the link.
+That is not a warning about the future; it is the state today.
+
+Largest consumers, from `nm --size-sort`:
+
+| | | |
+|---|---|---|
+| `arena` | 24576 | BSS, sized by Helix's measured 23824 peak — 752 spare |
+| `ui_draw_dynamic.part.0` | 19212 | TEXT, the ten meters |
+| `pl_text` | 16384 | BSS, the .m3u text |
+| `main` | 12148 | TEXT |
+| `load_track` | 11908 | TEXT |
+| `art_acc` | 11040 | BSS, the art scaling accumulator |
+| `xmp3_huffTable` | 8484 | RODATA |
+
+**Do not assume SDRAM is the escape.** It holds the framebuffer and the art
+stash, but those are reached through the DRAWING ENGINE — see the SDRAM->SDRAM
+block move, whose source rides in the colour registers. Whether the CPU can
+load and store SDRAM directly is UNVERIFIED, and `pl_text` has to be parsed by
+the CPU. Prove that before planning around it.
+
+Candidates that do not depend on that question, cheapest first:
+
+1. **`art_acc` overlapping the arena.** 11 KB used only while artwork decodes,
+   and artwork decodes at load. Whether it is disjoint from the decoder's
+   lifetime needs checking against `load_track`'s ordering — if it is, this is
+   the single biggest win available.
+2. **Cold code at `-Os`.** `load_track` and the boot paths are not hot;
+   `ui_draw_dynamic` and the decoders must stay `-O2`. Per-file flags, the way
+   `flac.c` is already handled — NOT `__attribute__((optimize))`, which was
+   tried on the FLAC decoder and nearly doubled the object.
+3. **Trim a meter.** Ten is generous, and they are the largest single text
+   item. Unpopular, and a last resort.
+
+### Order of work
+
+Reclaim space FIRST, and land it as its own build with no behaviour change, so
+a regression there is unambiguous. Then build the overlay against a known
+budget. Attempting them together means a link failure mid-feature with two
+suspects, which is how this branch lost most of a day already.
 
 ## Hold-A for 1.2x is too easy to trigger by accident
 

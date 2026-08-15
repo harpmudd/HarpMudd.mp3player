@@ -1,7 +1,7 @@
 # MP3 Player — Analogue Pocket
 
-An MP3 player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, ID3 tags, ten
+A music player for the Analogue Pocket. Pick a track or a playlist and the core
+decodes and plays it straight off the SD card, with album art, tags, ten
 switchable meters, an eight-preset equalizer, a progress bar, settings
 persistence and optional resume — it can pick up where you left off in a
 playlist.
@@ -13,26 +13,28 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 ## Installing
 
 Copy the `Cores`, `Platforms` and `Assets` folders onto the root of your
-Pocket's SD card, merging with what's already there. Then drop your `.mp3`
-files into:
+Pocket's SD card, merging with what's already there. Then drop your `.mp3` and
+`.flac` files into:
 
 ```text
 /Assets/mp3player/common/
 ```
 
-They can live anywhere on the card; that folder is just where the browser
-starts. `mp3player.rom` is the firmware and has to stay there — the core won't
-start without it.
+They can live in subfolders under that path — an `Artist/Album` layout works
+without rearranging. `mp3player.rom` is the firmware and has to stay in that
+folder — the core won't start without it.
 
 ## Playing
 
 At launch the core loads **`playlist.m3u`** — that name specifically, not any
-playlist it finds. Pick another once with **Load Playlist** and that becomes
-the one that loads from then on.
+playlist it finds. Choose a different one with **Load Playlist** and it becomes
+the one that loads from then on, so you only have to pick it once.
 
 With no `playlist.m3u` and nothing remembered you get a getting-started screen;
 press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
 switches either at any time, and whatever you pick starts playing.
+
+The controls:
 
 | Pocket | Action |
 |---|---|
@@ -56,38 +58,35 @@ Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
-Volume, accent color, repeat, shuffle, the meter and the EQ preset are
-remembered between sessions, and the controls and **Core Settings** stay in
-step. **Where you were in a playlist can be remembered too** — the track and
-your position in it. That one is off until you ask for it: switch on **Resume
-playback** in Core Settings.
+Volume, accent color, repeat, shuffle, the meter and the EQ preset carry over
+between sessions, in step with **Core Settings**. **Where you were in a
+playlist can be remembered too** — switch on **Resume playback** in Core
+Settings. It holds one place, for the last playlist you used, and **Load MP3**
+records no position at all — so for an audiobook, use a playlist; a one-line
+`.m3u` is enough.
 
-Only one place is remembered, for the last playlist you used. Switch to another
-list and the first one starts over next time.
-
-**Load MP3** records no position at all, so for an audiobook use a playlist — a
-one-line `.m3u` is enough.
-
-The album art panel and the screen-blank timeout reset each launch. Everything
+The album art panel and screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
 
 ## Playlists
 
-Make a plain text file with one track per line and save it as `playlist.m3u` in
+A plain text file with one track per line, saved as `playlist.m3u` in
 `/Assets/mp3player/common/`:
 
 ```text
 Feel Good Inc.mp3
 Rhinestone Eyes.mp3
-/Music/Albums/Demon Days/01 Intro.mp3
+Demon Days/01 Intro.mp3
 ```
 
-Bare names are relative to that folder; a leading `/` is from the card root.
-Lines starting with `#` are ignored, so exported playlists work as-is.
+Names are relative to the folder the playlist is in, so a playlist can sit
+beside its tracks in an album folder or in `common/` naming tracks below it.
+Either works, so an `Artist/Album` library needs no rearranging. Lines starting
+with `#` are ignored, so exported playlists work as-is.
 
-Any other name is picked with **Load Playlist**, and becomes the one that loads
-at launch from then on.
+Any other filename is picked with **Load Playlist** and becomes the one that
+loads at launch from then on.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
@@ -95,15 +94,13 @@ repeats a track until the rest have played; with **Repeat all**, each pass round
 the list is freshly shuffled.
 
 A misspelled or missing filename costs that one track — the core steps over it
-and says how many it skipped. The count on screen is what will actually play,
-not how many lines the file has.
+and says how many it skipped.
 
 ## What it shows
 
 <img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
 
-- **Title and artist** from the ID3v2 tag, falling back to ID3v1 on older
-  files that carry nothing else. A file with no readable tag shows its
+- **Title and artist** from the file's tag. One with no readable tag shows its
   filename, which is usually the song name anyway.
 - **Album art** from the tag's embedded image — baseline JPEG only; tracks
   without it don't show the panel.
@@ -113,12 +110,11 @@ not how many lines the file has.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
-- **The encoder that made the file**, beside the bitrate and sample rate —
-  `128 kbps - 44.1 kHz - LAME3.100`. Files without a LAME tag just show the
-  format.
+- **Bitrate and sample rate**, with the encoder that made the file where it
+  says so — `128 kbps - 44.1 kHz - LAME3.100`.
 
 CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
-stereo.<br clear="right">
+stereo, plus FLAC — see [below](#flac).<br clear="right">
 
 ## Equalizer
 
@@ -142,28 +138,43 @@ loud the music seems.
 ## Playback speed
 
 Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
-rises with the speed, so music sounds wrong. Off every launch — it isn't
-remembered.
-
-1.2× is the whole range — that's the CPU, not a choice. Double speed means
-decoding twice as many frames a second, past what the 60 MHz can do.
+rises with the speed, so music sounds wrong. Off every launch. 1.2× is the
+whole range — double speed would mean decoding twice as many frames a second,
+past what the CPU can do.
 
 ## Screen blanking
 
 **Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
-goes black after that long with no button pressed, and any button wakes it
+goes black after that long without a button press, and any button wakes it
 without doing anything else — reaching for a sleeping player shouldn't pause
-it. Playback carries on regardless, and nothing but a button press brings the
-screen back.
+it. Playback carries on regardless. Resets to off each launch, and it blacks
+the picture rather than powering down: a core can't reach the Pocket's
+backlight, so it's for a dark room, not for battery.
 
-It resets to off each launch, and it dims rather than powers down: a core can't
-reach the Pocket's backlight, so this is for a dark room rather than for saving
-battery.
+## FLAC
+
+Drop `.flac` files in with everything else and they play the same way — tags,
+album art, meters, seeking.
+
+| | supported |
+|---|---|
+| Sample rate | up to **48 kHz** |
+| Bit depth | 8, 16, 20 and 24-bit |
+| Channels | mono and stereo |
+
+That covers CD rips and most libraries. Hi-res — 88.2, 96, 176.4 and 192 kHz —
+is out, along with 32-bit and multichannel. Anything the core can't play says
+so on screen and names the file's own format, so you aren't left guessing.
+
+The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
+80% of the time available, and the same music at 96 kHz needs nearly twice what
+the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
+on headphones from a handheld it isn't a difference you're going to hear.
 
 ## How it works
 
-There's no MP3 decoder chip in the Pocket, so the FPGA is loaded with a RISC-V
-CPU and the decoder runs on it as software, with the audio queue and the
+There's no audio decoder chip in the Pocket, so the FPGA is loaded with a
+RISC-V CPU and the decoders run on it as software, with the audio queue and the
 equalizer built as hardware around it.
 
 If that sounds interesting, the longer version — including the two Analogue
@@ -173,14 +184,16 @@ framework bugs that had to be found first — is in
 ## Known limitations
 
 - **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
+- **FLAC up to 48 kHz.** Hi-res files are turned away with the reason on
+  screen; see [FLAC](#flac) for why, and what to convert them to.
 - **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
   skipped rather than shown wrong — re-save as baseline if a cover doesn't
   appear. See [ROADMAP.md](ROADMAP.md).
-- **Playlists are capped at 128 tracks**, or 16 KB of `.m3u` text — whichever
-  comes first, which allows about 128 characters per line. A playlist that runs
+- **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
+  comes first, which allows about 80 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **Sometimes a playlist pick doesn't register straight away.** It loads on
-  its own a few seconds later; if it doesn't, pick it again. Seen when
+- **Sometimes a playlist or track pick doesn't register straight away.** It
+  loads on its own a few seconds later; if it doesn't, pick it again. Seen when
   switching from one playlist to another.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is

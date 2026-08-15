@@ -135,14 +135,13 @@ static uint32_t pl_template(uint32_t slot, uint8_t *buf, uint32_t *name_at)
 /* Open `name` into ANY slot. The target used to be hardwired to the MP3 slot;
  * slot 3 needs it too now that the playlist slot no longer declares a default
  * filename and has to be filled by the core on a fresh card. */
-static int pl_open_into(uint32_t slot, const char *name)
+static int pl_open_try(uint32_t slot, const char *name, uint32_t tmpl_slot)
 {
     pl_open_err = PLO_OK; pl_open_errcode = 0; pl_open_timeout = 0;
 
     /* 1. Template: a struct APF built itself, for a file it already has. */
     uint8_t buf[DT_WORDS * 4u];
-    uint32_t best = 0, best_len = pl_template(MP3_SLOT_ID, buf, &best);
-    if (!best_len) best_len = pl_template(PL_SLOT_ID, buf, &best);
+    uint32_t best = 0, best_len = pl_template(tmpl_slot, buf, &best);
     if (!best_len) { pl_open_err = PLO_NONAME; return 0; }
 
 
@@ -212,6 +211,32 @@ static int pl_open_into(uint32_t slot, const char *name)
         return 0;
     }
     return 1;
+}
+
+/* The PLAYLIST slot is the template of record, and the MP3 slot is the
+ * fallback -- which is the reverse of how this started.
+ *
+ * Only the directory of the template matters here: the last component is
+ * replaced either way. The playlist is BY DEFINITION in the same folder as the
+ * tracks it names, while the MP3 slot holds whatever played last and its 0190
+ * response, after a core-initiated 0192, does not describe the subfolder the
+ * track actually came from.
+ *
+ * That asymmetry is invisible in a flat library -- both slots name the same
+ * folder -- and is exactly why this survived until someone put an album in a
+ * subfolder. The signature was precise: track 1 played and track 2 failed with
+ * 0192 err 3, because slot 2 starts EMPTY, so the first open fell through to
+ * the playlist slot and got the right folder, and every open after it did not.
+ *
+ * Both orders are still tried. If the preferred template produces a path APF
+ * will not open, the other is worth a go before giving up -- except on
+ * PL_ERRCODE_NOFILE, which means the entry genuinely is not there and no
+ * directory will change that. */
+static int pl_open_into(uint32_t slot, const char *name)
+{
+    if (pl_open_try(slot, name, PL_SLOT_ID)) return 1;
+    if (pl_open_errcode == PL_ERRCODE_NOFILE) return 0;
+    return pl_open_try(slot, name, MP3_SLOT_ID);
 }
 
 /* --------------------------------------------------------------- bad entries

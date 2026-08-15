@@ -5,7 +5,7 @@
  *
  * Layout, low -> high:
  *   .text/.rodata/.data/.bss
- *   heap            (Helix mallocs its ~34 KB decoder instance here)
+ *   heap            (Helix mallocs its 23816-byte decoder instance here)
  *   MP3 ring buffer (32 KB, RESERVED -- APF DMAs into it)
  *   stack           (16 KB)
  *
@@ -21,7 +21,19 @@ MEMORY {
 ENTRY(_start)
 
 _stack_size = 0x4000;    /* 16 KB */
-_ring_size  = 0x8000;    /* 32 KB -- ~0.8 s at 320 kbps */
+/* 24 KB, down from 32.
+ *
+ * The ring sits ABOVE the image, so shrinking it moves _tag_start up and
+ * hands 8 KB straight to the firmware -- which is what made room for a second
+ * decoder's code. Both decoders' text must be resident; only their buffers
+ * can swap.
+ *
+ * Affordable now in a way it was not when 32 KB was chosen. The ring exists to
+ * absorb SD stalls, and the card measured 736 KB/s sequential against 40 KB/s
+ * of MP3 demand -- an 18x margin. 24 KB is still ~0.6 s at 320 kbps, and
+ * ~0.23 s at the 105 KB/s the CD-rip FLAC on the test card needs. Watch the
+ * underrun flag if either ever looks marginal. */
+_ring_size  = 0x6000;    /* 24 KB -- ~0.6 s at 320 kbps */
 _tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
 
 SECTIONS {
@@ -56,4 +68,23 @@ SECTIONS {
 	/* Fail the link rather than silently overlapping if the image ever grows
 	 * past the reserved regions. */
 	ASSERT(_heap_start < _tag_start, "firmware image collides with reserved DMA buffers")
+
+	/* The gap between BSS and the DMA buffers IS the heap, and Helix mallocs
+	 * 23816 bytes of it for the decoder instance -- so BSS fitting is not the
+	 * same as the core working. Growing a static buffer into that space once
+	 * left a 15 KB heap: BSS still fit, the linker was satisfied, the build
+	 * passed, and MP3InitDecoder() would have returned 0 with no audio at
+	 * all. Caught by checking the number, not by any tool.
+	 *
+	 * 24576 rather than 23816 exactly, to cover malloc per-chunk headers
+	 * across the eight allocations and leave a little room. */
+	/* 1 KB, not 24. The decoder no longer allocates from here: fw/alloc.c
+	 * overrides malloc with a fixed arena, because newlib consumed the whole
+	 * 33936-byte heap to serve 23816 bytes of Helix structs and refused to
+	 * work at 25232 -- an overhead that could not be sized against.
+	 *
+	 * The guard that matters now is ARENA_BYTES in alloc.c, which is exact.
+	 * This one only keeps a token heap so a stray newlib path that reaches
+	 * _sbrk has somewhere to go rather than returning -1 in a corner. */
+	ASSERT(_heap_end - _heap_start >= 1024, "no room left for even a token heap")
 }
