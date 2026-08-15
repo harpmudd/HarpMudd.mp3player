@@ -254,13 +254,19 @@ def verify(path, progress_every=200):
                 else:
                     for i in range(n):
                         out[2*i] = ch0[i]; out[2*i+1] = ch1[i]
-            if bps == 24:
+            # FLAC hashes ceil(bps/8) bytes per sample, little-endian. This
+            # special-cased 24-bit only and used a 4-byte int for everything
+            # else, which is right for 16 by luck and wrong for 8 and 20 --
+            # so those depths could never have been checked properly.
+            if bps == 16:
+                md5.update(array('h', out).tobytes())
+            else:
+                width = (bps + 7) // 8
+                mask  = (1 << (width * 8)) - 1
                 buf = bytearray()
                 for v in out:
-                    buf += (v & 0xFFFFFF).to_bytes(3, 'little')
+                    buf += (v & mask).to_bytes(width, 'little')
                 md5.update(buf)
-            else:
-                md5.update(array(typecode, out).tobytes())
             b.align(); b.bits(16)
         except (EOFError, ValueError) as e:
             print(f"  FAILED in frame {frames}: {e}", flush=True)
