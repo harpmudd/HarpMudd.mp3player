@@ -2959,10 +2959,36 @@ static void ui_draw_dynamic(void)
                 uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
                 uint32_t h   = (wave[i] * half) / UI_WAVE_H;
                 if (!h) h = 1u;
+
+                /* Skip a column whose height has not moved, exactly as the
+                 * plain bars do. On a scroll most columns land on the height
+                 * already drawn there, and each skip saves the erase and the
+                 * fill both. */
+                if (h == wave_drawn[i]) continue;
+                wave_drawn[i] = (unsigned char)h;
+
                 uint16_t lc  = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
                 uint16_t c   = ui_mix(UI_TRACK, lc, i + 1u, UI_WAVE_N);
-                ui_bg_restore(x, UI_WAVE_Y, lit, UI_WAVE_H);
-                fb_rect(x, cy - h, lit, h * 2u + 1u, c);
+
+                /* Restore ONLY around the bar, never underneath it.
+                 *
+                 * This used to blank the whole column and then paint the bar
+                 * back into it, so every column was briefly empty every frame.
+                 * The panel scans out asynchronously, so some of those gaps
+                 * were visible -- the faint artifacting on fast movement, and
+                 * a side effect of moving these meters onto the gradient
+                 * (a flat `bed` fill used to double as the erase).
+                 *
+                 * The two spans plus the bar always sum to exactly UI_WAVE_H,
+                 * and the bar's own pixels are now written once, not twice. */
+                uint32_t top = cy - h;                      /* first bar row */
+                uint32_t bot = cy + h;                      /* last bar row  */
+                uint32_t end = UI_WAVE_Y + UI_WAVE_H;       /* one past box   */
+                if (top > UI_WAVE_Y)
+                    ui_bg_restore(x, UI_WAVE_Y, lit, top - UI_WAVE_Y);
+                if (bot + 1u < end)
+                    ui_bg_restore(x, bot + 1u, lit, end - (bot + 1u));
+                fb_rect(x, top, lit, h * 2u + 1u, c);
             }
             goto viz_done;
         }
@@ -2978,9 +3004,20 @@ static void ui_draw_dynamic(void)
                 uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
                 uint32_t pk  = wave_pk[i];
                 if (pk < 2u) pk = 2u;
+
+                /* Same treatment as the mirrored bars: skip an unmoved column,
+                 * and restore around the dot rather than through it. */
+                if (pk == wave_pk_drawn[i]) continue;
+                wave_pk_drawn[i] = (unsigned char)pk;
+
                 uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-                ui_bg_restore(x, UI_WAVE_Y, lit, UI_WAVE_H);
-                fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 2u, c);
+                uint32_t top = UI_WAVE_Y + UI_WAVE_H - pk;   /* first dot row */
+                uint32_t end = UI_WAVE_Y + UI_WAVE_H;        /* one past box  */
+                if (top > UI_WAVE_Y)
+                    ui_bg_restore(x, UI_WAVE_Y, lit, top - UI_WAVE_Y);
+                if (top + 2u < end)
+                    ui_bg_restore(x, top + 2u, lit, end - (top + 2u));
+                fb_rect(x, top, lit, 2u, c);
             }
             goto viz_done;
         }
