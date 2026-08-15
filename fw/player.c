@@ -516,6 +516,26 @@ static uint8_t  eq_idx;              /* 0 = FLAT = RTL bypass          */
 static uint32_t ui_sec, ui_sec_acc, ui_last_frames, ui_prog_sec;
 static int      ui_was_paused;
 static uint32_t peak_amp;         /* max |sample| in the most recently decoded frame, 0..32767 */
+/* Peaks ACCUMULATE between display frames instead of overwriting.
+ *
+ * meters_feed() runs once per decoded chunk and the bar history consumes at
+ * half the display rate, so a plain assignment meant the last write before a
+ * tick won and everything else was thrown away -- half the chunks on MP3, and
+ * on FLAC an arbitrary half, because FLAC's chunks arrive BUNCHED.
+ *
+ * A FLAC frame is 4608 samples, 104 ms, and subframe() decodes all of channel
+ * 0 emitting nothing -- a stereo pair cannot be reconstructed until channel 1
+ * arrives. So ~39 ms of every frame produces no meter data at all, then four
+ * chunks land close together. Taking the MAX since the last display frame
+ * makes what the meter shows independent of when the decoder happened to
+ * produce it, and loses no transient. */
+static uint32_t peak_acc, peak_acc_l, peak_acc_r;
+static uint8_t  peak_acc_any;
+/* The bar history scrolls every SECOND display frame, so it needs a max over
+ * its own two-frame period -- reading peak_amp directly would discard the
+ * frame in between, which is the same drop this change exists to remove, one
+ * consumer further down. */
+static uint32_t wave_pend;
 
 enum { ID3_OK, ID3_NO_TAG, ID3_NO_FRAME, ID3_UNSUPPORTED_ENCODING };
 static int title_status;
@@ -2844,6 +2864,19 @@ static void ui_rate_unsupported(void)
 static void ui_draw_dynamic(void)
 {
     if (screen_blank) return;
+
+    /* Publish the peaks once per display frame, so every meter below reads a
+     * value covering exactly the audio since the last frame. Nothing new means
+     * hold the last -- correct during FLAC's channel-0 window, where there
+     * genuinely is no new audio to show. */
+    if (peak_acc_any) {
+        peak_amp     = peak_acc;
+        peak_l       = peak_acc_l;
+        peak_r       = peak_acc_r;
+        peak_acc     = peak_acc_l = peak_acc_r = 0;
+        peak_acc_any = 0;
+        if (peak_amp > wave_pend) wave_pend = peak_amp;
+    }
     /* Shift a new sample in and repaint the band. Every bar moves each update,
      * so there is nothing to gain from change-detection here -- instead it is
      * throttled, and each bar is two rects (lit + unlit), which the engine
@@ -2894,7 +2927,11 @@ static void ui_draw_dynamic(void)
         ui_last_vu = 0;
 
         uint32_t wf = ui_wave_force; ui_wave_force = 0;
-        uint32_t amp = (peak_amp * UI_WAVE_H) / 32768u;
+        /* The accumulated maximum, not the instantaneous value: this tick
+         * covers two display frames and both should count. */
+        uint32_t src = wave_pend ? wave_pend : peak_amp;
+        wave_pend = 0;
+        uint32_t amp = (src * UI_WAVE_H) / 32768u;
         if (amp > UI_WAVE_H) amp = UI_WAVE_H;
         /* Frozen while paused: the forced pass exists only to recolour. */
         if (!paused) {
@@ -4173,9 +4210,13 @@ static void meters_feed(const short *pcm, int n, int stereo)
             if (r > pkr) pkr = r;
         }
         pk = (pkl > pkr) ? pkl : pkr;
-        peak_amp = (uint32_t)pk;
-        peak_l   = (uint32_t)pkl;
-        peak_r   = (uint32_t)pkr;
+        /* Accumulate rather than assign -- see peak_acc. ui_draw_dynamic()
+         * publishes the maximum once per display frame, so a chunk that lands
+         * between frames still counts instead of being overwritten. */
+        if ((uint32_t)pk  > peak_acc)   peak_acc   = (uint32_t)pk;
+        if ((uint32_t)pkl > peak_acc_l) peak_acc_l = (uint32_t)pkl;
+        if ((uint32_t)pkr > peak_acc_r) peak_acc_r = (uint32_t)pkr;
+        peak_acc_any = 1u;
 
         /* Even spread across the frame, so the trace covers the whole
          * period rather than clustering at its start. */
