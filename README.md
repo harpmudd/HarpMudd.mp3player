@@ -23,14 +23,14 @@ Pocket's SD card, merging with what's already there. Then drop your `.mp3` and
 ```
 
 They can live in subfolders under that path — an `Artist/Album` layout works
-as-is, and is what most people already have. `mp3player.rom` is the firmware
-and has to stay in that folder — the core won't start without it.
+without rearranging. `mp3player.rom` is the firmware and has to stay in that
+folder — the core won't start without it.
 
 ## Playing
 
 At launch the core loads **`playlist.m3u`** — that name specifically, not any
-playlist it finds. Pick another once with **Load Playlist** and that becomes
-the one that loads from then on.
+playlist it finds. Choose a different one with **Load Playlist** and it becomes
+the one that loads from then on, so you only have to pick it once.
 
 With no `playlist.m3u` and nothing remembered you get a getting-started screen;
 press **Analogue** and choose **Load MP3** (which opens `.flac` files too) or
