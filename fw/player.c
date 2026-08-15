@@ -134,10 +134,8 @@
  * instance before allocating the new one, so newlib should hand back the same
  * ~34 KB block every time and this should sit flat no matter how many tracks
  * are loaded. If it climbs per reload, something genuinely is not being freed. */
-extern unsigned int arena_used(void);
 extern unsigned int arena_limit(void);
 #define ARENA_LIMIT (arena_limit())
-extern unsigned int arena_total(void);
 
 #define CLK_HZ      60000000u   /* clk_sys; UI timing needs it before playback does */
 
@@ -610,12 +608,6 @@ static uint32_t pcm_under_n;    /* underrun EDGES since boot, for the diag  */
  * same size, and comparing counts of them would prove nothing. */
 static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
 static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
-/* Why the last flac_open() failed, and how many times. The first load of a
- * track has failed several times across builds and then succeeded on a retry,
- * which is the kind of fault that gets guessed at for hours -- flac_err says
- * which of MAGIC/STREAMINFO/UNSUPPORTED/SYNC/DATA/SHORT it actually was. */
-static uint8_t  fl_open_err;
-static uint8_t  fl_open_fails;
 static uint8_t  fl_idle_pct, fl_io_pct;
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
@@ -4922,6 +4914,14 @@ static void slot_filename(char *out, uint32_t out_size);
  * makes it true. */
 static uint32_t slot_id_query(int want_name)
 {
+    /* refill_drain() waits out an in-flight read and DISCARDS it -- see its own
+     * comment. That is right for a caller about to move the ring, and wrong for
+     * a poll that runs every couple of seconds during playback: it would throw
+     * away a 4 KB read each time and force it to be fetched again.
+     *
+     * Both callers now gate on !rd_pending, so this is a no-op in the steady
+     * state. Kept because the command layer requires exactly one in flight, and
+     * a future caller must not have to know that. */
     refill_drain();                     /* one command in flight, ever */
     uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
     REG(R_TGT_ID) = MP3_SLOT_ID;
@@ -6177,8 +6177,6 @@ static int load_track(void)
             return 0;
         }
         if (fe != FLAC_OK) {
-            fl_open_err = (uint8_t)fe;      /* shown on the diag row */
-            fl_open_fails++;
             /* Hand the arena back to Helix rather than leaving the core with
              * no decoder -- otherwise one bad file breaks every load after
              * it, which is exactly what happened. */
@@ -6836,6 +6834,7 @@ int main(void)
         if (!idle && pl_count && !pl_check_req
             && !pl_reload_pending && !pl_reload_armed
             && !reload_pending    && !reload_armed
+            && !rd_pending
             && (int32_t)(cycles() - pl_poll_at) >= 0) {
             pl_poll_at   = cycles() + CLK_HZ * 3u;
             pl_check_req = 1u;              /* same comparison path as below */
@@ -6847,6 +6846,7 @@ int main(void)
         if (!idle && cur_file_id && !pl_check_req
             && !pl_reload_pending && !pl_reload_armed
             && !reload_pending    && !reload_armed
+            && !rd_pending
             && (int32_t)(cycles() - tk_poll_at) >= 0) {
             tk_poll_at = cycles() + CLK_HZ * 2u;
             if (slot_changed()) reload_pending = 1u;

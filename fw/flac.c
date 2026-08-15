@@ -686,17 +686,3 @@ flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx)
     return FLAC_OK;
 }
 
-const char *flac_strerror(flac_err e)
-{
-    switch (e) {
-    case FLAC_OK:              return "ok";
-    case FLAC_END:             return "end of stream";
-    case FLAC_ERR_MAGIC:       return "not a FLAC file";
-    case FLAC_ERR_STREAMINFO:  return "bad STREAMINFO";
-    case FLAC_ERR_UNSUPPORTED: return "unsupported format";
-    case FLAC_ERR_SYNC:        return "lost frame sync";
-    case FLAC_ERR_DATA:        return "malformed subframe";
-    case FLAC_ERR_SHORT:       return "input ended mid-frame";
-    }
-    return "?";
-}

@@ -46,7 +46,6 @@
 static uint8_t  arena[ARENA_BYTES] __attribute__((aligned(8)));
 static uint32_t arena_next;
 static uint32_t arena_live;      /* outstanding allocations */
-static uint32_t arena_peak;      /* high-water mark, for the diag readout */
 
 void *malloc(size_t n)
 {
@@ -57,7 +56,6 @@ void *malloc(size_t n)
     void *p = &arena[arena_next];
     arena_next += sz;
     arena_live++;
-    if (arena_next > arena_peak) arena_peak = arena_next;
     return p;
 }
 
@@ -81,6 +79,4 @@ void *calloc(size_t a, size_t b)
  * in beside this one. Nothing here calls it. */
 void *realloc(void *p, size_t n) { (void)p; (void)n; return (void *)0; }
 
-unsigned int arena_used(void)  { return arena_peak; }
 unsigned int arena_limit(void) { return ARENA_BYTES; }
-unsigned int arena_total(void) { return ARENA_BYTES; }

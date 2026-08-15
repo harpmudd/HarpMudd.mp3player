@@ -106,6 +106,5 @@ extern uint8_t  flac_order, flac_type;   /* type: 1 FIXED, 2 LPC    */
  * stream. Keeps STREAMINFO and the block buffer. */
 void flac_flush_input(flac_t *f);
 
-const char *flac_strerror(flac_err e);
 
 #endif
