@@ -34,8 +34,20 @@ core updaters poll constantly, so that zeroes the asset's download count and
 briefly removes the file they are fetching. Delete only when the attached zip
 itself has to change.
 
+**Version lives in TWO files and both must move:**
+
+- `fw/player.c` — `APP_VER`, which is the version on the splash screen
+- `dist/Cores/HarpMudd.Mp3Player/core.json` — `version`, which is what the
+  Pocket shows in its core list, plus `date_release`
+
+`fw/build.sh` now compares the two and FAILS the build if they disagree, so the
+splash and the core list cannot drift again — they did through the whole of
+v1.3.0's development, with a card in hand announcing 1.2.0. It cannot check
+`date_release`, since only a human knows the release date; it prints it on
+every build instead so it cannot be forgotten quietly.
+
 Also at release time: add the date to the changelog entry, which is left off
-until a version is actually tagged.
+until a version is actually tagged, and set `date_release` to the same day.
 
 # Defects
 

@@ -87,4 +87,30 @@ lim = 192*1024 - 16*1024        # RAM minus stack reserve
 print('$ROM: %d bytes (%.1f%% of usable RAM)' % (n, 100.0*n/lim))
 assert n < lim, 'firmware image exceeds usable RAM'
 "
+# The splash version and the version the Pocket shows in its core list live in
+# two different files, and they drifted: v1.3.0 was built, tested and pushed to
+# a card for days still announcing 1.2.0 on both. Neither is checked by anything
+# else, and neither is visible from the other, so this compares them on every
+# build and FAILS rather than shipping a lie.
+#
+# date_release is not checked -- only a human knows the release date -- but it
+# is printed here so it cannot be forgotten silently.
+# cut on the quotes rather than a sed backreference: escaping is what broke the
+# first version of this check, and one that silently compares two empty strings
+# is worse than no check at all.
+CORE_JSON="$ROOT/dist/Cores/HarpMudd.Mp3Player/core.json"
+APP_VER=$(grep -m1 '#define APP_VER'  "$FW/player.c" | cut -d'"' -f2)
+JSON_VER=$(grep -m1 '"version"'       "$CORE_JSON"   | cut -d'"' -f4)
+JSON_DATE=$(grep -m1 '"date_release"' "$CORE_JSON"   | cut -d'"' -f4)
+if [ -z "$APP_VER" ] || [ -z "$JSON_VER" ]; then
+  echo "*** VERSION CHECK BROKE: could not read a version from either file ***" >&2
+  exit 1
+fi
+if [ "$APP_VER" != "$JSON_VER" ]; then
+  echo "*** VERSION MISMATCH: player.c says $APP_VER, core.json says $JSON_VER ***" >&2
+  echo "    both must match before release; core.json also carries date_release" >&2
+  exit 1
+fi
+echo "version $APP_VER (core.json date_release $JSON_DATE)"
+
 echo "built [$TARGET] -> $OUT/$ROM"
