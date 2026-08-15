@@ -246,9 +246,13 @@ framework bugs that had to be found first — is in
 - **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
   comes first, which allows about 80 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **Sometimes a pick doesn't register straight away.** The core checks the
-  slot every couple of seconds and picks it up on its own; if it doesn't,
-  choose it again. Seen when switching between playlists or tracks.
+- **Occasionally a pick doesn't register straight away.** The core re-checks
+  the slot every couple of seconds and usually picks it up on its own; if it
+  doesn't, choose it again and it loads. Much less frequent in v1.3.0 — the
+  track slot is now polled as well as the playlist slot, and a timing fault
+  that could leave both checks inactive for the first few seconds after a load
+  is fixed — but it has never been reproducible on demand, so it is listed
+  rather than declared gone.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.

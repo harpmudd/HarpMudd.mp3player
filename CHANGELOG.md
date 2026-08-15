@@ -18,6 +18,15 @@ What changed in each release, newest first.
   a library, so a collection of any size needs one command rather than one
   playlist typed per album.
 - Playlists can hold **256 tracks**, up from 128.
+- A pick that didn't register should now be rarer: the track slot is re-checked
+  the way the playlist slot already was, and a timing fault that could leave
+  both checks inactive for the first few seconds after a load is fixed.
+- Fixed: the loading `...` animation was invisible about half the time, and the
+  meters could run slowly and out of time for the first several seconds of a
+  track — the same timing fault in four places.
+- Fixed: faint flicker on the mirrored-bars and peak-dots meters.
+- Fixed: FLAC tracks showed nothing on the format line, and long FLAC titles
+  didn't scroll.
 
 ## v1.2.0 — 13 August 2026
 
