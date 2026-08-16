@@ -2881,9 +2881,133 @@ static void ui_rate_unsupported(void)
  * The delta-guards below stay -- not for cost any more, but because redrawing
  * an unchanged value would make the meter and clock flicker as they are
  * rewritten mid-scanout (the framebuffer is single-buffered). */
+/* ---- playlist overlay -----------------------------------------------------
+ *
+ * Select TAPS open a scrollable list of the playlist; Select HELD keeps its old
+ * job of toggling the art panel. D-pad moves the selection, A plays it.
+ *
+ * Rows are FILENAMES, not tags. pl_text holds the .m3u text and that is all the
+ * core has: a tag lives inside its file, so titling 256 rows would mean 256
+ * opens. The currently playing row is the one exception -- its tag is already
+ * in track_title -- but showing it differently from its neighbours reads as a
+ * bug, so it gets the same treatment and a marker instead.
+ *
+ * Order follows pl_order, so with shuffle on the list is the QUEUE: scrolling
+ * down previews what is actually coming.
+ */
+#define PL_UI_ROWS   11u
+#define PL_UI_X      12u
+#define PL_UI_W      (FB_W - 2u * PL_UI_X)
+#define PL_UI_Y      18u
+#define PL_UI_ROW_H  20u
+#define PL_UI_LIST_Y 52u
+#define PL_UI_TEXT_X (PL_UI_X + 10u)
+
+static uint8_t  pl_ui_open;        /* overlay is up                          */
+static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
+static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
+static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
+static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
+static uint16_t pl_ui_sel;         /* selection, an index into pl_order      */
+static uint16_t pl_ui_top;         /* first visible row                      */
+
+/* Last path component with the extension trimmed -- the same shape the title
+ * row falls back to, so a file reads the same in both places. */
+static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
+{
+    out[0] = 0;
+    if (pos >= pl_count) return;
+    const char *nm = &pl_text[pl_off[pl_order[pos]]];
+
+    uint32_t start = 0;
+    for (uint32_t i = 0; nm[i]; i++)
+        if (nm[i] == '/' || nm[i] == 0x5Cu) start = i + 1u;
+
+    uint32_t n = 0, dot = 0;
+    for (uint32_t i = start; nm[i] && n < cap - 1u; i++) {
+        if (nm[i] == '.') dot = n;
+        out[n++] = nm[i];
+    }
+    if (dot && n - dot <= 5u) n = dot;      /* ".mp3"/".flac", not "Blur - 13" */
+    out[n] = 0;
+}
+
+/* Keeps the selection on screen after any move. */
+static void pl_ui_follow(void)
+{
+    if (pl_ui_sel < pl_ui_top) pl_ui_top = pl_ui_sel;
+    else if (pl_ui_sel >= pl_ui_top + PL_UI_ROWS)
+        pl_ui_top = (uint16_t)(pl_ui_sel - PL_UI_ROWS + 1u);
+    if (pl_count > PL_UI_ROWS && pl_ui_top > pl_count - PL_UI_ROWS)
+        pl_ui_top = (uint16_t)(pl_count - PL_UI_ROWS);
+    if (pl_count <= PL_UI_ROWS) pl_ui_top = 0;
+}
+
+static void pl_ui_draw(void)
+{
+    /* The list can change under an open overlay -- a reload, or a pick the
+     * core noticed late. Clamp rather than trusting the stored indices. */
+    if (!pl_count) { pl_ui_open = 0u; pl_ui_restore = 1u; return; }
+    if (pl_ui_sel >= pl_count) pl_ui_sel = (uint16_t)(pl_count - 1u);
+    pl_ui_follow();
+    pl_ui_drawn_pos = pl_pos;
+
+    uint32_t h = PL_UI_LIST_Y + PL_UI_ROWS * PL_UI_ROW_H + 12u - PL_UI_Y;
+    fb_round_rect(PL_UI_X, PL_UI_Y, PL_UI_W, h, 8u, UI_PANEL);
+
+    /* Header: where you are in the list, which is the thing a long list hides. */
+    char hdr[40], *q = hdr;
+    const char *t = "PLAYLIST";
+    while (*t) *q++ = *t++;
+    if (pl_count) {
+        *q++ = ' '; *q++ = ' ';
+        q = ui_dec(q, (uint32_t)pl_ui_sel + 1u);
+        *q++ = ' '; *q++ = '/'; *q++ = ' ';
+        q = ui_dec(q, pl_count);
+    }
+    *q = 0;
+    fb_set_color(ui_accent, UI_PANEL);
+    fb_text_clipped(PL_UI_TEXT_X, PL_UI_Y + 10u, hdr, TS_1X, TS_1X, PL_UI_W - 20u);
+
+    char nm[64];
+    for (uint32_t i = 0; i < PL_UI_ROWS; i++) {
+        uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
+        uint16_t pos = (uint16_t)(pl_ui_top + i);
+        uint16_t bg  = UI_PANEL;
+
+        if (pos >= pl_count) {                       /* short list: clear the row */
+            fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
+            continue;
+        }
+
+        /* Selected row is a filled bar. Drawn first so the text paints onto it
+         * and blends against the right colour -- the engine writes a glyph's
+         * background with every character. */
+        if (pos == pl_ui_sel) {
+            bg = ui_accent;
+            fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
+        } else {
+            fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
+        }
+
+        /* '>' rather than an arrow glyph: the font is ASCII 0x20..0x7E. */
+        pl_ui_label(pos, nm, sizeof(nm));
+        fb_set_color(pos == pl_ui_sel ? UI_PANEL
+                   : pos == pl_pos    ? UI_WHITE : UI_DIM, bg);
+        if (pos == pl_pos)
+            fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
+        fb_text_boxed(PL_UI_TEXT_X + 8u, y, nm, TS_1X, TS_1X,
+                      PL_UI_W - 30u, PL_UI_X + PL_UI_W - 6u);
+    }
+}
+
 static void ui_draw_dynamic(void)
 {
     if (screen_blank) return;
+    /* The overlay covers the meters, the card and the transport row. Letting
+     * the player keep drawing underneath would punch holes straight through
+     * it, once per frame. */
+    if (pl_ui_open) return;
 
     /* Publish the peaks once per display frame, so every meter below reads a
      * value covering exactly the audio since the last frame. Nothing new means
@@ -4414,6 +4538,8 @@ static void poll_input(void)
     static uint32_t lr_t0[2];            /* when Left/Right went down          */
     static uint8_t  lr_fired[2];         /* the hold already skipped           */
     static uint8_t  sel_used;            /* Select was used as a modifier      */
+    static uint32_t sel_t0;              /* when Select went down              */
+    static uint8_t  sel_held;            /* the hold action already ran        */
     uint32_t in   = REG(R_INPUT);
     uint32_t keys = in & 0xFFFFu;
     uint32_t edge = keys & ~prev;        /* rising edges only  */
@@ -4433,6 +4559,28 @@ static void poll_input(void)
          * hold action either; `prev` was assigned above and still carries the
          * real state, so the next pass sees correct edges. */
         edge = 0; fall = 0; keys = 0;
+    }
+
+    /* ---- the overlay owns most of the pad while it is up -------------------
+     * Handled BEFORE every normal binding, then the consumed bits are cleared
+     * so nothing downstream also acts on them. Select is deliberately left in
+     * `keys`/`fall`: its tap-to-close is the same code that opened it, and its
+     * hold timer reads `keys` directly. */
+    if (pl_ui_open && pl_count) {
+        if (edge & KEY_UP) {
+            pl_ui_sel = pl_ui_sel ? (uint16_t)(pl_ui_sel - 1u)
+                                  : (uint16_t)(pl_count - 1u);
+            pl_ui_follow(); pl_ui_dirty = 1u;
+        }
+        if (edge & KEY_DOWN) {
+            pl_ui_sel = (uint16_t)((pl_ui_sel + 1u) % pl_count);
+            pl_ui_follow(); pl_ui_dirty = 1u;
+        }
+        if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u; pl_ui_restore = 1u; }
+        if (edge & KEY_B) { pl_ui_open = 0u; pl_ui_restore = 1u; }
+        edge &= KEY_SELECT;
+        fall &= KEY_SELECT;
+        keys &= KEY_SELECT;
     }
 
     /* A plays and pauses. Start only ever STOPS -- pressing it again does
@@ -4653,7 +4801,17 @@ static void poll_input(void)
     }
 
     /* ---- Select as a modifier for L/R ---- */
-    if (edge & KEY_SELECT) sel_used = 0;
+    if (edge & KEY_SELECT) { sel_used = 0; sel_t0 = cycles(); sel_held = 0; }
+
+    /* HOLD toggles the art panel, which is what a TAP used to do. The tap now
+     * opens the playlist, and this fires on the threshold rather than on
+     * release so the panel moves while the button is still down -- otherwise
+     * a hold and a tap feel identical until you let go. */
+    if ((keys & KEY_SELECT) && !sel_used && !sel_held &&
+        (int32_t)(cycles() - sel_t0) >= (int32_t)(CLK_HZ / 1000u * PL_HOLD_MS)) {
+        sel_held    = 1u;
+        art_toggle  = 1u;
+    }
 
     if (keys & KEY_SELECT) {
         if (edge & KEY_L1) {
@@ -4698,8 +4856,20 @@ static void poll_input(void)
                              settings_mark_dirty(); }
     }
 
-    /* Only a Select that was NOT used as a modifier toggles the art panel. */
-    if ((fall & KEY_SELECT) && !sel_used) art_toggle = 1u;
+    /* A Select that was neither a modifier nor a hold is a TAP: the playlist.
+     * Opening lands the cursor on what is playing, which is the row a user
+     * wants nine times in ten. */
+    if ((fall & KEY_SELECT) && !sel_used && !sel_held) {
+        if (pl_ui_open) { pl_ui_open = 0u; pl_ui_restore = 1u; }
+        else if (pl_count) {
+            pl_ui_open = 1u;
+            pl_ui_sel  = pl_pos;
+            pl_ui_follow();
+            pl_ui_dirty = 1u;
+        } else {
+            ui_toast_msg("NO PLAYLIST LOADED");
+        }
+    }
 
     /* Pause while the OS menu ("Load MP3" etc) is open, without clobbering the
      * user's own A/Start pause -- bit 1 is the menu's, bit 0 is theirs. */
@@ -7378,6 +7548,49 @@ int main(void)
                 if (paused) { ui_draw_dynamic(); continue; }
             }
         seek_done: ;
+        }
+
+        /* ---- playlist overlay ------------------------------------------
+         * Serviced here rather than in poll_input() because pl_play_at() lives
+         * in playlist.inc, which is included AFTER poll_input -- the same
+         * reason every other cross-file action in this loop is a request flag.
+         *
+         * Drawing is gated on pl_ui_dirty, so an open overlay costs nothing
+         * per frame; it repaints when the selection moves and not otherwise.
+         * That matters more than it looks: the decoder keeps running
+         * underneath, and FLAC has less headroom than MP3. */
+        /* load_track() paints the player card, so an auto-advance while the
+         * overlay is up draws straight through it -- and the '>' marker has
+         * moved anyway. Comparing against what was last drawn catches both,
+         * and any other route that changes the position. */
+        if (pl_ui_open && pl_ui_drawn_pos != pl_pos) pl_ui_dirty = 1u;
+        if (pl_ui_open && pl_ui_dirty) {
+            pl_ui_dirty = 0;
+            pl_ui_draw();
+        }
+        if (pl_ui_restore) {
+            pl_ui_restore = 0;
+            ui_gradient();
+            ui_draw_chrome();
+            if (art_ready && art_shown) ui_art_draw();
+            /* The meters cache what they last drew; the overlay painted over
+             * all of it, so every column has to be considered stale. */
+            ui_wave_force = 1u;
+            for (uint32_t i = 0; i < UI_WAVE_N; i++) {
+                wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            }
+            ui_mode_dirty = 1u;
+            ui_last_info  = 0xFFFFFFFFu;
+            ui_last_sec   = 0xFFFFFFFFu;
+            ui_prog_sec   = 0xFFFFFFFFu;
+        }
+        if (pl_ui_play_req) {
+            pl_ui_play_req = 0;
+            if (pl_count && pl_ui_sel < pl_count) {
+                stop_req = 0;
+                if (pl_play_at(pl_ui_sel)) { ui_mode_dirty = 1u; continue; }
+                ui_toast_msg("TRACK WOULD NOT OPEN");
+            }
         }
 
         /* Nothing to decode. poll_input() and the reload handling above still
