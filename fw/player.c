@@ -1039,6 +1039,18 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * reaches one. Set to 1 to bring the D/O/U/F row back while investigating. */
 #define UI_SHOW_SPEED_DIAG 0
 
+/* Load-phase breakdown as a toast after every load: H head, S size probe,
+ * A artwork, P prefill, T total, in ms. 1 only while investigating load time;
+ * it must be 0 in anything a user sees.
+ *
+ * #ifndef so it can be turned on WITHOUT editing this file:
+ *     EXTRA_CFLAGS=-DUI_SHOW_LOAD_TIMES=1 bash fw/build.sh
+ * which is the whole point of a measurement flag -- an investigation should
+ * not need a source edit that then has to be remembered and reverted. */
+#ifndef UI_SHOW_LOAD_TIMES
+#define UI_SHOW_LOAD_TIMES 0
+#endif
+
 /* ---- TEMPORARY: sequential SD throughput benchmark ------------------------
  *
  * The ONE measurement the FLAC decision turns on. Everything else about FLAC
@@ -6573,6 +6585,35 @@ static int load_track(void)
 
     ld_pre   = LD_MS(cycles() - tphase);
     ld_total = LD_MS(cycles() - t0);
+
+#if UI_SHOW_LOAD_TIMES
+    /* The load-phase breakdown, as a toast, after every load.
+     *
+     * ROADMAP has had "track changes take too long" open since 2026-08-12 with
+     * TWO guesses in this codebase pointing at different culprits: that entry
+     * blames the artwork, the comment on the size probe blames the probe. The
+     * timers have existed the whole time and settle it in one session.
+     *
+     * A toast rather than a key binding: the numbers are wanted for the load
+     * that just happened, and needing to press something to see them means
+     * pressing it during the gap you are trying to measure. Nothing to
+     * remember, nothing to hold.
+     *
+     * H head read, S size probe, A art decode, P prefill, T total, all in ms.
+     * OFF for any build a user sees. */
+    {
+        char b[40], *q = b;
+        const char *lbl = "HSAPT";
+        const uint16_t v[5] = { ld_head, ld_size, ld_art, ld_pre, ld_total };
+        for (uint32_t k = 0; k < 5u; k++) {
+            *q++ = lbl[k];
+            q = ui_dec(q, v[k]);
+            if (k < 4u) *q++ = ' ';
+        }
+        *q = 0;
+        ui_toast_set(b, 0xFFFFFFFFu, 0);
+    }
+#endif
     return 1;
 }
 
