@@ -652,6 +652,74 @@ works too, the "music can live anywhere on the card" line can come back with
 it. Until then the README claims only what has been played: names relative to
 the playlist's own folder, including subfolders under it.
 
+## Memory and speed — measured 2026-08-16, for v1.4.0
+
+Slack at the v1.3.0 merge was **1216 bytes**, the floor `link.ld`'s heap assert
+allows. Anything added failed the link. This is where the room came from and
+where the rest is.
+
+### Where the RAM actually goes
+
+`nm --size-sort -S` on the v1.4.0 build:
+
+| | bytes | kind | |
+|---|---|---|---|
+| `arena` | 24576 | BSS | sized by Helix's MEASURED 23824 peak; 752 spare |
+| `ui_draw_dynamic` | 19212 | text | the ten meters |
+| `pl_text` | 16384 | BSS | the .m3u text, sized for 256 tracks |
+| `main` | 13724 | text | |
+| `load_track` | 11892 | text | |
+| `art_acc` | 11040 | BSS | artwork scaling accumulator |
+| `xmp3_huffTable` | 8484 | rodata | Helix |
+| `pcm` | 4608 | BSS | Helix output, reused as the FLAC meter window |
+
+### Done
+
+**picojpeg at -Os: 3208 bytes.** It decodes art once per load, inside the
+silent gap where the FIFO is already flushed, so nothing it does is on the
+audio path. Slack 1216 -> 4424, which is what made the overlay possible.
+
+The ceiling for this approach is known: **the whole build at -Os saves 25744
+bytes.** Most of that is Helix and the meter drawing, both hot, so it is not
+available -- but it bounds the argument.
+
+### Ruled out, with the reason
+
+**`art_acc` overlapping the `arena` -- 11 KB, and it does NOT work.** The
+earlier entry proposed it on the assumption their lifetimes are disjoint. They
+are not: `load_track` allocates the decoder at the top (line ~6085) and decodes
+artwork at ~6299, so both are live together. It would need art decoded BEFORE
+the decoder is allocated, which means reordering the function that carries the
+"one FLAC attempt broke every load after it" history. Possible, not cheap, and
+not to be attempted on a hunch.
+
+### Still available, ranked
+
+1. **Split the cold half of player.c into its own -Os translation unit.**
+   `load_track` + `main` are 25.6 KB of text and neither is hot -- one runs per
+   track change, the other once. At the -Os ratio measured elsewhere that is
+   roughly 6-8 KB. The obstacle is mechanical, not conceptual: both reach dozens
+   of file-scope statics, so splitting means exporting them.
+2. **Drop a meter.** `ui_draw_dynamic` is the single largest text symbol at 19
+   KB for ten meters. Cheap in effort, unpopular, last resort.
+3. **`pl_text` 16 KB -> SDRAM.** Only if the CPU can address SDRAM directly,
+   which is UNVERIFIED -- the framebuffer and art stash are reached through the
+   drawing engine, not by load/store. Settle that question before planning
+   around it.
+
+### Speed: nothing yet, and deliberately
+
+"Track changes take too long" still has two guesses in this codebase blaming
+different phases and no measurement. `EXTRA_CFLAGS=-DUI_SHOW_LOAD_TIMES=1`
+now prints H/S/A/P/T after every load; one session settles it.
+
+The strongest UNTESTED idea, for when there is a number to check it against:
+**skip the size probe for FLAC.** STREAMINFO gives an exact duration and the
+seektable handles seeking, so `slot_size` may only be needed by the
+no-seektable fallback. If the probe really is the ~480 ms its own comment
+claims, that is the single largest load-time win available -- and if it is not,
+the whole idea is worthless. Measure first.
+
 ## Playlist overlay — hold a button, browse the list, pick a track (v1.4.0)
 
 Requested 2026-08-15. Hold a button, see the playlist, scroll it, choose a
