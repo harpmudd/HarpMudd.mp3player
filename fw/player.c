@@ -2121,7 +2121,16 @@ static void ui_draw_chrome(void)
      * knows what a full repaint destroys. */
     ui_mode_dirty = 1u;
     ui_icon_next  = cycles();      /* transport arrows, on the next tick   */
-    ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
+    /* The elapsed time is NOT reset here, and used to be.
+     *
+     * A repaint destroys what is DRAWN, not what has elapsed -- but this zeroed
+     * ui_sec itself, so every caller that repaints mid-track silently threw the
+     * clock away. load_track was the only caller where that looked correct, and
+     * it hid the fault from the others: an accent change, a blank wake, and now
+     * closing the playlist overlay all restarted the timer at 0:00.
+     *
+     * Resetting a new track's clock belongs to load_track, which is the only
+     * place that knows a new track started. It does it now. */
     ui_prog_sec   = 0xFFFFFFFFu;
     /* track_kbps is NOT cleared here. It describes the STREAM, not the screen,
      * and ui_draw_chrome() is also called mid-track by the tag probe. Clearing
@@ -2907,7 +2916,13 @@ static void ui_rate_unsupported(void)
  * Order follows pl_order, so with shuffle on the list is the QUEUE: scrolling
  * down previews what is actually coming.
  */
-#define PL_UI_ROWS   11u
+/* 9, not 11. The transport row -- PLAYING/PAUSED, the repeat and shuffle
+ * arrows, the EQ name -- sits at UI_TRANSPORT_Y 262 and keeps animating while
+ * the overlay is up, so an 11-row panel ending at 284 had it drawing straight
+ * through. Nine rows end the panel at 244 and leave that row, the clock and
+ * the progress bar all visible below the list, which is more useful than the
+ * two rows it costs. */
+#define PL_UI_ROWS   9u
 #define PL_UI_X      12u
 #define PL_UI_W      (FB_W - 2u * PL_UI_X)
 #define PL_UI_Y      18u
@@ -2981,6 +2996,23 @@ static void pl_ui_draw(void)
     fb_set_color(ui_accent, UI_PANEL);
     fb_text_clipped(PL_UI_TEXT_X, PL_UI_Y + 10u, hdr, TS_1X, TS_1X, PL_UI_W - 20u);
 
+    /* Scroll position, for lists too long to hold in your head. The header
+     * counter says WHERE you are; this says how far that is through the list,
+     * which at 240 entries is the question actually being asked. Two rects,
+     * drawn only when the list overflows the window. */
+    if (pl_count > PL_UI_ROWS) {
+        uint32_t track_x = PL_UI_X + PL_UI_W - 11u;
+        uint32_t track_y = PL_UI_LIST_Y - 2u;
+        uint32_t track_h = PL_UI_ROWS * PL_UI_ROW_H;
+        fb_rect(track_x, track_y, 3u, track_h, ui_mix(UI_PANEL, UI_DIM, 1u, 3u));
+
+        uint32_t span = pl_count - PL_UI_ROWS;          /* max value of _top */
+        uint32_t th   = track_h * PL_UI_ROWS / pl_count;
+        if (th < 8u) th = 8u;                           /* stays grabbable   */
+        uint32_t ty   = track_y + (track_h - th) * pl_ui_top / span;
+        fb_rect(track_x, ty, 3u, th, ui_accent);
+    }
+
     char nm[64];
     for (uint32_t i = 0; i < PL_UI_ROWS; i++) {
         uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
@@ -3009,7 +3041,7 @@ static void pl_ui_draw(void)
         if (pos == pl_pos)
             fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
         fb_text_boxed(PL_UI_TEXT_X + 8u, y, nm, TS_1X, TS_1X,
-                      PL_UI_W - 30u, PL_UI_X + PL_UI_W - 6u);
+                      PL_UI_W - 40u, PL_UI_X + PL_UI_W - 16u);
     }
 }
 
@@ -6310,6 +6342,9 @@ static int load_track(void)
     pcm_flush();
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+    /* A NEW track starts at 0:00, and this is the one place that knows one
+     * started. ui_draw_chrome used to do it, which caught every repaint too. */
+    ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
     track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
     bytes_per_sec = 16000u;
     paused = 0;

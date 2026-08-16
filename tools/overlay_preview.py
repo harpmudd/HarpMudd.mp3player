@@ -75,7 +75,7 @@ def main():
     a = ap.parse_args()
 
     C, adv = consts(), advances()
-    rows, budget = C['PL_UI_ROWS'], C['PL_UI_W'] - 30
+    rows, budget = C['PL_UI_ROWS'], C['PL_UI_W'] - 40   # 10 px to the scrollbar
 
     names = sorted(os.path.basename(p) for p in
                    glob.glob('D:/Assets/mp3player/common/*.mp3') +
@@ -111,10 +111,17 @@ def main():
         truncated += cut
         mark = ">" if pos == a.playing else " "
         line = " %s %s" % (mark, txt)
+        # scrollbar lane: "|" is the thumb, ":" the empty track
+        bar = " "
+        if len(names) > rows:
+            span = len(names) - rows
+            th   = max(1, rows * rows // len(names))
+            ty   = (rows - th) * a.top // span if span else 0
+            bar  = "|" if ty <= i < ty + th else ":"
         if pos == a.sel:
-            print("    |\x1b[7m%-*s\x1b[0m|" % (cols, line[:cols]))
+            print("    |\x1b[7m%-*s\x1b[0m%s|" % (cols - 1, line[:cols - 1], bar))
         else:
-            print("    |%-*s|" % (cols, line[:cols]))
+            print("    |%-*s%s|" % (cols - 1, line[:cols - 1], bar))
     print("    +" + "-" * cols + "+")
 
     print("\n  panel   y %d..%d of %d   %s"
