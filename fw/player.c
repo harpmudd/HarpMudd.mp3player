@@ -7635,7 +7635,8 @@ int main(void)
         }
         if (pl_ui_restore) {
             pl_ui_restore = 0;
-            ui_gradient();
+            /* ui_draw_chrome() paints the gradient itself -- calling it here
+               too would push ~360 rects twice for one repaint. */
             ui_draw_chrome();
             if (art_ready && art_shown) ui_art_draw();
             /* The meters cache what they last drew; the overlay painted over
