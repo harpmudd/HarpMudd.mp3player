@@ -4483,6 +4483,10 @@ static void ui_blank_wake(void)
     if (!screen_blank) return;
     screen_blank = 0;
     ui_draw_chrome();          /* everything suppressed while blank, redrawn */
+    /* ui_draw_chrome just painted the PLAYER. If the overlay was up when the
+     * screen blanked it is still logically open and still eating the d-pad,
+     * so without this the user would be left driving an invisible list. */
+    if (pl_ui_open) pl_ui_dirty = 1u;
 }
 
 /* One call per main-loop pass. Re-arms from NOW rather than advancing by a
@@ -4552,6 +4556,7 @@ static void poll_input(void)
     static uint8_t  sel_used;            /* Select was used as a modifier      */
     static uint32_t sel_t0;              /* when Select went down              */
     static uint8_t  sel_held;            /* the hold action already ran        */
+    static uint32_t pl_rep_at;           /* next overlay scroll repeat         */
     uint32_t in   = REG(R_INPUT);
     uint32_t keys = in & 0xFFFFu;
     uint32_t edge = keys & ~prev;        /* rising edges only  */
@@ -4578,7 +4583,10 @@ static void poll_input(void)
      * so nothing downstream also acts on them. Select is deliberately left in
      * `keys`/`fall`: its tap-to-close is the same code that opened it, and its
      * hold timer reads `keys` directly. */
-    if (pl_ui_open && pl_count) {
+    if (pl_ui_open && !pl_count) {      /* list emptied underneath it */
+        pl_ui_open = 0u; pl_ui_restore = 1u;
+    }
+    if (pl_ui_open) {
         if (edge & KEY_UP) {
             pl_ui_sel = pl_ui_sel ? (uint16_t)(pl_ui_sel - 1u)
                                   : (uint16_t)(pl_count - 1u);
@@ -4588,6 +4596,22 @@ static void poll_input(void)
             pl_ui_sel = (uint16_t)((pl_ui_sel + 1u) % pl_count);
             pl_ui_follow(); pl_ui_dirty = 1u;
         }
+        /* Auto-repeat while held. A 256-entry list is unusable at one row per
+         * press, and the d-pad has no other job here. First step on the edge,
+         * then a hold delay, then steady -- the same shape as the seek. */
+        if (edge & (KEY_UP | KEY_DOWN))
+            pl_rep_at = cycles() + CLK_HZ / 1000u * PL_HOLD_MS;
+        if ((keys & (KEY_UP | KEY_DOWN)) &&
+            (int32_t)(cycles() - pl_rep_at) >= 0) {
+            pl_rep_at = cycles() + CLK_HZ / 16u;          /* ~16 rows a second */
+            if (keys & KEY_UP)
+                pl_ui_sel = pl_ui_sel ? (uint16_t)(pl_ui_sel - 1u)
+                                      : (uint16_t)(pl_count - 1u);
+            else
+                pl_ui_sel = (uint16_t)((pl_ui_sel + 1u) % pl_count);
+            pl_ui_follow(); pl_ui_dirty = 1u;
+        }
+
         if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u; pl_ui_restore = 1u; }
         if (edge & KEY_B) { pl_ui_open = 0u; pl_ui_restore = 1u; }
         edge &= KEY_SELECT;
