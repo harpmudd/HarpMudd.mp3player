@@ -48,7 +48,7 @@ The controls:
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (ten styles) |
 | **Y** | Cycle the EQ preset (eight) |
-| **Select** | Show / hide the album art panel |
+| **Select** | *Tap* — playlist; *Hold* — show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
@@ -87,6 +87,13 @@ with `#` are ignored, so exported playlists work as-is.
 
 Any other filename is picked with **Load Playlist** and becomes the one that
 loads at launch from then on.
+
+**Tap Select** for the playlist: the list opens on the track that's playing,
+**Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**
+or **B** closes without changing anything. Rows show filenames rather than tags
+— a tag lives inside its file, so naming every row would mean opening every
+file. With shuffle on the list is the play queue, so scrolling down shows
+what's actually coming.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never

@@ -2,6 +2,12 @@
 
 What changed in each release, newest first.
 
+## v1.4.0 — unreleased
+
+- **Tap Select for the playlist.** Browse it on screen, **Up**/**Down** to move,
+  **A** to play, **Select** or **B** to close. Opens on the track that's
+  playing. Holding **Select** still shows and hides the album art.
+
 ## v1.3.0 — 15 August 2026
 
 - **FLAC playback** — up to 48 kHz, 16 or 24-bit, with tags, album art, meters
