@@ -3019,7 +3019,19 @@ static void ui_draw_dynamic(void)
     /* The overlay covers the meters, the card and the transport row. Letting
      * the player keep drawing underneath would punch holes straight through
      * it, once per frame. */
-    if (pl_ui_open) return;
+    /* Jump the UPPER screen, not the whole function.
+     *
+     * The overlay panel is y 18..284; the clock (288) and the progress bar
+     * (334) sit BELOW it and stay visible. Returning early here froze both,
+     * and worse: the elapsed-time accumulator lives further down this
+     * function, so time itself stopped advancing while the list was open and
+     * the clock came back stale.
+     *
+     * A goto over the drawing rather than a wrapped block -- the skipped
+     * region is several hundred lines and every declaration in it is scoped
+     * inside the sections being skipped. `viz_done` already sets the
+     * precedent. */
+    if (pl_ui_open) goto ui_tail;
 
     /* Publish the peaks once per display frame, so every meter below reads a
      * value covering exactly the audio since the last frame. Nothing new means
@@ -3853,6 +3865,7 @@ static void ui_draw_dynamic(void)
     }
 #endif
 
+ui_tail:
     /* Elapsed time by running accumulator rather than (frames*1152)/samprate.
      * That is a 64-bit divide -- __udivdi3, hundreds of cycles in software on
      * RV32 -- and it ran EVERY frame inside the same budget that keeps the PCM
@@ -3940,13 +3953,15 @@ static void ui_draw_dynamic(void)
      * a glyph at any x but does not clip one partially off the left edge, so a
      * pixel scroll would need clipping support that does not exist. One step
      * every ~350 ms reads as a scroll without being distracting. */
-    ui_marq_step(&ui_mq_title,  UI_WHITE);
-    ui_marq_step(&ui_mq_artist, UI_DIM);
+    if (!pl_ui_open) {          /* title/artist rows are under the overlay */
+        ui_marq_step(&ui_mq_title,  UI_WHITE);
+        ui_marq_step(&ui_mq_artist, UI_DIM);
+    }
 
     /* Loud, and it stays: a wrong file size means the card's directory is
      * damaged, which will not fix itself and puts every file in that folder in
      * question -- not something to mention in a toast that scrolls away. */
-    if (size_suspect && !ui_size_warned) {
+    if (size_suspect && !ui_size_warned && !pl_ui_open) {
         ui_size_warned = 1;
         fb_set_color(UI_RED, UI_PANEL);
         fb_text_clipped(UI_MARGIN, ui_info_y, "! FILE SIZE WRONG - CHECK SD CARD",
@@ -3956,7 +3971,7 @@ static void ui_draw_dynamic(void)
     /* Format line, drawn once the decoder has told us what the stream is. */
     uint32_t info = track_kbps * 1000u + track_hz / 100u
                   + (track_encoder[0] ? (uint32_t)track_encoder[0] << 24 : 0u);
-    if (track_kbps && info != ui_last_info && !size_suspect) {
+    if (track_kbps && info != ui_last_info && !size_suspect && !pl_ui_open) {
         ui_last_info = info;
         char b[40], *q = b;
         q = ui_dec(q, track_kbps);
