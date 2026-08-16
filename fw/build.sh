@@ -41,7 +41,7 @@ player)
       $HELIX/real/hufftabs.c $HELIX/real/imdct.c $HELIX/real/polyphase.c \
       $HELIX/real/scalfact.c $HELIX/real/stproc.c $HELIX/real/subband.c \
       $HELIX/real/trigtabs.c \
-      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $ROOT/third_party/picojpeg/picojpeg.c $FW/flac.o"
+      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $FW/picojpeg.o $FW/flac.o"
     INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
     ;;
 *)
@@ -66,6 +66,17 @@ rm -f "$FW/flac.o"
 if ! "$GCC" -march=rv32im -mabi=ilp32 -mno-relax -Os -ffreestanding -c         -o "$FW/flac.o" "$FW/flac.c" > "$FW/build.log" 2>&1; then
     cat "$FW/build.log" >&2
     echo "*** flac.c FAILED TO COMPILE ***" >&2
+    exit 1
+fi
+
+# picojpeg gets -Os for the same reason, and with less to lose than flac.c: it
+# decodes album art ONCE per track load, inside the silent gap where the FIFO
+# has already been flushed. Nothing it does is on the audio path, so trading
+# its speed for size costs a few ms of a load that is already hundreds.
+rm -f "$FW/picojpeg.o"
+if ! "$GCC" -march=rv32im -mabi=ilp32 -mno-relax -Os -ffreestanding         -I "$ROOT/third_party/picojpeg" -c         -o "$FW/picojpeg.o" "$ROOT/third_party/picojpeg/picojpeg.c"         > "$FW/build.log" 2>&1; then
+    cat "$FW/build.log" >&2
+    echo "*** picojpeg.c FAILED TO COMPILE ***" >&2
     exit 1
 fi
 
