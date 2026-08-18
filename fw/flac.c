@@ -289,7 +289,26 @@ static flac_err parse_frame_header(flac_t *f)
     else if ((c & 0xFEu) == 0xFCu) extra = 5;
     else if ((c & 0xFFu) == 0xFEu) extra = 6;
     else return FLAC_ERR_DATA;                   /* 0xFF is not a valid lead */
+    uint32_t num_at = n - 1u;                    /* where the coded number began */
     for (uint32_t i = 0; i < extra; i++) HBYTE();
+
+    /* Decode it. This field was parsed for its LENGTH and the value thrown
+     * away, which cost us the one thing FLAC offers that MP3 does not: every
+     * frame states where it is. Without it, position after a seek is whatever
+     * the seek THOUGHT it landed on, and any error there is permanent -- the
+     * clock runs on from a wrong start and sails past the end of the track.
+     *
+     * Fixed blocking strategy (the common case, and what every file on the
+     * test card uses) codes the FRAME number; variable codes the first SAMPLE
+     * number. blocking_strategy is the low bit of h[1]. */
+    {
+        uint64_t v = (extra == 0u) ? h[num_at]
+                                   : (uint64_t)(h[num_at] & (0x3Fu >> extra));
+        for (uint32_t i = 1u; i <= extra; i++)
+            v = (v << 6) | (h[num_at + i] & 0x3Fu);
+        f->frame_number  = v;
+        f->number_is_sample = (uint8_t)(h[1] & 1u);
+    }
 
     uint32_t bsi = n;
     if      (bs_code == 6u) { HBYTE(); }

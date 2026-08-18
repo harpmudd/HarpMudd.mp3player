@@ -548,6 +548,10 @@ static uint8_t ui_warn_row;   /* draw the album/format row as a warning */
  * read perfectly well, this core just cannot play them. flac_open fills
  * STREAMINFO before it rejects, so the real numbers are already in hand. */
 enum { FLR_NONE = 0, FLR_RATE, FLR_DEPTH, FLR_CHANS, FLR_BLOCK };
+/* Set by a seek, cleared by the first frame decoded afterwards: that frame's
+ * header says where the stream ACTUALLY is, which is the only honest answer
+ * after a byte-interpolated jump. */
+static uint8_t  fl_clock_resync;
 static uint8_t  fl_reject_kind;
 static uint32_t fl_reject_val;
 
@@ -649,8 +653,16 @@ static void vol_apply(void)
  * So: do not raise either of these against an address gap. Raise them against
  * the leftover the linker reports, and keep 1 KB for the token heap. And do
  * not raise one without the other -- that mismatch has already shipped once,
- * in the direction that made the documented cap a lie. */
-#define PL_TEXT_MAX  16384u
+ * in the direction that made the documented cap a lie.
+ *
+ * Which is exactly what happened anyway: the paragraph above said 20 KB and
+ * the constant said 16384, so the README's "about 80 characters per line" was
+ * really 64. Raised to a true 20 KB here, against the 10256 bytes of leftover
+ * the linker reports rather than against an address gap, leaving 6160 -- well
+ * clear of the 1 KB token heap the link script asserts. 64 characters was not
+ * an academic shortfall: an album playlist that names its folder, such as
+ * "Crash Test Dummies - God Shuffled His Feet/01 ....flac", runs past it. */
+#define PL_TEXT_MAX  20480u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
@@ -698,10 +710,11 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  * Where playback was when the core was last closed, in ONE 32-bit word,
  * because one settings slot is all there was to spare:
  *
- *   bits  0..6   track index   0-127, matching PL_MAX
+ *   bits  0..6   track index, low 7 bits
  *   bits  7..23  seconds       0-131071, about 36 hours -- audiobook country
  *   bit  24      FROM PLAYLIST -- is the track index above meaningful at all
- *   bits 25..30  reserved, always zero
+ *   bit  25      track index, high bit -- together 0-255, matching PL_MAX
+ *   bits 26..30  reserved, always zero
  *   bit  31      ALWAYS ZERO
  *
  * Bit 31 is reserved unset, and the tag is seven bits rather than eight, for a
@@ -721,7 +734,16 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  *
  * Seconds, not bytes: bytes would need 22 bits for a long file and leave no
  * room for the guard, and seconds survive a re-encode of the same track. */
-#define RS_TRACK(w)   ((w) & 0x7Fu)
+/* The track index is 8 bits, but NOT contiguous: the low 7 sit where they
+ * always did and the 8th lives in bit 25, the first of the reserved run. It
+ * was 7 bits with a comment claiming that matched PL_MAX, which is 256 -- so
+ * RS_PACK's mask silently folded track 200 of a 240-entry playlist down to
+ * track 72, and resume came back at the wrong song with no sign anything was
+ * wrong. Splitting the field rather than moving it keeps every previously
+ * saved word readable: those have bit 25 clear, which reads back as 0..127
+ * exactly as before. Bit 31 stays unset -- see the note above about APF
+ * storing these as signed. */
+#define RS_TRACK(w)   (((w) & 0x7Fu) | ((((w) >> 25) & 1u) << 7))
 #define RS_SECS(w)    (((w) >> 7) & 0x1FFFFu)
 #define RS_PL(w)      (((w) >> 24) & 1u)
 
@@ -4696,13 +4718,15 @@ static void poll_input(void)
             pl_ui_follow(); pl_ui_dirty = 1u;
         }
 
-        /* L/R page by a screenful. Left and Right have no other job while the
-         * overlay is up, and 240 entries is 27 pages against 240 steps. */
-        if (edge & KEY_L1) {
+        /* Left/Right page by a screenful -- on the D-PAD, not the shoulder
+         * buttons. Up and Down already move the cursor, so paging belongs on
+         * the same control rather than somewhere the hand has to travel to.
+         * 240 entries is 27 pages against 240 steps. */
+        if (edge & KEY_LEFT) {
             pl_ui_sel = (pl_ui_sel > PL_UI_ROWS) ? (uint16_t)(pl_ui_sel - PL_UI_ROWS) : 0u;
             pl_ui_follow(); pl_ui_dirty = 1u;
         }
-        if (edge & KEY_R1) {
+        if (edge & KEY_RIGHT) {
             uint32_t n = (uint32_t)pl_ui_sel + PL_UI_ROWS;
             pl_ui_sel = (n >= pl_count) ? (uint16_t)(pl_count - 1u) : (uint16_t)n;
             pl_ui_follow(); pl_ui_dirty = 1u;
@@ -7624,6 +7648,13 @@ int main(void)
                     if (fl.max_blocksize)
                         frames = (uint32_t)(((uint64_t)tgt * (uint64_t)fl.rate)
                                             / (uint64_t)fl.max_blocksize);
+                    /* The above is a GUESS -- it assumes the jump landed on the
+                     * second asked for. The byte offset is interpolated between
+                     * seek points, so it lands near, not on. Left uncorrected
+                     * the clock keeps that error for the rest of the track and
+                     * runs past the total. The next frame header carries the
+                     * real position; take it from there. */
+                    fl_clock_resync = 1u;
                     /* Must follow the rebase, and must equal it: the clock
                      * accumulator fires on `frames != ui_last_frames`, so a
                      * stale value here spends a phantom frame -- and the
@@ -7899,6 +7930,22 @@ int main(void)
             }
             if (fe != FLAC_OK) { errs++; REG(R_STAT2) = 0xC2000000u | fe; }
             frames++;
+
+            /* One-shot correction after a seek. Deliberately not every frame:
+             * the elapsed clock is an accumulator and a second writer fighting
+             * it is what caused the +-1s twitch in v1.3.0. This corrects once,
+             * from the stream itself, then hands the clock back. */
+            if (fl_clock_resync && fe == FLAC_OK && fl.rate) {
+                fl_clock_resync = 0;
+                uint64_t smp = fl.number_is_sample
+                             ? fl.frame_number
+                             : fl.frame_number * (uint64_t)fl.max_blocksize;
+                ui_sec         = (uint32_t)(smp / fl.rate);
+                ui_sec_acc     = 0;
+                ui_last_frames = frames;
+                ui_last_sec    = 0xFFFFFFFFu;
+                ui_prog_sec    = 0xFFFFFFFFu;
+            }
             /* The clock is NOT set here. ui_draw_dynamic() already advances
              * ui_sec by an accumulator whenever `frames` moves, and this line
              * recomputed it independently -- two writers, the same nominal

@@ -85,11 +85,43 @@ beside its tracks in an album folder or in `common/` naming tracks below it.
 Either works, so an `Artist/Album` library needs no rearranging. Lines starting
 with `#` are ignored, so exported playlists work as-is.
 
-Any other filename is picked with **Load Playlist** and becomes the one that
-loads at launch from then on — if its name is short. Only the first 12
-characters are remembered, so `Shenanigans.m3u` comes back on its own and
-`Goose - Shenanigans.m3u` does not; a long name simply falls back to
-`playlist.m3u` at the next launch and is picked again from the menu.
+Any other filename is picked with **Load Playlist**, and becomes the one that
+loads at launch from then on — provided its name is short enough to be
+remembered.
+
+### Limits
+
+| | Limit | What happens past it |
+| --- | --- | --- |
+| Tracks per playlist | 256 | Says how many were dropped |
+| `.m3u` file size | 20 KB | Same — about 80 characters per line at 256 tracks |
+| Remembered playlist name | **12 characters** before `.m3u` | Falls back to `playlist.m3u` next launch |
+| Line length | 20 KB ÷ number of tracks | — |
+
+The 12-character limit is the one worth planning around, because nothing looks
+broken when you exceed it: the playlist loads and plays perfectly, it just
+isn't the one that comes back next time. There is one settings slot free for
+the name and it holds twelve characters, so:
+
+```text
+Shenanigans.m3u                              remembered
+Goose - Shenanigans Nite Club.m3u            not remembered
+```
+
+**Name the file short and the folder however you like** — the folder name has
+no limit and is what you actually read when browsing the card:
+
+```text
+Crash Test Dummies - God Shuffled His Feet/
+    GodShuffled.m3u        <- remembered
+    01 God Shuffled His Feet.flac
+    ...
+```
+
+Resume works the same way. The core remembers the track and the second you
+stopped on, but it finds them through the playlist it reopens — so a playlist
+whose name it can't remember comes back at the start of `playlist.m3u`
+instead. Short name, and resume follows you back in.
 
 **Tap Select** for the playlist: the list opens on the track that's playing,
 **Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**
@@ -202,6 +234,10 @@ framework bugs that had to be found first — is in
 - **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
   comes first, which allows about 80 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
+- **Only the first 12 characters of a playlist's filename are remembered.** A
+  longer name plays fine but won't be the one that loads next launch, and
+  resume won't follow it. See [Limits](#limits) — the fix is a short filename
+  in a long folder name.
 - **Sometimes a playlist or track pick doesn't register straight away.** It
   loads on its own a few seconds later; if it doesn't, pick it again. Seen when
   switching from one playlist to another.

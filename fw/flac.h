@@ -71,6 +71,11 @@ typedef struct {
     /* ---- per frame ---- */
     uint32_t      blocksize;
     uint8_t       ch_mode;        /* 0 independent, 8 L/S, 9 R/S, 10 M/S    */
+    /* Where this frame sits in the stream, straight from its header. With a
+     * FIXED blocking strategy this is the frame number; with VARIABLE it is
+     * the first sample number. number_is_sample says which. */
+    uint64_t      frame_number;
+    uint8_t       number_is_sample;
 
     /* ---- the one buffered channel ---- */
     int32_t      *ch0;            /* max_blocksize entries, caller-provided */
