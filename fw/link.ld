@@ -38,7 +38,7 @@ _tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
 
 SECTIONS {
 	.text : {
-		*(.text._start)
+		KEEP(*(.text._start))
 		*(.text .text.*)
 	} > ram
 

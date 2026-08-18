@@ -27,7 +27,7 @@ def consts():
     src = open(os.path.join(FW, 'player.c'), encoding='utf-8', errors='replace').read()
     out = {}
     for name in ('PL_UI_ROWS', 'PL_UI_X', 'PL_UI_Y', 'PL_UI_ROW_H',
-                 'PL_UI_LIST_Y', 'FB_W', 'FB_H'):
+                 'PL_UI_LIST_Y', 'PL_UI_PAD_B', 'FB_W', 'FB_H'):
         m = re.search(r'#define\s+%s\s+\(?([0-9]+)' % name, src)
         if m:
             out[name] = int(m.group(1))
@@ -92,7 +92,8 @@ def main():
                  "Stone Temple Pilots - Interstate Love Song.mp3",
                  "Widespread Panic - Goodpeople.mp3"]
 
-    panel_h = C['PL_UI_LIST_Y'] + rows * C['PL_UI_ROW_H'] + 12 - C['PL_UI_Y']
+    panel_h = (C['PL_UI_LIST_Y'] + rows * C['PL_UI_ROW_H']
+               + C.get('PL_UI_PAD_B', 12) - C['PL_UI_Y'])
     cols = 46
 
     print("names from %s   %d tracks\n" % (src, len(names)))

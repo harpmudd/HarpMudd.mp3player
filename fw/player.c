@@ -670,6 +670,9 @@ static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
 static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
+static uint16_t pl_ui_mq_off;      /* chars scrolled off the selected row     */
+static uint32_t pl_ui_mq_next;     /* when it steps again                     */
+static uint16_t pl_ui_mq_sel = 0xFFFFu;  /* row the scroll belongs to         */
 
 enum { REP_OFF = 0, REP_ALL, REP_ONE };
 static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
@@ -2950,6 +2953,13 @@ static void ui_rate_unsupported(void)
 #define PL_UI_ROW_H  20u
 #define PL_UI_LIST_Y 52u
 #define PL_UI_TEXT_X (PL_UI_X + 10u)
+/* Bottom padding, and it is load-bearing rather than cosmetic. The art frame
+ * reaches y 249 and the meter 245; at 12 the panel ended at 244 and left a
+ * sliver of both showing under it. 22 puts the bottom at 254 -- clear of both,
+ * and still 8 px above the transport row at 262, which stays visible on
+ * purpose. Named so tools/overlay_preview.py reads it instead of repeating
+ * the number. */
+#define PL_UI_PAD_B  22u
 
 static uint16_t pl_ui_sel;         /* selection, an index into pl_order      */
 static uint16_t pl_ui_top;         /* first visible row                      */
@@ -2986,6 +2996,45 @@ static void pl_ui_follow(void)
     if (pl_count <= PL_UI_ROWS) pl_ui_top = 0;
 }
 
+/* One row. Split out so the marquee can repaint just the selected line
+ * without redrawing the whole list four times a second. */
+static void pl_ui_row(uint32_t i)
+{
+    uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
+    uint16_t pos = (uint16_t)(pl_ui_top + i);
+
+    if (pos >= pl_count) {                       /* short list: clear the row */
+        fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
+        return;
+    }
+
+    /* Selected row is a filled bar, drawn first so the text paints onto it --
+     * the engine writes a glyph's background with every character. */
+    uint16_t bg = (pos == pl_ui_sel) ? ui_accent : UI_PANEL;
+    fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
+
+    char nm[64];
+    pl_ui_label(pos, nm, sizeof(nm));
+
+    /* The selected row scrolls when it does not fit. Steps by whole characters
+     * because the engine cannot clip a glyph partly off the left edge -- the
+     * same constraint the title marquee works under. */
+    const char *txt = nm;
+    if (pos == pl_ui_sel && pl_ui_mq_off) {
+        uint32_t len = 0;
+        while (nm[len]) len++;
+        txt = nm + (pl_ui_mq_off < len ? pl_ui_mq_off : 0u);
+    }
+
+    /* '>' rather than an arrow glyph: the font is ASCII 0x20..0x7E. */
+    fb_set_color(pos == pl_ui_sel ? UI_PANEL
+               : pos == pl_pos    ? UI_WHITE : UI_DIM, bg);
+    if (pos == pl_pos)
+        fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
+    fb_text_boxed(PL_UI_TEXT_X + 8u, y, txt, TS_1X, TS_1X,
+                  PL_UI_W - 40u, PL_UI_X + PL_UI_W - 16u);
+}
+
 static void pl_ui_draw(void)
 {
     /* The list can change under an open overlay -- a reload, or a pick the
@@ -2995,7 +3044,7 @@ static void pl_ui_draw(void)
     pl_ui_follow();
     pl_ui_drawn_pos = pl_pos;
 
-    uint32_t h = PL_UI_LIST_Y + PL_UI_ROWS * PL_UI_ROW_H + 12u - PL_UI_Y;
+    uint32_t h = PL_UI_LIST_Y + PL_UI_ROWS * PL_UI_ROW_H + PL_UI_PAD_B - PL_UI_Y;
     fb_round_rect(PL_UI_X, PL_UI_Y, PL_UI_W, h, 8u, UI_PANEL);
 
     /* Header: where you are in the list, which is the thing a long list hides. */
@@ -3029,37 +3078,9 @@ static void pl_ui_draw(void)
         fb_rect(track_x, ty, 3u, th, ui_accent);
     }
 
-    char nm[64];
-    for (uint32_t i = 0; i < PL_UI_ROWS; i++) {
-        uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
-        uint16_t pos = (uint16_t)(pl_ui_top + i);
-        uint16_t bg  = UI_PANEL;
-
-        if (pos >= pl_count) {                       /* short list: clear the row */
-            fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
-            continue;
-        }
-
-        /* Selected row is a filled bar. Drawn first so the text paints onto it
-         * and blends against the right colour -- the engine writes a glyph's
-         * background with every character. */
-        if (pos == pl_ui_sel) {
-            bg = ui_accent;
-            fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
-        } else {
-            fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
-        }
-
-        /* '>' rather than an arrow glyph: the font is ASCII 0x20..0x7E. */
-        pl_ui_label(pos, nm, sizeof(nm));
-        fb_set_color(pos == pl_ui_sel ? UI_PANEL
-                   : pos == pl_pos    ? UI_WHITE : UI_DIM, bg);
-        if (pos == pl_pos)
-            fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
-        fb_text_boxed(PL_UI_TEXT_X + 8u, y, nm, TS_1X, TS_1X,
-                      PL_UI_W - 40u, PL_UI_X + PL_UI_W - 16u);
-    }
+    for (uint32_t i = 0; i < PL_UI_ROWS; i++) pl_ui_row(i);
 }
+
 
 static void ui_draw_dynamic(void)
 {
@@ -4674,6 +4695,21 @@ static void poll_input(void)
                 pl_ui_sel = (uint16_t)((pl_ui_sel + 1u) % pl_count);
             pl_ui_follow(); pl_ui_dirty = 1u;
         }
+
+        /* L/R page by a screenful. Left and Right have no other job while the
+         * overlay is up, and 240 entries is 27 pages against 240 steps. */
+        if (edge & KEY_L1) {
+            pl_ui_sel = (pl_ui_sel > PL_UI_ROWS) ? (uint16_t)(pl_ui_sel - PL_UI_ROWS) : 0u;
+            pl_ui_follow(); pl_ui_dirty = 1u;
+        }
+        if (edge & KEY_R1) {
+            uint32_t n = (uint32_t)pl_ui_sel + PL_UI_ROWS;
+            pl_ui_sel = (n >= pl_count) ? (uint16_t)(pl_count - 1u) : (uint16_t)n;
+            pl_ui_follow(); pl_ui_dirty = 1u;
+        }
+        /* Y snaps back to what is playing. Scrolling a long list loses the one
+         * row you can always name, and hunting for it defeats the point. */
+        if (edge & KEY_Y) { pl_ui_sel = pl_pos; pl_ui_follow(); pl_ui_dirty = 1u; }
 
         if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u; pl_ui_restore = 1u; }
         if (edge & KEY_B) { pl_ui_open = 0u; pl_ui_restore = 1u; }
@@ -7709,6 +7745,39 @@ int main(void)
         if (pl_ui_open && pl_ui_dirty) {
             pl_ui_dirty = 0;
             pl_ui_draw();
+        }
+
+        /* Scroll the selected row when its name does not fit. Only that row is
+         * repainted, so this costs one row of drawing a few times a second
+         * rather than the whole list -- the decoder is still running.
+         *
+         * Whole characters, like the title marquee: the engine will place a
+         * glyph at any x but cannot clip one partly off the left edge. */
+        if (pl_ui_open && pl_count) {
+            if (pl_ui_mq_sel != pl_ui_sel) {
+                pl_ui_mq_sel  = pl_ui_sel;
+                pl_ui_mq_off  = 0;
+                pl_ui_mq_next = cycles() + CLK_HZ;      /* hold at the start */
+            } else if ((int32_t)(cycles() - pl_ui_mq_next) >= 0) {
+                char nm[64];
+                pl_ui_label(pl_ui_sel, nm, sizeof(nm));
+                if (fb_text_width(nm, TS_1X) > PL_UI_W - 40u) {
+                    uint32_t len = 0;
+                    while (nm[len]) len++;
+                    pl_ui_mq_next = cycles() + CLK_HZ / 3u;
+                    if (++pl_ui_mq_off >= len) {
+                        pl_ui_mq_off  = 0;
+                        pl_ui_mq_next = cycles() + CLK_HZ;  /* pause, then again */
+                    }
+                    if (pl_ui_sel >= pl_ui_top &&
+                        pl_ui_sel <  pl_ui_top + PL_UI_ROWS)
+                        pl_ui_row(pl_ui_sel - pl_ui_top);
+                } else {
+                    /* Fits: nothing to scroll, so back off rather than
+                     * re-measuring it every few milliseconds. */
+                    pl_ui_mq_next = cycles() + CLK_HZ;
+                }
+            }
         }
         if (pl_ui_restore) {
             pl_ui_restore = 0;
