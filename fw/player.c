@@ -548,10 +548,33 @@ static uint8_t ui_warn_row;   /* draw the album/format row as a warning */
  * read perfectly well, this core just cannot play them. flac_open fills
  * STREAMINFO before it rejects, so the real numbers are already in hand. */
 enum { FLR_NONE = 0, FLR_RATE, FLR_DEPTH, FLR_CHANS, FLR_BLOCK };
-/* Set by a seek, cleared by the first frame decoded afterwards: that frame's
+/* Set by a seek, cleared once a frame's own position has been believed: the
  * header says where the stream ACTUALLY is, which is the only honest answer
- * after a byte-interpolated jump. */
+ * after a byte-interpolated jump.
+ *
+ * "Believed" is the whole difficulty. Sequential playback never scans for a
+ * header because frames abut -- SEEKING is the only path that lands mid-stream
+ * and has to search, and real audio data contains sync patterns that pass the
+ * CRC-8 (22 of them in one test file, 8 and 5 in two others). Trusting the
+ * first frame after a seek absolutely put the clock on whatever that scan hit:
+ * a false sync in the 96 kHz file reads as frame 39 rather than 127, so the
+ * clock jumped to 1.9s, and because the next seek target is ui_sec +/- step,
+ * every seek after it worked from a garbage base. The previous code was
+ * accidentally immune to this by ignoring the frame entirely.
+ *
+ * So a position is believed only when two CONSECUTIVE frames agree it is real
+ * and it lands near where the seek aimed. A false sync satisfies neither.
+ *   0 idle   1 armed, need a first frame   2 holding a candidate */
 static uint8_t  fl_clock_resync;
+static uint32_t fl_resync_tgt;     /* second the seek aimed at              */
+static uint64_t fl_resync_prev;    /* coded number of the candidate frame   */
+static uint8_t  fl_resync_tries;   /* give up rather than scan forever      */
+#define FL_RESYNC_MAX_TRIES 12u
+/* Generous: a legitimate correction is bounded by the gap between seek points
+ * (about 10s in the 39-point file) and measured under 6s without a table. A
+ * false sync gives an essentially arbitrary number, so this rejects them
+ * without ever rejecting a real correction. */
+#define FL_RESYNC_WINDOW    30u
 static uint8_t  fl_reject_kind;
 static uint32_t fl_reject_val;
 
@@ -7655,6 +7678,7 @@ int main(void)
                      * runs past the total. The next frame header carries the
                      * real position; take it from there. */
                     fl_clock_resync = 1u;
+                    fl_resync_tgt   = tgt;
                     /* Must follow the rebase, and must equal it: the clock
                      * accumulator fires on `frames != ui_last_frames`, so a
                      * stale value here spends a phantom frame -- and the
@@ -7931,20 +7955,49 @@ int main(void)
             if (fe != FLAC_OK) { errs++; REG(R_STAT2) = 0xC2000000u | fe; }
             frames++;
 
-            /* One-shot correction after a seek. Deliberately not every frame:
-             * the elapsed clock is an accumulator and a second writer fighting
-             * it is what caused the +-1s twitch in v1.3.0. This corrects once,
-             * from the stream itself, then hands the clock back. */
-            if (fl_clock_resync && fe == FLAC_OK && fl.rate) {
-                fl_clock_resync = 0;
-                uint64_t smp = fl.number_is_sample
-                             ? fl.frame_number
-                             : fl.frame_number * (uint64_t)fl.max_blocksize;
-                ui_sec         = (uint32_t)(smp / fl.rate);
-                ui_sec_acc     = 0;
-                ui_last_frames = frames;
-                ui_last_sec    = 0xFFFFFFFFu;
-                ui_prog_sec    = 0xFFFFFFFFu;
+            /* One-shot correction after a seek, once the position is proved.
+             * Deliberately not every frame: the elapsed clock is an
+             * accumulator and a second writer fighting it is what caused the
+             * +-1s twitch in v1.3.0. This corrects once and hands the clock
+             * back. See fl_clock_resync for why proof is needed at all. */
+            if (fl_clock_resync && fe == FLAC_OK && fl.rate && fl.max_blocksize) {
+                uint64_t num = fl.frame_number;
+                if (fl_clock_resync == 1u) {
+                    fl_resync_prev  = num;
+                    fl_resync_tries = 0;
+                    fl_clock_resync = 2u;
+                } else {
+                    /* Consecutive frames: fixed blocking counts frames, so the
+                     * number steps by one; variable counts samples, so it
+                     * steps by the frame length. */
+                    uint8_t ok = fl.number_is_sample
+                        ? (num > fl_resync_prev
+                           && num - fl_resync_prev <= (uint64_t)fl.max_blocksize)
+                        : (num == fl_resync_prev + 1u);
+
+                    uint64_t smp = fl.number_is_sample
+                                 ? num : num * (uint64_t)fl.max_blocksize;
+                    uint32_t pos = (uint32_t)(smp / fl.rate);
+                    uint32_t off = (pos > fl_resync_tgt)
+                                 ? pos - fl_resync_tgt : fl_resync_tgt - pos;
+
+                    if (ok && off <= FL_RESYNC_WINDOW) {
+                        fl_clock_resync = 0;
+                        ui_sec         = pos;
+                        ui_sec_acc     = 0;
+                        ui_last_frames = frames;
+                        ui_last_sec    = 0xFFFFFFFFu;
+                        ui_prog_sec    = 0xFFFFFFFFu;
+                    } else if (++fl_resync_tries >= FL_RESYNC_MAX_TRIES) {
+                        /* Could not prove a position. Keep the seek's own
+                         * estimate, which is what shipped before and is never
+                         * wildly wrong -- far better than adopting a number
+                         * that failed its checks. */
+                        fl_clock_resync = 0;
+                    } else {
+                        fl_resync_prev = num;   /* slide the pair along */
+                    }
+                }
             }
             /* The clock is NOT set here. ui_draw_dynamic() already advances
              * ui_sec by an accumulator whenever `frames` moves, and this line
