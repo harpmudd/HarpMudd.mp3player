@@ -86,7 +86,10 @@ Either works, so an `Artist/Album` library needs no rearranging. Lines starting
 with `#` are ignored, so exported playlists work as-is.
 
 Any other filename is picked with **Load Playlist** and becomes the one that
-loads at launch from then on.
+loads at launch from then on — if its name is short. Only the first 12
+characters are remembered, so `Shenanigans.m3u` comes back on its own and
+`Goose - Shenanigans.m3u` does not; a long name simply falls back to
+`playlist.m3u` at the next launch and is picked again from the menu.
 
 **Tap Select** for the playlist: the list opens on the track that's playing,
 **Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**
