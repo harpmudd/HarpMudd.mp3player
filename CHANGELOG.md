@@ -10,16 +10,6 @@ What changed in each release, newest first.
   **Select** still shows and hides the album art.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
-- Fixed: **the clock was wrong after seeking a FLAC**, by as much as 5.7
-  seconds on a track measured here — so a seek near the end left the counter
-  showing the track finished while it was still playing. Position now comes
-  from the audio itself rather than from where the seek aimed.
-- Fixed: **resume returned to the wrong track in playlists over 128 entries.**
-  Track 200 of 240 came back as track 72.
-- Playlists can genuinely hold **20 KB** of text now. The cap was documented as
-  20 KB and enforced at 16, which is 64 characters per line rather than the 80
-  claimed — short enough that an album playlist naming its own folder ran past
-  it.
 - The playlist limits, including the **12-character** limit on a remembered
   filename, are now written down in the README.
 

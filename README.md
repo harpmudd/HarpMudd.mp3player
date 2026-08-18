@@ -94,9 +94,9 @@ remembered.
 | | Limit | What happens past it |
 | --- | --- | --- |
 | Tracks per playlist | 256 | Says how many were dropped |
-| `.m3u` file size | 20 KB | Same — about 80 characters per line at 256 tracks |
+| `.m3u` file size | 16 KB | Same — about 64 characters per line at 256 tracks |
 | Remembered playlist name | **12 characters** before `.m3u` | Falls back to `playlist.m3u` next launch |
-| Line length | 20 KB ÷ number of tracks | — |
+| Line length | 16 KB ÷ number of tracks | — |
 
 The 12-character limit is the one worth planning around, because nothing looks
 broken when you exceed it: the playlist loads and plays perfectly, it just
@@ -122,6 +122,9 @@ Resume works the same way. The core remembers the track and the second you
 stopped on, but it finds them through the playlist it reopens — so a playlist
 whose name it can't remember comes back at the start of `playlist.m3u`
 instead. Short name, and resume follows you back in.
+
+Resume also only records the first **128** tracks of a playlist; past that it
+returns to the start of the list rather than the track you were on.
 
 **Tap Select** for the playlist: the list opens on the track that's playing,
 **Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**
@@ -231,8 +234,8 @@ framework bugs that had to be found first — is in
 - **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
   skipped rather than shown wrong — re-save as baseline if a cover doesn't
   appear. See [ROADMAP.md](ROADMAP.md).
-- **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
-  comes first, which allows about 80 characters per line. A playlist that runs
+- **Playlists are capped at 256 tracks**, or 16 KB of `.m3u` text — whichever
+  comes first, which allows about 64 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
 - **Only the first 12 characters of a playlist's filename are remembered.** A
   longer name plays fine but won't be the one that loads next launch, and
