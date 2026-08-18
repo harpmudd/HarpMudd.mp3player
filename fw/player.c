@@ -5612,6 +5612,17 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
             fl_meter_n = 0;
         }
         int32_t l = src[i * 2], r = src[i * 2 + 1];
+        /* Volume, which this path did not apply at all -- the d-pad moved the
+         * number on screen while FLAC played at full scale, and volume 0 was
+         * not silent. The MP3 loop has had this the whole time; adding FLAC
+         * added a second push path and only one of them was volume-aware.
+         * Same order as MP3: volume first, then the fade, so a fade-in at low
+         * volume stays at low volume. Capped at unity, so it only ever
+         * attenuates and cannot overflow. */
+        if (vol_gain != 256) {
+            l = (l * vol_gain) >> 8;
+            r = (r * vol_gain) >> 8;
+        }
         if (fade_left) {
             int32_t g = (int32_t)((FADE_SAMPLES - fade_left) >> 3);
             l = (l * g) >> 8;
