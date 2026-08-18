@@ -662,6 +662,15 @@ static uint16_t pl_order[PL_MAX];        /* play order -> file index            
 static uint16_t pl_count;                /* 0 = no playlist loaded              */
 static uint16_t pl_pos;                  /* index INTO pl_order                 */
 
+/* Overlay state, declared HERE rather than with its drawing code:
+ * ui_draw_chrome() repaints the overlay on top of itself and sits a
+ * thousand lines earlier in the file. */
+static uint8_t  pl_ui_open;        /* overlay is up                          */
+static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
+static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
+static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
+static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
+
 enum { REP_OFF = 0, REP_ALL, REP_ONE };
 static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
 static uint8_t  shuffle_on;
@@ -1940,6 +1949,8 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
                   m->scale, m->scale, ui_text_w, UI_CARD_TEXT_R);
 }
 
+static void pl_ui_draw(void);   /* defined with the overlay, below */
+
 static void ui_draw_chrome(void)
 {
     /* Draw nothing at all while blanked -- a track change must not light the
@@ -2141,6 +2152,16 @@ static void ui_draw_chrome(void)
     ui_underrun_shown = 0;
     ui_size_warned    = 0;
     ui_ld_shown       = 0;
+    /* The overlay sits ON TOP of everything this function just painted. Any
+     * caller that repaints mid-browse -- a track auto-advancing, a blank wake,
+     * an accent change -- would otherwise leave the player showing until the
+     * next main-loop pass noticed and redrew the list. That gap is the "it
+     * flips to the player" flicker.
+     *
+     * Putting it here rather than in the main loop means EVERY repaint route
+     * is covered by construction, including ones added later. */
+    if (pl_ui_open) pl_ui_draw();
+
 }
 
 /* A load failure used to spin in `for(;;){}`, which is the worst possible
@@ -2930,11 +2951,6 @@ static void ui_rate_unsupported(void)
 #define PL_UI_LIST_Y 52u
 #define PL_UI_TEXT_X (PL_UI_X + 10u)
 
-static uint8_t  pl_ui_open;        /* overlay is up                          */
-static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
-static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
-static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
-static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_sel;         /* selection, an index into pl_order      */
 static uint16_t pl_ui_top;         /* first visible row                      */
 
