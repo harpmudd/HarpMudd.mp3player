@@ -1497,6 +1497,7 @@ static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
  * is wanted, so the next track that has some brings it back. */
 static uint8_t  art_pref = 1, art_have;
 static uint32_t art_file_id;      /* 0190 identity the stash was decoded for */
+static uint32_t art_sig;          /* fingerprint of the IMAGE the stash holds  */
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -5023,7 +5024,7 @@ static void poll_input(void)
                     if (d || lead || div == 1u) { b[i++] = (char)('0' + d); lead = 1; }
                     div /= 10u;
                 }
-                if (k < 4u) b[i++] = ' ';
+                if (k < 3u) b[i++] = ' ';
             }
             b[i] = 0;
             ui_toast_set(b, 0xFFFFFFFFu, 0);
@@ -5037,9 +5038,9 @@ static void poll_input(void)
             sel_used = 1;
             char b[24];
             uint32_t i = 0;
-            const char *lbl = "HSAPT";
-            const uint16_t v[5] = { ld_head, ld_size, ld_art, ld_pre, ld_total };
-            for (uint32_t k = 0; k < 5u && i + 6u < sizeof(b); k++) {
+            const char *lbl = "HSAT";
+            const uint16_t v[4] = { ld_head, ld_size, ld_art, ld_total };
+            for (uint32_t k = 0; k < 4u && i + 6u < sizeof(b); k++) {
                 b[i++] = lbl[k];
                 uint16_t n = v[k];
                 if (n >= 1000u) { b[i++] = (char)('0' + n / 1000u % 10u); }
@@ -7049,12 +7050,26 @@ static int load_track(void)
     art_ready = 0;
     int has_art;
     if (cur_file_id && cur_file_id == art_file_id) {
+        /* Same file. Free, and the common case on a restart. */
         has_art = art_have;
     } else {
-        ui_art_mount();
-        has_art = art_decode(audio_start);
-        if (!has_art) ui_art_placeholder();
-        ui_art_round();
+        /* Different file, but very often the same PICTURE: every track of an
+         * album embeds one cover. Measured on this hardware, that decode is
+         * 2801 ms of a 3731 ms load, so asking first is worth a few reads.
+         *
+         * Must happen BEFORE ui_art_mount(), which fills the stash with the
+         * panel colour -- checking afterwards would compare against an image
+         * it had already destroyed. */
+        uint32_t sig = art_sig_of(audio_start);
+        if (art_have && sig && sig == art_sig) {
+            has_art = 1;                 /* the stash already holds this cover */
+        } else {
+            ui_art_mount();
+            has_art = art_decode(audio_start);
+            if (!has_art) ui_art_placeholder();
+            ui_art_round();
+            art_sig = has_art ? sig : 0u;
+        }
         art_file_id = cur_file_id;
     }
     art_ready = 1;
@@ -7176,13 +7191,16 @@ static int load_track(void)
      * H head read, S size probe, A art decode, P prefill, T total, all in ms.
      * OFF for any build a user sees. */
     {
+        /* P is gone: measured at 6..26 ms against a 2200..3700 ms total, so it
+         * only ever cost this row the width that clipped T -- "T3731" showed
+         * as "T373", a total smaller than one of its own parts. */
         char b[40], *q = b;
-        const char *lbl = "HSAPT";
-        const uint16_t v[5] = { ld_head, ld_size, ld_art, ld_pre, ld_total };
-        for (uint32_t k = 0; k < 5u; k++) {
+        const char *lbl = "HSAT";
+        const uint16_t v[4] = { ld_head, ld_size, ld_art, ld_total };
+        for (uint32_t k = 0; k < 4u; k++) {
             *q++ = lbl[k];
             q = ui_dec(q, v[k]);
-            if (k < 4u) *q++ = ' ';
+            if (k < 3u) *q++ = ' ';
         }
         *q = 0;
         ui_toast_set(b, 0xFFFFFFFFu, 0);

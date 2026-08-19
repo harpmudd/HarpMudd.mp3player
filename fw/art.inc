@@ -316,6 +316,39 @@ static int art_find_flac_picture(void)
     return 1;
 }
 
+/* A cheap fingerprint of the embedded image, without decoding it.
+ *
+ * MEASURED, which is the only reason this exists: album art is 2801 ms of a
+ * 3731 ms FLAC load -- 75% of it -- and every track of an album pays it again.
+ * On the test album all twelve tracks carry a byte-identical 259318-byte JPEG,
+ * so eleven of those decodes produce a picture the stash already holds.
+ *
+ * The cost is Huffman decoding 259 KB of entropy data, not scaling: the image
+ * is 1200x1200 and already takes picojpeg's 1/8 path, so a smaller panel would
+ * save nothing. Not decoding it is the only thing that helps.
+ *
+ * Length plus a hash of the first kilobyte. The finders have just read that
+ * kilobyte to parse the MIME type and description, so this is very nearly free
+ * -- and two different covers agreeing on both their length and their first
+ * kilobyte is not a case worth carrying code for. Returns 0 when there is no
+ * image, which never matches a cached signature. */
+static uint32_t art_sig_of(uint32_t tag_len)
+{
+    int found = (track_fmt == FMT_FLAC)
+              ? art_find_flac_picture()
+              : (tag_len && art_find_apic(tag_len));
+    if (!found || art_jpg_end <= art_jpg_pos) return 0;
+
+    uint32_t len = art_jpg_end - art_jpg_pos;
+    uint32_t win = len < 1024u ? len : 1024u;
+    if (!target_read_slot(MP3_SLOT_ID, art_jpg_pos, TAG_OFF, win)) return 0;
+
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < win; i++) { h ^= tagbuf[i]; h *= 16777619u; }
+    h ^= len; h *= 16777619u;
+    return h ? h : 1u;
+}
+
 static int art_decode(uint32_t tag_len)
 {
     /* Same decoder, different finder. */
