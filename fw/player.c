@@ -529,6 +529,12 @@ static uint32_t peak_amp;         /* max |sample| in the most recently decoded f
  * produce it, and loses no transient. */
 static uint32_t peak_acc, peak_acc_l, peak_acc_r;
 static uint8_t  peak_acc_any;
+
+/* Meter headroom -- see where it is applied, below. Raise the numerator toward
+ * the denominator for taller bars, lower it for shorter ones. This is the only
+ * number to touch: it scales what every meter reads, and nothing else. */
+#define MTR_HEADROOM_NUM 3u
+#define MTR_HEADROOM_DEN 4u
 /* The bar history scrolls every SECOND display frame, so it needs a max over
  * its own two-frame period -- reading peak_amp directly would discard the
  * frame in between, which is the same drop this change exists to remove, one
@@ -3182,9 +3188,30 @@ static void ui_draw_dynamic(void)
      * hold the last -- correct during FLAC's channel-0 window, where there
      * genuinely is no new audio to show. */
     if (peak_acc_any) {
-        peak_amp     = peak_acc;
-        peak_l       = peak_acc_l;
-        peak_r       = peak_acc_r;
+        /* Headroom. Nothing about HOW the meters respond changes here -- they
+         * are still peak-driven, with the same ballistics and the same
+         * peak-hold fall -- every bar simply sits lower.
+         *
+         * That distinction was learned the hard way: the first attempt at this
+         * report replaced peak with a mean, which fixed the height and altered
+         * the character of all ten meters at once. The complaint was the
+         * level, not the response.
+         *
+         * 3/4 is measured, not chosen. On 56 windows of 1152 pairs from a real
+         * track, decoded through the real decoder under tools/rv32sim.py, the
+         * bar ran 33..71 of 72 pixels and sat at or above 95% in 8 of those
+         * windows -- pegged, which is what "many of the meters are peaked out"
+         * was. At 3/4 the same material runs 25..53 with nothing pegged, and
+         * the loudest moment reaches 74% of the bar, so a track a third louder
+         * than this one still has somewhere to go. 7/8 also clears this track
+         * but leaves only 14% of headroom, which is thin when the report said
+         * MANY songs.
+         *
+         * One constant, applied in one place, so all ten meters keep agreeing.
+         * tools/meter_preview.py renders the effect from real audio. */
+        peak_amp     = (peak_acc   * MTR_HEADROOM_NUM) / MTR_HEADROOM_DEN;
+        peak_l       = (peak_acc_l * MTR_HEADROOM_NUM) / MTR_HEADROOM_DEN;
+        peak_r       = (peak_acc_r * MTR_HEADROOM_NUM) / MTR_HEADROOM_DEN;
         peak_acc     = peak_acc_l = peak_acc_r = 0;
         peak_acc_any = 0;
         if (peak_amp > wave_pend) wave_pend = peak_amp;
