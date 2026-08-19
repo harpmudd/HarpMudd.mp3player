@@ -10,6 +10,12 @@ What changed in each release, newest first.
   **Select** still shows and hides the album art.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
+- Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was
+  permanent — seek near the end of a track and the counter reached the total
+  while the music kept playing. Seeking now measures where it lands instead of
+  assuming, so the time shown is the time you are at. Present since 1.3.0.
+- Fixed: **resume returned to the wrong track in playlists over 128 entries.**
+  Track 200 of 240 came back as track 72.
 - The playlist limits, including the **12-character** limit on a remembered
   filename, are now written down in the README.
 

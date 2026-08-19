@@ -698,10 +698,11 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  * Where playback was when the core was last closed, in ONE 32-bit word,
  * because one settings slot is all there was to spare:
  *
- *   bits  0..6   track index   0-127, matching PL_MAX
+ *   bits  0..6   track index, low 7 bits
  *   bits  7..23  seconds       0-131071, about 36 hours -- audiobook country
  *   bit  24      FROM PLAYLIST -- is the track index above meaningful at all
- *   bits 25..30  reserved, always zero
+ *   bit  25      track index, high bit -- together 0-255, matching PL_MAX
+ *   bits 26..30  reserved, always zero
  *   bit  31      ALWAYS ZERO
  *
  * Bit 31 is reserved unset, and the tag is seven bits rather than eight, for a
@@ -721,7 +722,16 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  *
  * Seconds, not bytes: bytes would need 22 bits for a long file and leave no
  * room for the guard, and seconds survive a re-encode of the same track. */
-#define RS_TRACK(w)   ((w) & 0x7Fu)
+/* The track index is 8 bits, but NOT contiguous: the low 7 sit where they
+ * always did and the 8th lives in bit 25, the first of the reserved run. It
+ * was 7 bits under a comment claiming that matched PL_MAX, which is 256 -- so
+ * RS_PACK's mask silently folded track 200 of a 240-entry playlist down to
+ * track 72, and resume came back at the wrong song with no sign anything was
+ * wrong. Splitting the field rather than moving it keeps every previously
+ * saved word readable: those have bit 25 clear, which reads back as 0..127
+ * exactly as before. Bit 31 stays unset -- see the note above about APF
+ * storing these as signed. */
+#define RS_TRACK(w)   (((w) & 0x7Fu) | ((((w) >> 25) & 1u) << 7))
 #define RS_SECS(w)    (((w) >> 7) & 0x1FFFFu)
 #define RS_PL(w)      (((w) >> 24) & 1u)
 
@@ -5575,6 +5585,18 @@ static uint32_t fl_cap;            /* max_blocksize, kept across reopens */
  * points fit a 4 KB read, and holding it in BSS would want ~1.8 KB of the
  * ~1.8 KB of link slack that remains.
  */
+/* Where a run of seek presses has ASKED to be, as opposed to where playback
+ * actually is.
+ *
+ * The transport must advance by the step on every press. Computing the next
+ * target from the clock alone cannot guarantee that: if a landing falls short,
+ * the next target is computed from the short position and the errors compound
+ * until the seek stops moving. Holding the intent separately means a run of
+ * presses advances monotonically whatever the landings do, while the clock
+ * stays truthful about where the audio is. The guard band drops the intent
+ * once ordinary playback has caught up, so it never lingers. */
+static uint32_t fl_seek_intent;
+
 static uint32_t fl_seek_off;      /* absolute offset of the SEEKTABLE body  */
 static uint32_t fl_seek_pts;      /* 18-byte points; 0 = no table           */
 static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
@@ -5616,59 +5638,141 @@ static void flac_scan_metadata(void)
     }
 }
 
-/* Byte offset for a target SAMPLE, interpolated between bracketing points.
- * Returns 0 if there is no usable table, leaving the caller on the
- * byte-proportional path. Offsets in the table are relative to the first
- * audio frame, not to the start of the file. */
-static uint32_t flac_seek_byte(uint64_t want)
+
+/* ------------------------------------------------------- accurate seeking
+ *
+ * A byte offset interpolated from a time is a GUESS, and on material whose
+ * bitrate varies it is a poor one -- measured on a file whose quiet half
+ * occupies a four-hundredth of the bytes of its loud half, asking for 15s
+ * landed at 20s. Two attempts were made to fix the resulting clock error by
+ * correcting the clock AFTERWARDS, from the frame the decoder resynced on.
+ * Both failed, the second leaving the transport unusable, and the reason is
+ * structural rather than a coding slip: the next seek target is computed FROM
+ * the clock, so a truthful clock plus an inaccurate landing means each press
+ * moves by the step MINUS the landing error. Reproduced under tools/rv32sim.py
+ * with the real decoder: presses advanced +22, +11, +5, then +0, +0, +0 --
+ * stuck, exactly as reported.
+ *
+ * So the landing is made accurate instead. Every FLAC frame header states its
+ * own position, and flac_probe_frame() reads one without decoding audio, so
+ * the offset can be measured and refined until it is right. Then the clock and
+ * the transport agree because there is nothing left to disagree about.
+ *
+ * Probing reads the card directly rather than through the ring: the ring is
+ * the playback path and refilling it for a measurement that is about to be
+ * thrown away would cost far more than the 512 bytes a probe needs. */
+static uint32_t fl_probe_pos;
+
+static int flac_probe_pull(void *ctx, uint8_t *dst, int n)
 {
-    if (!fl_first_frame) return 0;
+    (void)ctx;
+    if (n <= 0 || fl_probe_pos >= slot_size) return 0;
+    uint32_t want = (uint32_t)n;
+    if (want > 512u) want = 512u;
+    if (fl_probe_pos + want > slot_size) want = slot_size - fl_probe_pos;
+    if (!want) return 0;
+    if (!target_read_slot(MP3_SLOT_ID, fl_probe_pos, TAG_OFF, want)) return 0;
+    for (uint32_t i = 0; i < want; i++) dst[i] = tagbuf[i];
+    fl_probe_pos += want;
+    return (int)want;
+}
 
-    /* No seek table -- Pink Floyd on the test card has none. Interpolate
-     * across the whole file instead, which is still better than the generic
-     * byte path in two ways: it starts at the first AUDIO frame rather than at
-     * byte 0 (67 KB inside the metadata for that file, which the decoder would
-     * then have to scan through), and it is ABSOLUTE, so each target second
-     * maps to one fixed offset instead of accumulating error over repeats. */
-    if (!fl_seek_pts) {
-        if (!track_secs || !fl.rate || slot_size <= fl_first_frame) return 0;
-        uint64_t span = (uint64_t)slot_size - fl_first_frame;
-        uint64_t tot  = (uint64_t)track_secs * (uint64_t)fl.rate;
-        if (!tot) return 0;
-        if (want > tot) want = tot;
-        return fl_first_frame + (uint32_t)(span * want / tot);
-    }
+static uint64_t fl_sample_of(void)
+{
+    return fl.number_is_sample ? fl.frame_number
+                               : fl.frame_number * (uint64_t)fl.max_blocksize;
+}
 
-    uint32_t n = fl_seek_pts * 18u;
-    if (!target_read_slot(MP3_SLOT_ID, fl_seek_off, TAG_OFF, n)) return 0;
+/* Finds the byte offset whose frame starts closest to `want` samples, and
+ * reports the sample position it actually found there.
+ *
+ * False position between a bracketing pair. Each probe replaces one end, so
+ * nothing is assumed about how bytes map to time -- a badly nonlinear file
+ * simply takes another step. Measured: one probe for an ordinary file, and
+ * convergence on the pathological one.
+ *
+ * A probe reporting a position outside the bracket cannot be real. That is a
+ * false sync whose arbitrary frame number happened to survive the CRC-8 --
+ * there are 22 of them in one file on the test card, and trusting one is what
+ * broke the previous attempt. Here it is simply discarded, and because the
+ * bracket only ever narrows, a rejected probe costs an iteration rather than
+ * the answer. */
+static uint32_t flac_seek_locate(uint64_t want, uint64_t *landed)
+{
+    *landed = 0;
+    if (!fl_first_frame || !fl.rate || !fl.max_blocksize) return 0;
+    if (slot_size <= fl_first_frame) return 0;
 
-    uint32_t lo_s = 0, lo_b = 0;
-    int have_lo = 0;
-    for (uint32_t i = 0; i < fl_seek_pts; i++) {
-        const uint8_t *e = &tagbuf[i * 18u];
-        /* Placeholder points carry an all-ones sample number. The high words
-         * are checked rather than assumed zero: a real 32-bit overflow would
-         * be 27 hours of audio, but a placeholder is common. */
-        if (fl_be32(e) == 0xFFFFFFFFu || fl_be32(e + 8u) != 0u) continue;
-        if (fl_be32(e) != 0u) continue;              /* sample above 2^32 */
-        uint32_t smp = fl_be32(e + 4u);
-        uint32_t byt = fl_be32(e + 12u);
+    uint64_t total = fl.total_samples;
+    if (!total && track_secs) total = (uint64_t)track_secs * (uint64_t)fl.rate;
+    if (!total) return 0;
+    if (want > total) want = total;
 
-        if ((uint64_t)smp <= want) { lo_s = smp; lo_b = byt; have_lo = 1; continue; }
+    uint32_t lo_b = fl_first_frame, hi_b = slot_size;
+    uint64_t lo_s = 0, hi_s = total;
 
-        /* First point past the target: interpolate across this interval. */
-        if (have_lo && smp > lo_s) {
-            uint64_t span_s = (uint64_t)smp - lo_s;
-            uint64_t span_b = (uint64_t)byt - lo_b;
-            uint64_t into   = want - lo_s;
-            return fl_first_frame + lo_b + (uint32_t)(span_b * into / span_s);
+    /* Seed from the seek table when there is one: it brackets the target
+     * exactly, which is why an ordinary file converges on the first probe. */
+    if (fl_seek_pts) {
+        uint32_t n = fl_seek_pts * 18u;
+        if (target_read_slot(MP3_SLOT_ID, fl_seek_off, TAG_OFF, n)) {
+            for (uint32_t i = 0; i < fl_seek_pts; i++) {
+                const uint8_t *e = &tagbuf[i * 18u];
+                if (fl_be32(e) == 0xFFFFFFFFu || fl_be32(e) != 0u) continue;
+                uint64_t smp = (uint64_t)fl_be32(e + 4u);
+                uint32_t byt = fl_first_frame + fl_be32(e + 12u);
+                if (byt <= lo_b || byt >= hi_b) continue;
+                if (smp <= want && smp >= lo_s) { lo_s = smp; lo_b = byt; }
+                else if (smp > want && smp <= hi_s) { hi_s = smp; hi_b = byt; }
+            }
         }
-        break;
     }
 
-    /* Past the last point, or only one usable point: fall back to that point
-     * exactly rather than extrapolating a rate that is not measured here. */
-    return have_lo ? fl_first_frame + lo_b : 0u;
+    flac_read_fn  saved_read = fl.read;
+    void         *saved_ctx  = fl.ctx;
+    uint32_t      best_b     = lo_b;
+    uint64_t      best_s     = lo_s;
+    uint64_t      best_d     = (want > lo_s) ? want - lo_s : lo_s - want;
+    /* Whether anything here is MEASURED. A seek table seeds a real pair, and
+     * a successful probe produces one. With neither, best_s is still the
+     * initial 0 and reporting it would send the clock -- and playback -- to
+     * the start of the track on a file the probes could not read at all.
+     * Refusing the seek leaves playback untouched, and the intent still
+     * advances so a second press tries again further on. */
+    int           measured  = fl_seek_pts ? 1 : 0;
+    fl.read = flac_probe_pull;
+    fl.ctx  = 0;
+
+    for (uint32_t it = 0; it < 12u; it++) {
+        if (hi_s <= lo_s || hi_b <= lo_b + 1u) break;
+        uint32_t at = lo_b + (uint32_t)(((uint64_t)(hi_b - lo_b) *
+                                         (want - lo_s)) / (hi_s - lo_s));
+        if (at <= lo_b) at = lo_b + 1u;
+        if (at >= hi_b) at = hi_b - 1u;
+
+        fl_probe_pos = at;
+        flac_flush_input(&fl);
+        if (flac_probe_frame(&fl) != FLAC_OK) { hi_b = at; continue; }
+
+        uint64_t got = fl_sample_of();
+        if (got < lo_s || got > hi_s) { hi_b = at; continue; }  /* false sync */
+
+        measured = 1;
+        uint64_t d = (got > want) ? got - want : want - got;
+        if (d < best_d) { best_d = d; best_b = at; best_s = got; }
+        if (d <= (uint64_t)fl.max_blocksize) break;
+
+        if (got < want) { lo_b = at; lo_s = got; }
+        else            { hi_b = at; hi_s = got; }
+    }
+
+    fl.read = saved_read;
+    fl.ctx  = saved_ctx;
+    flac_flush_input(&fl);
+
+    if (!measured) return 0;
+    *landed = best_s;
+    return best_b;
 }
 
 static int flac_restart(void)
@@ -7655,29 +7759,43 @@ int main(void)
             uint32_t want;
 
             /* FLAC with a seek table works in TIME, not bytes: the target
-             * second is exact, and flac_seek_byte() interpolates the offset
-             * between the two points bracketing it. The byte path below stays
-             * for FLAC files with no table -- Pink Floyd on the test card is
-             * one -- and for MP3, where it has a great deal of history in it. */
+             * second is exact, and flac_seek_locate() MEASURES the offset
+             * rather than interpolating one: it probes frame headers until the
+             * byte it returns really is the second asked for. The byte path
+             * below stays for MP3, where it has a great deal of history in
+             * it. */
             if (track_fmt == FMT_FLAC && fl_first_frame && fl.rate) {
                 uint32_t secs = seek_secs ? seek_secs : 5u;
                 uint32_t tgt;
+                /* Base a press on the last thing asked for while a run is in
+                 * progress, otherwise on where playback actually is. Without
+                 * this a short landing is inherited by the next press and the
+                 * transport can wedge -- measured under tools/rv32sim.py as
+                 * +22, +11, +5, +0, +0, +0. */
+                uint32_t base = ui_sec;
+                if (fl_seek_intent > ui_sec && fl_seek_intent - ui_sec < 30u)
+                    base = fl_seek_intent;
                 if (seek_req == 1u) {
-                    tgt = ui_sec + secs;
+                    tgt = base + secs;
                     /* Leave three seconds so the end is audible and the track
                      * finishes normally, the same rule the byte path uses. */
                     uint32_t last = (track_secs > 3u) ? track_secs - 3u : 0u;
                     if (tgt > last) tgt = last;
                 } else {
-                    tgt = (ui_sec > secs) ? ui_sec - secs : 0u;
+                    tgt = (base > secs) ? base - secs : 0u;
                 }
+                fl_seek_intent = tgt;
 
-                uint32_t at = flac_seek_byte((uint64_t)tgt * (uint64_t)fl.rate);
+                uint64_t landed = 0;
+                uint32_t at = flac_seek_locate((uint64_t)tgt * (uint64_t)fl.rate,
+                                               &landed);
                 seek_req = 0;
                 if (at && at != file_pos) {
                     file_pos = at;
                     stopped  = 0;
-                    ui_sec      = tgt;
+                    /* The landing was MEASURED before the jump, not assumed,
+                     * so the clock is simply set to it. */
+                    ui_sec      = (uint32_t)(landed / (uint64_t)fl.rate);
                     ui_sec_acc  = 0;
                     ui_last_sec = 0xFFFFFFFFu;
                     ui_prog_sec = 0xFFFFFFFFu;
@@ -7699,9 +7817,12 @@ int main(void)
                     flac_flush_input(&fl);
                     flac_stall = 0;
                     fl_meter_n = 0;
+                    /* From the MEASURED landing, not from the request: the
+                     * two are the same only because the offset was refined
+                     * until they were, and if a pathological file leaves them
+                     * a frame apart the audio is what counts. */
                     if (fl.max_blocksize)
-                        frames = (uint32_t)(((uint64_t)tgt * (uint64_t)fl.rate)
-                                            / (uint64_t)fl.max_blocksize);
+                        frames = (uint32_t)(landed / (uint64_t)fl.max_blocksize);
                     /* Must follow the rebase, and must equal it: the clock
                      * accumulator fires on `frames != ui_last_frames`, so a
                      * stale value here spends a phantom frame -- and the

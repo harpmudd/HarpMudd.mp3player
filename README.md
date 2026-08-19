@@ -123,8 +123,8 @@ stopped on, but it finds them through the playlist it reopens — so a playlist
 whose name it can't remember comes back at the start of `playlist.m3u`
 instead. Short name, and resume follows you back in.
 
-Resume also only records the first **128** tracks of a playlist; past that it
-returns to the start of the list rather than the track you were on.
+Resume records the track and the second for the whole playlist, all 256 of
+them.
 
 **Tap Select** for the playlist: the list opens on the track that's playing,
 **Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**

@@ -111,5 +111,10 @@ extern uint8_t  flac_order, flac_type;   /* type: 1 FIXED, 2 LPC    */
  * stream. Keeps STREAMINFO and the block buffer. */
 void flac_flush_input(flac_t *f);
 
+/* Parses the next frame header and stops, without decoding audio. Leaves the
+ * frame's position in f->frame_number, which lets a seek measure where a byte
+ * offset actually landed and refine it. */
+flac_err flac_probe_frame(flac_t *f);
+
 
 #endif

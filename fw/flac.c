@@ -666,6 +666,27 @@ void flac_flush_input(flac_t *f)
     f->eof = 0;
 }
 
+/* Finds the next frame header and stops, leaving its position in
+ * f->frame_number. No subframe is decoded.
+ *
+ * This is what makes an accurate seek possible. Interpolating a byte offset
+ * from a time is a guess -- badly so on material whose bitrate varies, where
+ * the byte midpoint of a file can sit nowhere near its time midpoint -- and
+ * a guess is all the player had. Probing costs a header parse instead of a
+ * whole frame, so the offset can be refined until it lands where it was
+ * asked, rather than the clock being bent afterwards to match wherever it
+ * happened to land. Bending the clock was tried: it makes the display honest
+ * and the transport unusable, because the next seek target is computed FROM
+ * the clock.
+ *
+ * The caller repositions the stream and calls flac_flush_input() between
+ * probes, so leaving the reader mid-frame here is deliberate and harmless. */
+flac_err flac_probe_frame(flac_t *f)
+{
+    if (f->eof && f->pos >= f->have) return FLAC_END;
+    return frame_header(f);
+}
+
 flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx)
 {
     if (f->eof && f->pos >= f->have) return FLAC_END;
