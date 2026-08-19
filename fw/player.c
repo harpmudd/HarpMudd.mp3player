@@ -4850,13 +4850,21 @@ static void poll_input(void)
             pl_ui_follow(); pl_ui_dirty = 1u;
         }
 
-        /* L/R page by a screenful. Left and Right have no other job while the
-         * overlay is up, and 240 entries is 27 pages against 240 steps. */
-        if (edge & KEY_L1) {
+        /* Left and Right on the D-PAD page by a screenful -- more intuitive
+         * than the shoulder buttons, and they have no other job while the
+         * overlay is up: everything except Select is masked off at the end of
+         * this block, so the seek scrub never sees them. 240 entries is 27
+         * pages against 240 steps.
+         *
+         * This is the second time it has been written. The first was undone by
+         * `git checkout 1c1d55a -- fw/player.c` while reverting an unrelated
+         * seek change, and went unnoticed because the changelog already
+         * described the intended behaviour rather than the shipped one. */
+        if (edge & KEY_LEFT) {
             pl_ui_sel = (pl_ui_sel > PL_UI_ROWS) ? (uint16_t)(pl_ui_sel - PL_UI_ROWS) : 0u;
             pl_ui_follow(); pl_ui_dirty = 1u;
         }
-        if (edge & KEY_R1) {
+        if (edge & KEY_RIGHT) {
             uint32_t n = (uint32_t)pl_ui_sel + PL_UI_ROWS;
             pl_ui_sel = (n >= pl_count) ? (uint16_t)(pl_count - 1u) : (uint16_t)n;
             pl_ui_follow(); pl_ui_dirty = 1u;
