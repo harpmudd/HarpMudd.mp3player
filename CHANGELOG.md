@@ -14,6 +14,11 @@ What changed in each release, newest first.
   permanent — seek near the end of a track and the counter reached the total
   while the music kept playing. Seeking now measures where it lands instead of
   assuming, so the time shown is the time you are at. Present since 1.3.0.
+- Fixed: **a FLAC played from a playlist would barely seek at all**, while the
+  same file opened with Load MP3 seeked normally. The core was measuring the
+  file's size too early and reading it far too small — a 30 MB track came out
+  as 5 MB — which also showed as a nonsense bitrate in the header. Both are
+  right now.
 - Fixed: **resume returned to the wrong track in playlists over 128 entries.**
   Track 200 of 240 came back as track 72.
 - The playlist limits, including the **12-character** limit on a remembered

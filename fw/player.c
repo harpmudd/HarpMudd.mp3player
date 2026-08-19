@@ -7827,7 +7827,19 @@ int main(void)
             if (!seek_size_tried) {
                 seek_size_tried = 1u;
                 uint32_t z = probe_file_size();
-                if (z > slot_size) slot_size = z;
+                if (z > slot_size) {
+                    slot_size = z;
+                    /* The bitrate was derived from the old figure and is on
+                     * screen right now -- 172 kbps for a FLAC that is really
+                     * 1063. Recompute it here rather than leaving the header
+                     * disagreeing with the file until the next load. */
+                    if (track_fmt == FMT_FLAC && track_secs &&
+                        slot_size > fl_first_frame) {
+                        uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
+                        track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
+
+                    }
+                }
             }
 #if UI_SHOW_SEEK_DIAG
             dg_size  = slot_size;
