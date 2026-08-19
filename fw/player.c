@@ -571,44 +571,6 @@ static uint32_t meter_level_of(uint32_t mean_v, uint32_t h)
 }
 
 static uint32_t meter_level(uint32_t h) { return meter_level_of(mean_amp, h); }
-
-/* How a peak-hold marker falls back toward the bar.
- *
- * It used to fall one unit per update, and that was right while the marker and
- * the bar were the SAME number -- wave_pk[] was assigned wave[] -- because it
- * never had anywhere to go. Now the bar follows the mean and the marker the
- * peak, so the gap between them is structural: on the measured material the
- * peak sits around 68% of full scale against 41% for the bar, and can be the
- * full 100% against 28%. One unit per update then takes seconds to close, and
- * reads as the marker sticking near the ceiling -- reported as the drain being
- * too slow on the dots, the bars and the L/R levels, which are exactly the
- * three meters that draw one.
- *
- * Proportional, plus a floor -- and BOTH terms scale with full scale, which is
- * the part that took measuring to get right. These markers are held in
- * different units: 0..72 pixels for the bar meters, 0..255 for the L/R levels.
- * A step that is merely proportional to the gap still leaves the 255-unit
- * meter three times as far to travel in absolute terms, and it drained
- * visibly slower than the bars -- 1.4 s against 0.4 s. Scaling the floor by
- * `full` as well brings them together.
- *
- * Computed over the real gaps this produces (updates run at ~30 Hz, inside the
- * two-frame throttle):
- *
- *              typical   loud transient
- *   bars        0.40 s      0.60 s          (was 0.67 s / 1.70 s)
- *   L/R levels  0.37 s      0.60 s          (was 2.27 s / 6.13 s)
- *
- * The floor guarantees it always arrives rather than creeping asymptotically. */
-static unsigned char meter_hold_fall(unsigned char hold, unsigned char body,
-                                     uint32_t full)
-{
-    if (hold <= body) return hold;
-    uint32_t step = full / 64u + (uint32_t)(hold - body) / 8u;
-    if (!step) step = 1u;
-    if (step > (uint32_t)(hold - body)) step = (uint32_t)(hold - body);
-    return (unsigned char)(hold - step);
-}
 /* The bar history scrolls every SECOND display frame, so it needs a max over
  * its own two-frame period -- reading peak_amp directly would discard the
  * frame in between, which is the same drop this change exists to remove, one
@@ -3343,13 +3305,10 @@ static void ui_draw_dynamic(void)
 
         }
         (void)wf;
-        /* Peaks sink back toward the bar, so the marker trails the loudest
-         * recent moment instead of sitting at the ceiling. This is also what
-         * the DOTS mode draws -- there the marker IS the display -- so its
-         * fall rate is that meter's whole character. */
+        /* Peaks sink slowly back toward the bar, so the marker trails the
+         * loudest recent moment instead of sitting at the ceiling. */
         for (uint32_t i = 0; i < UI_WAVE_N; i++)
-            wave_pk[i] = meter_hold_fall(wave_pk[i], (unsigned char)wave[i],
-                                         UI_WAVE_H);
+            if (wave_pk[i] > wave[i]) wave_pk[i]--;
 
         uint32_t ww  = ui_wave_w();
         uint16_t bed = ui_grad_at(UI_WAVE_Y);
@@ -4032,14 +3991,8 @@ static void ui_draw_dynamic(void)
                            lvl_r = (unsigned char)(ra * 255u / (ww ? ww : 1u)); }
             unsigned char lph = (unsigned char)(lp * 255u / (ww ? ww : 1u));
             unsigned char rph = (unsigned char)(rp * 255u / (ww ? ww : 1u));
-            /* Toward the BAR, not toward zero. A hold marker means "the
-             * loudest moment recently", so where it comes to rest is the
-             * current level -- decaying to zero made it drift below the bar
-             * and disappear behind it in quiet passages. */
-            if (lph > lvl_pl) lvl_pl = lph;
-            else lvl_pl = meter_hold_fall(lvl_pl, lvl_l, 255u);
-            if (rph > lvl_pr) lvl_pr = rph;
-            else lvl_pr = meter_hold_fall(lvl_pr, lvl_r, 255u);
+            if (lph > lvl_pl) lvl_pl = lph; else if (lvl_pl) lvl_pl--;
+            if (rph > lvl_pr) lvl_pr = rph; else if (lvl_pr) lvl_pr--;
 
             const uint32_t bh = UI_WAVE_H / 3u;          /* bar height */
             const uint32_t gap = UI_WAVE_H - 2u * bh;    /* space between */
