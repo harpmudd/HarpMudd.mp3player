@@ -1050,6 +1050,21 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 /* 0 for any build a user sees -- the standing rule is that no diagnostic ever
  * reaches one. Set to 1 to bring the D/O/U/F row back while investigating. */
 #define UI_SHOW_SPEED_DIAG 0
+/* Seek instrumentation. Build with EXTRA_CFLAGS=-DUI_SHOW_SEEK_DIAG=1.
+ *
+ * This build CHANGES NO BEHAVIOUR. Two reasoned fixes for the post-seek clock
+ * both failed on hardware, and both were backed by offline models that said
+ * they would work -- the models were of the wrong thing twice over. So this
+ * only shows what a correction WOULD have computed, while seeking keeps
+ * working exactly as it does today. Never shipped: the flag defaults to 0. */
+#ifndef UI_SHOW_SEEK_DIAG
+#define UI_SHOW_SEEK_DIAG 0
+#endif
+#if UI_SHOW_SEEK_DIAG
+static uint32_t dg_tgt, dg_at, dg_pos, dg_ui, dg_blk, dg_rate;
+static uint32_t dg_num[3];
+static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
+#endif
 
 /* Load-phase breakdown as a toast after every load: H head, S size probe,
  * A artwork, P prefill, T total, in ms. 1 only while investigating load time;
@@ -1646,7 +1661,14 @@ static void ui_toast_set(const char *msg, uint32_t n, const char *suffix)
 }
 
 /* Plain text, no trailing number. */
+#if UI_SHOW_SEEK_DIAG
+/* Suppressed in the seek-diagnostic build: the toast band sits on diag row A,
+ * and a toast landing mid-reading would corrupt the one thing this build
+ * exists to show. */
+static void ui_toast_msg(const char *msg) { (void)msg; }
+#else
 static void ui_toast_msg(const char *msg) { ui_toast_set(msg, 0xFFFFFFFFu, 0); }
+#endif
 
 
 /* Bytes per second of AUDIO, which is what both the duration and the seek
@@ -4383,6 +4405,53 @@ ui_tail:
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
         fb_set_color(UI_RED, sbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+#if UI_SHOW_SEEK_DIAG
+    /* Two rows, redrawn every pass so nothing erases them, and frozen on the
+     * last seek so there is time to read them. Toasts are suppressed in this
+     * build (see ui_toast_msg) because the toast band would sit on row A.
+     *
+     *   row A   T target second the seek asked for
+     *           A byte it jumped to, in KB
+     *           B max_blocksize      R sample rate / 100
+     *           S blocking strategy: 0 fixed (frame numbers), 1 variable
+     *   row B   N the coded number of the first three frames decoded after
+     *           P second those imply for the FIRST of them
+     *           U ui_sec as it stands now
+     *           E decoder result on the first frame, 0 = OK
+     *
+     * How to read it: P should be close to T. If P is wildly off, the frame
+     * the scan landed on is not the one the seek aimed at. If the three N
+     * values are not consecutive, the scan is landing on false syncs. If B or
+     * R read zero, the position arithmetic never had valid inputs -- which
+     * would explain both failed fixes at a stroke. */
+    {
+        char b[64], *q = b;
+        *q++ = 'T'; q = ui_dec(q, dg_tgt);
+        *q++ = ' '; *q++ = 'A'; q = ui_dec(q, dg_at >> 10);
+        *q++ = ' '; *q++ = 'B'; q = ui_dec(q, dg_blk);
+        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, dg_rate / 100u);
+        *q++ = ' '; *q++ = 'S'; q = ui_dec(q, dg_samp);
+        *q = 0;
+        uint16_t g = ui_grad_at((FB_H - 40u));
+        fb_rect(UI_MARGIN, FB_H - 40u, UI_INNER_W, FB_CELL(TS_1X), g);
+        fb_set_color(UI_RED, g);
+        fb_text_clipped(UI_MARGIN, FB_H - 40u, b, TS_1X, TS_1X, UI_INNER_W);
+
+        q = b;
+        *q++ = 'N'; q = ui_dec(q, dg_num[0]);
+        *q++ = ','; q = ui_dec(q, dg_num[1]);
+        *q++ = ','; q = ui_dec(q, dg_num[2]);
+        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, dg_pos);
+        *q++ = ' '; *q++ = 'U'; q = ui_dec(q, ui_sec);
+        *q++ = ' '; *q++ = 'E'; q = ui_dec(q, dg_fe == 0xFFu ? 99u : dg_fe);
+        *q = 0;
+        g = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), g);
+        fb_set_color(UI_RED, g);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
     }
 #endif
@@ -7614,6 +7683,15 @@ int main(void)
                     ui_prog_sec = 0xFFFFFFFFu;
                     meas_pos0   = file_pos;
                     meas_sec0   = ui_sec;
+#if UI_SHOW_SEEK_DIAG
+                    dg_tgt  = tgt;   dg_at   = at;
+                    dg_blk  = fl.max_blocksize;
+                    dg_rate = fl.rate;
+                    dg_ui   = ui_sec;
+                    dg_n    = 0;     dg_fe   = 0xFFu;
+                    dg_pos  = 0;     dg_live = 1u;
+                    dg_num[0] = dg_num[1] = dg_num[2] = 0;
+#endif
 
                     pcm_flush();
                     refill_drain();
@@ -7899,6 +7977,23 @@ int main(void)
             }
             if (fe != FLAC_OK) { errs++; REG(R_STAT2) = 0xC2000000u | fe; }
             frames++;
+#if UI_SHOW_SEEK_DIAG
+            /* The three frames after a seek, exactly as the decoder saw them.
+             * Recorded even when fe is an error, because "the first frame
+             * failed" is itself a candidate explanation. */
+            if (dg_live && dg_n < 3u) {
+                if (dg_fe == 0xFFu) dg_fe = (uint8_t)fe;
+                dg_num[dg_n++] = (uint32_t)fl.frame_number;
+                dg_samp = fl.number_is_sample;
+                if (dg_n == 1u && fl.rate) {
+                    uint64_t smp = fl.number_is_sample
+                                 ? fl.frame_number
+                                 : fl.frame_number * (uint64_t)fl.max_blocksize;
+                    dg_pos = (uint32_t)(smp / fl.rate);
+                }
+                if (dg_n >= 3u) dg_live = 0u;
+            }
+#endif
             /* The clock is NOT set here. ui_draw_dynamic() already advances
              * ui_sec by an accumulator whenever `frames` moves, and this line
              * recomputed it independently -- two writers, the same nominal
