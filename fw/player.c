@@ -529,6 +529,48 @@ static uint32_t peak_amp;         /* max |sample| in the most recently decoded f
  * produce it, and loses no transient. */
 static uint32_t peak_acc, peak_acc_l, peak_acc_r;
 static uint8_t  peak_acc_any;
+
+/* MEAN |sample|, published beside the peak.
+ *
+ * The bars were driven by the peak and the user reported them pegged: "for
+ * many songs many of the meters are peaked out, very evident on the bar
+ * meters." Measured with the real decoder under tools/rv32sim.py, 56 windows
+ * of 1152 pairs from the middle of a real track: the peak bar never fell below
+ * 33 of 72 pixels, sat at 68% of full scale on average, and was at or over 95%
+ * in 8 of those windows. A bar that lives in the top half and flattens on
+ * every loud passage is not reporting anything.
+ *
+ * Real meters split the two -- VU averages, PPM peaks -- and this now does the
+ * same: the BODY of the bar follows the mean, the hold marker follows the peak
+ * and so keeps meaning what it says. Previously wave_pk[] was assigned the
+ * same value as wave[], so the marker was not a peak at all.
+ *
+ * The sum is uint32: a display frame is at most a couple of FLAC frames, so
+ * ~18k samples at 32767, which is 604M and cannot overflow. */
+static uint32_t mean_amp;         /* mean |sample| of the last display frame  */
+static uint32_t mean_l, mean_r;   /* and per channel, for the stereo meters   */
+static uint32_t mean_acc, mean_acc_l, mean_acc_r, mean_cnt;
+
+/* Gain applied to the mean before it becomes bar height, as a fraction.
+ *
+ * MEASURED, not chosen: mean |x| ran 16.4% of full scale on average and peaked
+ * at 31.0% on that material, so 5/2 puts the loudest window at 76% of the bar
+ * -- high, with room left above it -- and nothing pegged across all 56
+ * windows. Raising it to 2.75 would put that window at 85%, which is the top
+ * of the intended range and leaves nothing for louder material, so 5/2 is the
+ * safer of the two. */
+#define MTR_GAIN_NUM 5u
+#define MTR_GAIN_DEN 2u
+
+/* Mean scaled to a height, clamped. One place, so every meter agrees -- ten of
+ * them share this and they must not drift apart. */
+static uint32_t meter_level_of(uint32_t mean_v, uint32_t h)
+{
+    uint32_t a = (mean_v * MTR_GAIN_NUM * h) / (MTR_GAIN_DEN * 32768u);
+    return (a > h) ? h : a;
+}
+
+static uint32_t meter_level(uint32_t h) { return meter_level_of(mean_amp, h); }
 /* The bar history scrolls every SECOND display frame, so it needs a max over
  * its own two-frame period -- reading peak_amp directly would discard the
  * frame in between, which is the same drop this change exists to remove, one
@@ -3185,6 +3227,10 @@ static void ui_draw_dynamic(void)
         peak_amp     = peak_acc;
         peak_l       = peak_acc_l;
         peak_r       = peak_acc_r;
+        mean_amp     = mean_cnt ? (mean_acc / mean_cnt) : 0u;
+        mean_l       = mean_cnt ? (mean_acc_l / (mean_cnt / 2u)) : 0u;
+        mean_r       = mean_cnt ? (mean_acc_r / (mean_cnt / 2u)) : 0u;
+        mean_acc     = mean_acc_l = mean_acc_r = mean_cnt = 0;
         peak_acc     = peak_acc_l = peak_acc_r = 0;
         peak_acc_any = 0;
         if (peak_amp > wave_pend) wave_pend = peak_amp;
@@ -3243,8 +3289,11 @@ static void ui_draw_dynamic(void)
          * covers two display frames and both should count. */
         uint32_t src = wave_pend ? wave_pend : peak_amp;
         wave_pend = 0;
-        uint32_t amp = (src * UI_WAVE_H) / 32768u;
-        if (amp > UI_WAVE_H) amp = UI_WAVE_H;
+        /* Body from the MEAN, marker from the peak -- see mean_amp. */
+        uint32_t amp = meter_level(UI_WAVE_H);
+        uint32_t pkamp = (src * UI_WAVE_H) / 32768u;
+        if (pkamp > UI_WAVE_H) pkamp = UI_WAVE_H;
+        if (amp > pkamp) amp = pkamp;      /* the average cannot exceed the peak */
         /* Frozen while paused: the forced pass exists only to recolour. */
         if (!paused) {
             for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) {
@@ -3252,7 +3301,7 @@ static void ui_draw_dynamic(void)
                 wave_pk[i] = wave_pk[i + 1];
             }
             wave[UI_WAVE_N - 1u]    = (unsigned char)amp;
-            wave_pk[UI_WAVE_N - 1u] = (unsigned char)amp;
+            wave_pk[UI_WAVE_N - 1u] = (unsigned char)pkamp;
 
         }
         (void)wf;
@@ -3284,8 +3333,7 @@ static void ui_draw_dynamic(void)
             if (!paused) {
                 fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
 
-                uint32_t a = (peak_amp * half) / 32768u;
-                if (a > half) a = half;
+                uint32_t a = meter_level(half);
 
                 uint32_t cx = x0 + w - 1u;
                 ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H);     /* clear column */
@@ -3376,8 +3424,7 @@ static void ui_draw_dynamic(void)
             if (!paused) {
                 fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
 
-                uint32_t a = (peak_amp * UI_WAVE_H) / 32768u;
-                if (a > UI_WAVE_H) a = UI_WAVE_H;
+                uint32_t a = meter_level(UI_WAVE_H);
 
                 /* Column drawn as three bands -- quiet bed, body, hot tip --
                  * so loud passages read as brighter AND taller. */
@@ -3426,9 +3473,9 @@ static void ui_draw_dynamic(void)
                  * them out and they never need repainting. */
                 uint32_t nlen = len - 6u;
 
-                uint32_t pkc = ch ? peak_r : peak_l;
-                uint32_t tgt = (pkc * 255u) / 32768u;
-                if (tgt > 255u) tgt = 255u;
+                /* From the MEAN. A VU meter averages by definition, and
+                 * driving these from the peak is what pinned them. */
+                uint32_t tgt = meter_level_of(ch ? mean_r : mean_l, 255u);
                 uint32_t *v = ch ? &vu_r : &vu_l;
                 if (paused) tgt = 0;
                 if (tgt > *v) { *v += VU_ATT; if (*v > tgt) *v = tgt; }
@@ -3635,9 +3682,7 @@ static void ui_draw_dynamic(void)
                 /* VU ballistics per channel -- the tubes are imitating the
                  * same era of gear as the needles, and two different feels
                  * would read as two different instruments. */
-                uint32_t pk  = ch ? peak_r : peak_l;
-                uint32_t tgt = (pk * 255u) / 32768u;
-                if (tgt > 255u) tgt = 255u;
+                uint32_t tgt = meter_level_of(ch ? mean_r : mean_l, 255u);
                 if (paused) tgt = 0;
                 uint32_t *v = ch ? &eye_r : &eye_l;
                 if (tgt > *v) { *v += VU_ATT; if (*v > tgt) *v = tgt; }
@@ -3935,12 +3980,19 @@ static void ui_draw_dynamic(void)
          * The only mode that uses stereo information; the others collapse both
          * channels into one number. Two bars plus two peak-hold markers. */
         if (viz_mode == VIZ_LEVELS) {
-            uint32_t la = (peak_l * ww) / 32768u; if (la > ww) la = ww;
-            uint32_t ra = (peak_r * ww) / 32768u; if (ra > ww) ra = ww;
+            /* These are the bars the report named. Body from the mean; the
+             * hold markers keep following the PEAK, which is what a hold
+             * marker is for and is why they are computed separately now. */
+            uint32_t la = meter_level_of(mean_l, ww);
+            uint32_t ra = meter_level_of(mean_r, ww);
+            uint32_t lp = (peak_l * ww) / 32768u; if (lp > ww) lp = ww;
+            uint32_t rp = (peak_r * ww) / 32768u; if (rp > ww) rp = ww;
             if (!paused) { lvl_l = (unsigned char)(la * 255u / (ww ? ww : 1u));
                            lvl_r = (unsigned char)(ra * 255u / (ww ? ww : 1u)); }
-            if (lvl_l > lvl_pl) lvl_pl = lvl_l; else if (lvl_pl) lvl_pl--;
-            if (lvl_r > lvl_pr) lvl_pr = lvl_r; else if (lvl_pr) lvl_pr--;
+            unsigned char lph = (unsigned char)(lp * 255u / (ww ? ww : 1u));
+            unsigned char rph = (unsigned char)(rp * 255u / (ww ? ww : 1u));
+            if (lph > lvl_pl) lvl_pl = lph; else if (lvl_pl) lvl_pl--;
+            if (rph > lvl_pr) lvl_pr = rph; else if (lvl_pr) lvl_pr--;
 
             const uint32_t bh = UI_WAVE_H / 3u;          /* bar height */
             const uint32_t gap = UI_WAVE_H - 2u * bh;    /* space between */
@@ -4584,6 +4636,16 @@ static void meters_feed(const short *pcm, int n, int stereo)
         if ((uint32_t)pkl > peak_acc_l) peak_acc_l = (uint32_t)pkl;
         if ((uint32_t)pkr > peak_acc_r) peak_acc_r = (uint32_t)pkr;
         peak_acc_any = 1u;
+
+        /* One add per sample, in a loop that already runs. */
+        for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
+            int32_t l = pcm[i];        if (l < 0) l = -l;
+            int32_t r = stereo ? pcm[i + 1] : l; if (r < 0) r = -r;
+            mean_acc   += (uint32_t)(l + r);
+            mean_acc_l += (uint32_t)l;
+            mean_acc_r += (uint32_t)r;
+            mean_cnt   += 2u;
+        }
 
         /* Even spread across the frame, so the trace covers the whole
          * period rather than clustering at its start. */

@@ -22,21 +22,46 @@ static int rd(void *ctx, uint8_t *dst, int n)
     return (int)got;
 }
 
-/* Per-frame accumulators, reset by the caller between frames. */
-static uint32_t f_peak;
-static uint64_t f_abs, f_sq;
-static uint32_t f_n;
+/* Accumulators over a 1152-PAIR window.
+ *
+ * The window matters more than anything else here and the first attempt got it
+ * wrong: measuring whole 104 ms FLAC frames says almost nothing about a bar
+ * that is published every display frame. meters_feed() runs per emitted chunk
+ * and peak_acc is published once per ~26 ms, so 1152 pairs is the window the
+ * meter actually sees. A maximum over a longer window is always larger, which
+ * would have flattered PEAK and hidden exactly the pegging being investigated. */
+#define WIN_PAIRS 1152u
+
+static uint32_t w_peak, w_pairs, w_rows;
+static uint64_t w_abs, w_sq;
+
+static void win_flush(void)
+{
+    if (!w_pairs) return;
+    uint32_t n = w_pairs * 2u;
+    hputu(++w_rows);
+    hputc(' '); hputu(w_peak);
+    hputc(' '); hputu((uint32_t)(w_abs >> 32));
+    hputc(' '); hputu((uint32_t)(w_abs & 0xFFFFFFFFu));
+    hputc(' '); hputu((uint32_t)(w_sq >> 32));
+    hputc(' '); hputu((uint32_t)(w_sq & 0xFFFFFFFFu));
+    hputc(' '); hputu(n);
+    hnl();
+    w_peak = 0; w_abs = 0; w_sq = 0; w_pairs = 0;
+}
 
 static void sink(void *ctx, const int16_t *pcm, uint32_t frames)
 {
     (void)ctx;
-    for (uint32_t i = 0; i < frames * 2u; i++) {
-        int32_t v = pcm[i];
-        if (v < 0) v = -v;
-        if ((uint32_t)v > f_peak) f_peak = (uint32_t)v;
-        f_abs += (uint32_t)v;
-        f_sq  += (uint64_t)((uint32_t)v * (uint32_t)v);
-        f_n++;
+    for (uint32_t p = 0; p < frames; p++) {
+        for (uint32_t c = 0; c < 2u; c++) {
+            int32_t v = pcm[p * 2u + c];
+            if (v < 0) v = -v;
+            if ((uint32_t)v > w_peak) w_peak = (uint32_t)v;
+            w_abs += (uint32_t)v;
+            w_sq  += (uint64_t)((uint32_t)v * (uint32_t)v);
+        }
+        if (++w_pairs >= WIN_PAIRS) win_flush();
     }
 }
 
@@ -73,22 +98,10 @@ int main(void)
     cur = first + (fsize - first) / 3u;
     flac_flush_input(&f);
 
-    hputs("frame peak abs_hi abs_lo sq_hi sq_lo n"); hnl();
-    int good = 0;
-    for (int i = 0; i < 20 && good < 6; i++) {
-        f_peak = 0; f_abs = 0; f_sq = 0; f_n = 0;
+    hputs("win peak abs_hi abs_lo sq_hi sq_lo n"); hnl();
+    for (int i = 0; i < 14; i++)
         if (flac_decode_frame(&f, sink, 0) != FLAC_OK) break;
-        if (!f_n) continue;
-        good++;
-        hputu((uint32_t)good);
-        hputc(' '); hputu(f_peak);
-        hputc(' '); hputu((uint32_t)(f_abs >> 32));
-        hputc(' '); hputu((uint32_t)(f_abs & 0xFFFFFFFFu));
-        hputc(' '); hputu((uint32_t)(f_sq >> 32));
-        hputc(' '); hputu((uint32_t)(f_sq & 0xFFFFFFFFu));
-        hputc(' '); hputu(f_n);
-        hnl();
-    }
+    win_flush();
     hputs("DONE"); hnl();
     return 0;
 }
