@@ -1076,6 +1076,12 @@ static uint32_t dg_tgt, dg_at, dg_pos, dg_ui, dg_blk, dg_rate;
 /* The load-path fields. Copied rather than read where the rows are drawn:
  * ui_draw_dynamic() sits above every FLAC declaration in this file. */
 static uint32_t dg_size, dg_dur, dg_first, dg_pts, dg_len, dg_intent;
+/* Probe telemetry. Distinguishes "the search ran and could not get close"
+ * from "no probe ever came back", which are different faults with different
+ * fixes -- and the second is what a file opened BY NAME rather than mounted
+ * as a sized slot would produce if random access behaves differently there.
+ * Playback only ever reads forward, so it would never reveal that. */
+static uint8_t  dg_pn, dg_pfail, dg_prej;
 static uint32_t dg_num[3];
 static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
 #endif
@@ -4463,7 +4469,9 @@ ui_tail:
         *q++ = ' '; *q++ = 'P'; q = ui_dec(q, dg_pos);   /* measured landing*/
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, ui_sec);
         *q++ = ' '; *q++ = 'I'; q = ui_dec(q, dg_intent);
-        *q++ = ' '; *q++ = 'A'; q = ui_dec(q, dg_at >> 10);
+        *q++ = ' '; *q++ = 'p'; q = ui_dec(q, dg_pn);      /* probes tried  */
+        *q++ = '/'; q = ui_dec(q, dg_pfail);               /* read/parse bad */
+        *q++ = '/'; q = ui_dec(q, dg_prej);                /* false syncs    */
         *q++ = ' '; *q++ = 'E'; q = ui_dec(q, dg_fe == 0xFFu ? 99u : dg_fe);
         *q = 0;
         g = ui_grad_at((FB_H - 24u));
@@ -5749,6 +5757,9 @@ static uint32_t flac_seek_locate(uint64_t want, uint64_t *landed)
     int           measured  = fl_seek_pts ? 1 : 0;
     fl.read = flac_probe_pull;
     fl.ctx  = 0;
+#if UI_SHOW_SEEK_DIAG
+    dg_pn = dg_pfail = dg_prej = 0;
+#endif
 
     for (uint32_t it = 0; it < 12u; it++) {
         if (hi_s <= lo_s || hi_b <= lo_b + 1u) break;
@@ -5759,10 +5770,23 @@ static uint32_t flac_seek_locate(uint64_t want, uint64_t *landed)
 
         fl_probe_pos = at;
         flac_flush_input(&fl);
-        if (flac_probe_frame(&fl) != FLAC_OK) { hi_b = at; continue; }
+#if UI_SHOW_SEEK_DIAG
+        if (dg_pn < 200u) dg_pn++;
+#endif
+        if (flac_probe_frame(&fl) != FLAC_OK) {
+#if UI_SHOW_SEEK_DIAG
+            if (dg_pfail < 200u) dg_pfail++;
+#endif
+            hi_b = at; continue;
+        }
 
         uint64_t got = fl_sample_of();
-        if (got < lo_s || got > hi_s) { hi_b = at; continue; }  /* false sync */
+        if (got < lo_s || got > hi_s) {                        /* false sync */
+#if UI_SHOW_SEEK_DIAG
+            if (dg_prej < 200u) dg_prej++;
+#endif
+            hi_b = at; continue;
+        }
 
         measured = 1;
         uint64_t d = (got > want) ? got - want : want - got;
