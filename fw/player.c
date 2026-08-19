@@ -7802,15 +7802,32 @@ int main(void)
              * ui_byte_rate() below has the same dependency, so the MP3 path
              * was degraded by it too.
              *
-             * ONCE per track, and only as a backstop: load_track() already
-             * probes, so this fires solely when that probe came back empty.
-             * The flag matters -- the probe is ~20 blocking reads, measured at
-             * 480 ms, and repeating it on every press would replace a seek
-             * that does not move with one that stalls for half a second and
-             * then does not move. */
-            if (!slot_size && !seek_size_tried) {
+             * Re-measured, not merely filled in when absent. An earlier
+             * version only ran when slot_size was ZERO and never fired,
+             * because the size was not missing -- it was WRONG. Measured on
+             * hardware, one 30 MB FLAC: 5307 KB via a playlist against 30856
+             * KB via Load MP3, and 172 kbps displayed instead of 1063.
+             *
+             * load_track() probes at load, when a file opened by name with
+             * 0192 has only just been opened and a random read far into it
+             * still fails. That truncated answer then stands for the whole
+             * track. It poisons more than seeking -- the bitrate readout and
+             * the end-of-track check read the same number -- but seeking is
+             * where it shows, because the bracket then claims the whole
+             * duration fits in a fifth of the file and every target lands
+             * far short.
+             *
+             * Taking the LARGER is safe in the one direction that matters: an
+             * early probe can only stop short of the true end, never run past
+             * it, since it stops where a read first fails.
+             *
+             * ONCE per track. The probe is ~20 blocking reads at 480 ms, and
+             * repeating it per press would replace a seek that does not move
+             * with one that stalls first. */
+            if (!seek_size_tried) {
                 seek_size_tried = 1u;
-                slot_size = probe_file_size();
+                uint32_t z = probe_file_size();
+                if (z > slot_size) slot_size = z;
             }
 #if UI_SHOW_SEEK_DIAG
             dg_size  = slot_size;
