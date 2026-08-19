@@ -21,8 +21,13 @@ What changed in each release, newest first.
   right now.
 - Fixed: **resume returned to the wrong track in playlists over 128 entries.**
   Track 200 of 240 came back as track 72.
-- The playlist limits, including the **12-character** limit on a remembered
-  filename, are now written down in the README.
+- **Playlists can have long names again.** The core could only remember twelve
+  characters of a playlist's filename, so an album-length name played fine but
+  was never the list that came back next launch — and nothing on screen said
+  so. Add a `playlists.m3u` listing your playlists and the limit is gone;
+  `tools/make_playlist_index.py` writes it for you. Cards without one behave
+  exactly as before.
+- The playlist limits are now written down in the README.
 
 ## v1.3.0 — 15 August 2026
 

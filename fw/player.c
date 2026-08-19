@@ -786,6 +786,15 @@ static uint16_t pl_live_ordinal(uint16_t pos);
  * say what is in the slot. */
 static char pl_name[24];
 static char pl_name_raw[24];      /* same, in the card's own spelling */
+/* The name in FULL, untruncated.
+ *
+ * pl_name_raw is 24 bytes because that is all the header line can show, and
+ * for a long while that was all the core kept -- which is why only twelve
+ * characters of a playlist's name could ever be remembered. The datatable
+ * hands pl_name_read() the whole path in a 1024-byte buffer, so the
+ * information was never missing, only thrown away. */
+#define PL_FULL_MAX 96u
+static char pl_name_full[PL_FULL_MAX + 1u];
 /* Fingerprint of the .m3u TEXT last parsed, so "did the slot actually switch"
  * can be answered from the bytes rather than from the name APF reports. Zero
  * when nothing has parsed. */
@@ -889,7 +898,31 @@ static uint8_t  pl_retry;            /* one re-arm if the switch did not take */
  * instead of four. Truncation is possible and harmless: a name that does not
  * round-trip simply fails to reopen and the default loads. */
 #define PL_STEM_MAX 12u
-static char pl_saved_stem[PL_STEM_MAX + 1u];
+static char     pl_saved_stem[PL_STEM_MAX + 1u];
+
+/* ------------------------------------------------- remembering a long name
+ *
+ * Twelve characters is all a settings word can hold, and widening it cannot
+ * fix this: eleven of sixteen slots are used, so spending every remaining one
+ * reaches thirty-two characters, and "Crash Test Dummies - God Shuffled His
+ * Feet.m3u" is forty-two. Even six-bit packing, which would cost the name its
+ * case and so its ability to be reopened on anything but FAT, stops at forty.
+ * The maximum-cost version of the obvious fix still fails on an ordinary
+ * album name.
+ *
+ * So the name is not stored. A HASH of it is, and the name itself lives in a
+ * plain list on the card -- playlists.m3u -- which the core reads at boot and
+ * searches for a matching hash. Length stops mattering entirely.
+ *
+ * A hash rather than a line number: a line number is only correct until the
+ * file is edited, and the failure mode of a stale one is loading the WRONG
+ * album silently. A hash survives reordering, insertion and deletion, and it
+ * is computable at the moment the user picks a list -- where reading a file
+ * would mean clobbering the playlist that was just loaded into pl_text.
+ *
+ * The twelve-character stem is still stored and still works on its own, so a
+ * card with no playlists.m3u behaves exactly as before. */
+static uint32_t pl_saved_hash;
 
 static void settings_mark_dirty(void);
 static uint8_t set_flush_now;

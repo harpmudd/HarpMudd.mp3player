@@ -95,36 +95,40 @@ remembered.
 | --- | --- | --- |
 | Tracks per playlist | 256 | Says how many were dropped |
 | `.m3u` file size | 16 KB | Same — about 64 characters per line at 256 tracks |
-| Remembered playlist name | **12 characters** before `.m3u` | Falls back to `playlist.m3u` next launch |
+| Remembered playlist name | any length, with `playlists.m3u` — otherwise 12 characters | Falls back to `playlist.m3u` next launch |
 | Line length | 16 KB ÷ number of tracks | — |
 
-The 12-character limit is the one worth planning around, because nothing looks
-broken when you exceed it: the playlist loads and plays perfectly, it just
-isn't the one that comes back next time. There is one settings slot free for
-the name and it holds twelve characters, so:
+### Remembering which playlist you were using
+
+The core reopens the list you last used at the next launch. It has one
+settings word to remember it in, which holds twelve characters — so on its
+own, `Shenanigans.m3u` comes back and `Goose - Shenanigans Nite Club.m3u`
+does not.
+
+**Add a `playlists.m3u` and the limit goes away.** It's a plain list of the
+playlists on the card:
 
 ```text
-Shenanigans.m3u                              remembered
-Goose - Shenanigans Nite Club.m3u            not remembered
+Crash Test Dummies - God Shuffled His Feet.m3u
+Goose - Shenanigans Nite Club.m3u
+Live/Phish - Hampton 1997.m3u
 ```
 
-**Name the file short and the folder however you like** — the folder name has
-no limit and is what you actually read when browsing the card:
+The core searches it by name at boot, so a playlist can be called anything you
+like. Order doesn't matter and you can add or remove lines freely — entries are
+matched by name, not by position. Generate it with:
 
 ```text
-Crash Test Dummies - God Shuffled His Feet/
-    GodShuffled.m3u        <- remembered
-    01 God Shuffled His Feet.flac
-    ...
+python tools/make_playlist_index.py "D:/Assets/mp3player/common"
 ```
 
-Resume works the same way. The core remembers the track and the second you
-stopped on, but it finds them through the playlist it reopens — so a playlist
-whose name it can't remember comes back at the start of `playlist.m3u`
-instead. Short name, and resume follows you back in.
+Without the file nothing changes: names of twelve characters or fewer are still
+remembered on their own, so an existing card keeps working exactly as it did.
 
-Resume records the track and the second for the whole playlist, all 256 of
-them.
+Resume follows the same path. The core remembers the track and the second you
+stopped on, but it finds them through the playlist it reopens — so if the
+playlist can't be reopened, resume comes back at the start of `playlist.m3u`
+instead. Resume covers the whole playlist, all 256 tracks.
 
 **Tap Select** for the playlist: the list opens on the track that's playing,
 **Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**
@@ -237,10 +241,10 @@ framework bugs that had to be found first — is in
 - **Playlists are capped at 256 tracks**, or 16 KB of `.m3u` text — whichever
   comes first, which allows about 64 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **Only the first 12 characters of a playlist's filename are remembered.** A
-  longer name plays fine but won't be the one that loads next launch, and
-  resume won't follow it. See [Limits](#limits) — the fix is a short filename
-  in a long folder name.
+- **A playlist with a name longer than 12 characters needs a `playlists.m3u`
+  to be remembered.** Without one it plays fine but won't be the list that
+  loads next launch, and resume won't follow it. See
+  [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
 - **Sometimes a playlist or track pick doesn't register straight away.** It
   loads on its own a few seconds later; if it doesn't, pick it again. Seen when
   switching from one playlist to another.
