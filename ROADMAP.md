@@ -707,18 +707,97 @@ not to be attempted on a hunch.
    drawing engine, not by load/store. Settle that question before planning
    around it.
 
-### Speed: nothing yet, and deliberately
+### Speed: MEASURED 2026-08-19, and it was not what anyone guessed
 
-"Track changes take too long" still has two guesses in this codebase blaming
-different phases and no measurement. `EXTRA_CFLAGS=-DUI_SHOW_LOAD_TIMES=1`
-now prints H/S/A/P/T after every load; one session settles it.
+`UI_SHOW_LOAD_TIMES=1` was finally run. Three loads, milliseconds:
 
-The strongest UNTESTED idea, for when there is a number to check it against:
-**skip the size probe for FLAC.** STREAMINFO gives an exact duration and the
-seektable handles seeking, so `slot_size` may only be needed by the
-no-seektable fallback. If the probe really is the ~480 ms its own comment
-claims, that is the single largest load-time win available -- and if it is not,
-the whole idea is worthless. Measure first.
+| | H head | S size | A **art** | P prefill | T total |
+|---|---|---|---|---|---|
+| MP3 320 kbps | 526 | 0 | **1655** | 26 | 2209 |
+| FLAC, album track 1 | 299 | 625 | **2801** | 6 | 3731 |
+| FLAC, album track 2 | 296 | 628 | **2796** | 6 | 3726 |
+
+**Album art is 75% of a load.** Everything else is noise beside it.
+
+Two guesses in this codebase died here. The size probe -- "the single largest
+load-time win available" -- is the S column, and it reads **0 ms on MP3**. It
+had already been moved off the load path by then, and the user could not tell
+any difference, correctly. It was never what made a load slow.
+
+And the cost is not scaling. The test cover is 1200x1200, which already takes
+picojpeg's 1/8 reduce path, so the 2801 ms is Huffman decoding 259 KB of
+entropy data. A smaller panel would save nothing. Only NOT decoding helps.
+
+DONE, from that: the art stash is now keyed on a fingerprint of the IMAGE
+(length plus a hash of its first and last 512 bytes) rather than on the 0190
+file identity. All twelve tracks of the test album embed a byte-identical
+259276-byte JPEG, so eleven of those decodes were reproducing a picture the
+stash already held. Costs two small reads against 2801 ms.
+
+P is gone from the diagnostic row: 6..26 ms earned nothing, and the width it
+took clipped T -- "T3731" printed as "T373", a total smaller than one of its
+own parts.
+
+### Still available
+
+1. **Skip the PICTURE block in `flac_open`** -- 628 ms off every FLAC load, and
+   the only item here with no UX consequence at all. `flac_open` walks the
+   metadata through the ring to reach STREAMINFO and the comments, which means
+   streaming past 259 KB of artwork it does not want. It needs a small addition
+   to `fw/flac.h`: an optional skip callback the caller backs with a
+   reposition, since the decoder has no concept of seeking. Cheapest remaining
+   win.
+2. **Incremental art decode** -- see below. Backlogged, not abandoned.
+3. `H` at 299..526 ms is unexamined. Nobody has looked at what the head read
+   actually does.
+
+## Incremental album-art decode (BACKLOGGED 2026-08-19)
+
+Decode the cover in slices from the idle path instead of blocking the load,
+the way the file-size probe already does. Would remove 2801 ms from the load,
+let art be skipped entirely while hidden, and fix the one case the image cache
+cannot: the FIRST track of every album, and mixed playlists where every cover
+differs.
+
+**Backlogged after the trade was quantified, not for lack of appetite.**
+
+The 2801 ms is CPU-bound. Spread across idle time it stretches by however much
+idle exists, and this build has measured that elsewhere: **MP3 runs ~27% idle,
+24-bit FLAC ~0%**. So the honest description is not "art appears a beat later"
+-- it is:
+
+- music starts ~2.8 s sooner, on every track
+- art fills in **roughly 10 seconds** into an MP3
+- on a dense FLAC it may not progress at all while playing
+
+That is a genuine trade rather than a free win, and it is the user's call which
+half they want. The image cache already took the common case (playing an album
+straight through), which narrows what is left to justify the work.
+
+### If it is picked up
+
+`art_decode()` in `fw/art.inc` is already MCU-at-a-time -- `pjpeg_decode_mcu()`
+inside a `my`/`mx` loop -- so the shape is a state machine over that loop with
+the locals hoisted to statics. Drive it from `refill_pump()`'s "ring is at
+least half ahead" early return, which is exactly where `size_probe_step()` now
+runs and is proven not to starve audio.
+
+Three things to get right, each already load-bearing in that function:
+
+- `has_art` decides the LAYOUT (panel versus full-width waveform) and must be
+  known at load time. The FINDER establishes it without decoding, so this is
+  available -- do not infer it from decode completion.
+- `ui_art_mount()` fills the stash with the panel colour, so it must run before
+  the first slice, and `ui_art_round()` only after the last.
+- The accumulator work between MCU rows (`art_flush_row`, `next_ay`) carries
+  the H1V2 block-offset history and the row-overrun bound described in its own
+  comments. Hoisting it is where a subtle corruption would come from; it is
+  caught by `tools/art_scale_model.py`, which should be re-run against any
+  restructuring.
+
+Un-hiding mid-track needs a decision either way: today art is always decoded at
+load, so toggling it on is instant. Any scheme that skips the decode has to
+answer what appears at that moment.
 
 ## Playlist overlay — hold a button, browse the list, pick a track (v1.4.0)
 
