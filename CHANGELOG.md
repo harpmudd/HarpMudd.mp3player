@@ -27,6 +27,9 @@ What changed in each release, newest first.
   so. Add a `playlists.m3u` listing your playlists and the limit is gone;
   `tools/make_playlist_index.py` writes it for you. Cards without one behave
   exactly as before.
+- **The meters have more headroom.** On loud material they were running close
+  to the top of their range and flattening out there. They behave exactly as
+  before, just lower.
 - **FLAC tracks load faster.** Measuring the file's length used to block the
   load for about half a second; it now happens quietly during playback, so a
   track starts sooner. The first seek of a track no longer pays for it either.
