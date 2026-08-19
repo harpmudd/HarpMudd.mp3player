@@ -8,10 +8,11 @@ What changed in each release, newest first.
   **Left**/**Right** to page, **A** to play, **Select** or **B** to close.
   Opens on the track that's playing, and **Y** jumps back to it. Holding
   **Select** still shows and hides the album art.
-- **1.2x speed is now Select + A**, and stays labelled while it's on — a small
-  **1.2x** sits under the track counter, so the mode is visible rather than
-  something you have to remember. It used to be a long press on A, which shared
-  its timing with the seek scrub and could change speed when you meant to pause.
+- **1.2x speed is harder to trigger by accident, and says when it's on.** It's
+  still a hold on **A**, but a noticeably longer one — the old timing was shared
+  with the seek scrub and was short enough to reach just by lingering on the
+  play button. While the mode is on, a small **1.2x** sits under the track
+  counter; at normal speed nothing is shown.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
 - Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was
