@@ -13,6 +13,10 @@ What changed in each release, newest first.
   with the seek scrub and was short enough to reach just by lingering on the
   play button. While the mode is on, a small **1.2x** sits under the track
   counter; at normal speed nothing is shown.
+- Small visual tidying: the format line shows the full codec (**FLAC 16-bit**
+  was appearing as *FLAC 16-*), the selected row in the playlist has rounded
+  corners to match the panel it sits in, and the progress bar has a lit top
+  edge.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
 - Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was

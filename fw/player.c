@@ -1624,6 +1624,29 @@ static void fb_round_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
     }
 }
 
+/* Same shape, but with the corners cut to a colour the caller names.
+ *
+ * fb_round_rect above cuts to ui_grad_at(), which is right for anything
+ * sitting directly on the background and wrong for anything sitting on a
+ * PANEL -- the corners would be four holes showing the gradient through it.
+ * The playlist overlay is the case: a rounded row inside a rounded panel. */
+static void fb_round_rect_on(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                             uint32_t r, uint16_t color, uint16_t bg)
+{
+    fb_rect(x, y, w, h, color);
+    for (uint32_t i = 0; i < r; i++) {
+        uint32_t dy = r - i;
+        uint32_t inner = 0;
+        while ((inner + 1u) * (inner + 1u) + dy * dy <= r * r) inner++;
+        uint32_t cut = r - inner;
+        if (!cut) continue;
+        fb_rect(x, y + i, cut, 1, bg);
+        fb_rect(x + w - cut, y + i, cut, 1, bg);
+        fb_rect(x, y + h - 1u - i, cut, 1, bg);
+        fb_rect(x + w - cut, y + h - 1u - i, cut, 1, bg);
+    }
+}
+
 /* The waveform gives up its right-hand end to the art panel, which occupies
  * the same rows. */
 static uint32_t ui_wave_w(void)
@@ -3105,9 +3128,20 @@ static void pl_ui_row(uint32_t i)
     }
 
     /* Selected row is a filled bar, drawn first so the text paints onto it --
-     * the engine writes a glyph's background with every character. */
+     * the engine writes a glyph's background with every character.
+     *
+     * Rounded, because the panel it sits in is: a square highlight inside an
+     * 8 px rounded panel reads as a different piece of furniture. Corners cut
+     * to UI_PANEL rather than the screen gradient, which is what
+     * fb_round_rect_on() exists for. Unselected rows stay square -- they are
+     * the panel colour, so there is no shape to see either way, and drawing
+     * the corner cuts on every row would be work for nothing. */
     uint16_t bg = (pos == pl_ui_sel) ? ui_accent : UI_PANEL;
-    fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
+    if (pos == pl_ui_sel)
+        fb_round_rect_on(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H,
+                         5u, bg, UI_PANEL);
+    else
+        fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
 
     char nm[64];
     pl_ui_label(pos, nm, sizeof(nm));
@@ -4237,7 +4271,18 @@ ui_tail:
          * overhang behind as two floating stubs. */
         fb_rect(UI_MARGIN, UI_PROG_Y - 3u, UI_INNER_W, UI_PROG_H + 6u,
                 ui_grad_at(UI_PROG_Y));
-        if (done) fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
+        if (done) {
+            fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
+            /* One lit row along the top of the filled part, so the bar has a
+             * direction to it instead of reading as a flat block. A third of
+             * the way to white -- enough to catch the eye at 5 px tall,
+             * little enough that it still reads as the accent colour.
+             *
+             * Free in practice: this band is only redrawn when `done` moves,
+             * which is about once a second. */
+            fb_rect(UI_MARGIN, UI_PROG_Y, done, 1u,
+                    ui_mix(ui_accent, UI_WHITE, 1u, 3u));
+        }
         if (UI_INNER_W > done)
             fb_rect(UI_MARGIN + done, UI_PROG_Y, UI_INNER_W - done,
                     UI_PROG_H, UI_TRACK);
