@@ -1203,6 +1203,11 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
 #define UI_TIME_Y   288u
 #define UI_PROG_Y   334u
 #define UI_PROG_H   5u
+/* Knob radius. Sized against the CLEARED BAND, which is UI_PROG_H + 6 tall:
+ * a disc of 5 spans 9 rows once the empty top and bottom rows are dropped,
+ * which fits inside that band exactly. Raising this without widening the band
+ * would leave a row of the knob uncleared, and it would smear along the bar. */
+#define PROG_KNOB_R 5u
 #define UI_INNER_W  (FB_W - 2u * UI_MARGIN)
 /* Right edge a painted glyph CELL may not cross on the info card. The card
  * spans UI_MARGIN-8 .. UI_MARGIN-8+UI_INNER_W+16, so this leaves 8px of
@@ -1644,6 +1649,20 @@ static void fb_round_rect_on(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
         fb_rect(x + w - cut, y + i, cut, 1, bg);
         fb_rect(x, y + h - 1u - i, cut, 1, bg);
         fb_rect(x + w - cut, y + h - 1u - i, cut, 1, bg);
+    }
+}
+
+/* Filled circle, by the same integer search fb_round_rect uses: for each row's
+ * distance from the centre, the widest span still inside the radius. One rect
+ * per row, so a 9-row disc is nine draw commands. */
+static void fb_disc(uint32_t cx, uint32_t cy, uint32_t r, uint16_t color)
+{
+    for (uint32_t i = 0; i <= 2u * r; i++) {
+        uint32_t dy = (i > r) ? (i - r) : (r - i);
+        uint32_t half = 0;
+        while ((half + 1u) * (half + 1u) + dy * dy <= r * r) half++;
+        if (!half) continue;
+        fb_rect(cx - half, cy - r + i, half * 2u + 1u, 1u, color);
     }
 }
 
@@ -4266,10 +4285,13 @@ ui_tail:
     }
     if (done != ui_last_prog) {
         ui_last_prog = done;
-        /* Clear a band taller than the bar first: the knob overhangs it above
-         * and below, so redrawing only the bar would leave the old knob's
-         * overhang behind as two floating stubs. */
-        fb_rect(UI_MARGIN, UI_PROG_Y - 3u, UI_INNER_W, UI_PROG_H + 6u,
+        /* Clear a band larger than the bar in BOTH axes: the knob overhangs it
+         * above and below, and now also to the sides, so redrawing only the
+         * bar would leave the old knob's overhang behind as floating stubs.
+         * The horizontal margin is the knob radius -- at either end of its
+         * travel the disc reaches PROG_KNOB_R past the bar. */
+        fb_rect(UI_MARGIN - PROG_KNOB_R - 1u, UI_PROG_Y - 3u,
+                UI_INNER_W + 2u * (PROG_KNOB_R + 1u), UI_PROG_H + 6u,
                 ui_grad_at(UI_PROG_Y));
         if (done) {
             fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
@@ -4286,12 +4308,43 @@ ui_tail:
         if (UI_INNER_W > done)
             fb_rect(UI_MARGIN + done, UI_PROG_Y, UI_INNER_W - done,
                     UI_PROG_H, UI_TRACK);
-        /* Position knob -- also the visual handle the seek controls move. */
+
+        /* Round the OUTER ends of the whole bar, after both segments are down.
+         * Cutting them here rather than drawing two rounded rects is what
+         * keeps the join invisible: the filled part must meet the unfilled
+         * part square in the middle, and only the two ends of the assembly are
+         * ever a shape. At 5 px tall a radius of 2 is a 2 px bite from the top
+         * and bottom rows and 1 px from the next -- a soft end rather than a
+         * pill, which is all there is room for. */
+        {
+            const uint32_t r = UI_PROG_H / 2u;
+            uint16_t bg = ui_grad_at(UI_PROG_Y);
+            for (uint32_t i = 0; i < r; i++) {
+                uint32_t dy = r - i, inner = 0;
+                while ((inner + 1u) * (inner + 1u) + dy * dy <= r * r) inner++;
+                uint32_t cut = r - inner;
+                if (!cut) continue;
+                fb_rect(UI_MARGIN, UI_PROG_Y + i, cut, 1, bg);
+                fb_rect(UI_MARGIN + UI_INNER_W - cut, UI_PROG_Y + i, cut, 1, bg);
+                fb_rect(UI_MARGIN, UI_PROG_Y + UI_PROG_H - 1u - i, cut, 1, bg);
+                fb_rect(UI_MARGIN + UI_INNER_W - cut,
+                        UI_PROG_Y + UI_PROG_H - 1u - i, cut, 1, bg);
+            }
+        }
+
+        /* Position knob -- also the visual handle the seek controls move.
+         * A disc rather than the 5x11 bar it was: a round handle reads as
+         * something you move, where a bar reads as another piece of the
+         * track. Drawn last so the corner cuts above cannot bite it.
+         *
+         * No clamping any more. The old knob was held 2 px inside each end to
+         * keep it on the bar; the disc is allowed all the way to the ends
+         * because the cleared band was widened to cover its overhang, so it
+         * reaches 0% and 100% honestly instead of stopping just short. */
         {
             uint32_t kx = UI_MARGIN + done;
-            if (kx < UI_MARGIN + 2u) kx = UI_MARGIN + 2u;
-            if (kx > UI_MARGIN + UI_INNER_W - 3u) kx = UI_MARGIN + UI_INNER_W - 3u;
-            fb_rect(kx - 2u, UI_PROG_Y - 3u, 5u, UI_PROG_H + 6u, UI_WHITE);
+            if (kx > UI_MARGIN + UI_INNER_W) kx = UI_MARGIN + UI_INNER_W;
+            fb_disc(kx, UI_PROG_Y + UI_PROG_H / 2u, PROG_KNOB_R, UI_WHITE);
         }
     }
 
