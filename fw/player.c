@@ -5287,10 +5287,103 @@ static int probe_readable(uint32_t off)
 }
 
 
+/* ------------------------------------------------- the same search, in steps
+ *
+ * probe_file_size() below is ~20 blocking reads, measured at 480 ms, and it
+ * runs inside load_track(). That is 480 ms of every load of a file that does
+ * not declare its own length -- which is every FLAC, since only MP3 carries a
+ * Xing header -- and until this it was ALSO paid again on the first seek of a
+ * track, because the load-time answer is wrong for a file opened by name.
+ *
+ * Same binary search, one read per call, driven from the main loop while the
+ * ring is full. The size is not needed immediately: it feeds the progress bar,
+ * the bitrate readout and the seek bracket, none of which matter in the first
+ * second of playback. It is needed CORRECTLY, though, and a probe that runs a
+ * little later is the one that gets the right answer -- a file opened with
+ * 0192 has only just been opened at load, and a random read far into it still
+ * fails, which is how a 30 MB track measured 5 MB.
+ *
+ * Phases: 0 idle, 1 the clamp reference, 2 doubling to bracket the end,
+ * 3 bisecting, 4 done. */
+static uint8_t  szp_phase;
+static uint32_t szp_lo, szp_hi;
+
+static void size_probe_arm(void)
+{
+    szp_phase = 1u;
+    szp_lo = 0; szp_hi = 1u << 22;      /* start at 4 MB, as the blocking one does */
+}
+
+/* How far playback must have got before the search may start.
+ *
+ * This is the whole reason the measurement was wrong before. A file opened by
+ * name with 0192 does not answer a random read far into it straight away, so a
+ * probe at load time stops early and reports a fraction of the true size -- 5
+ * MB of a 30 MB track, measured. Waiting for a quarter of a megabyte to have
+ * been READ is direct evidence the slot is streaming properly, and it is a
+ * better gate than a timer because it is the same thing the probe depends on.
+ * A file smaller than this reaches eof_hit instead, and refill_pump() records
+ * the true end there for free. */
+#define SZP_START_AFTER (256u * 1024u)
+
+/* One step. Returns 1 when a size has just been established. */
+static int size_probe_step(void)
+{
+    if (szp_phase == 1u && file_pos < SZP_START_AFTER && !eof_hit) return 0;
+
+    switch (szp_phase) {
+    case 1:
+        probe_clamps = 0;
+        {
+            volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)(UNCACHED + TAG_OFF);
+            *w = 0xA5A5A5A5u;
+            if (target_read_slot(MP3_SLOT_ID, 60u << 20, TAG_OFF, 512u) &&
+                *w != 0xA5A5A5A5u) {
+                probe_clamp_ref = *w;
+                probe_clamps    = 1;
+            }
+        }
+        if (!probe_readable(0)) { szp_phase = 4u; return 0; }
+        szp_phase = 2u;
+        return 0;
+
+    case 2:
+        if (szp_hi < (1u << 26) && probe_readable(szp_hi)) {
+            szp_lo = szp_hi; szp_hi <<= 1;
+            return 0;
+        }
+        if (szp_hi >= (1u << 26)) { szp_phase = 4u; return 0; }   /* runaway */
+        szp_phase = 3u;
+        return 0;
+
+    case 3:
+        if (szp_hi - szp_lo > 4096u) {
+            uint32_t mid = szp_lo + (szp_hi - szp_lo) / 2u;
+            if (probe_readable(mid)) szp_lo = mid; else szp_hi = mid;
+            return 0;
+        }
+        szp_phase = 4u;
+        /* Only ever grows it. An early probe stops where a read first fails,
+         * so it can fall short of the true end but never run past it, and a
+         * size that came from APF directly is better than any measurement. */
+        if (szp_lo + 4096u > slot_size) {
+            slot_size = szp_lo + 4096u;
+            return 1;
+        }
+        return 0;
+
+    default:
+        return 0;
+    }
+}
+
 /* Measure the file. APF only reports a size with a RELOAD notification, so a
  * track loaded at boot has none -- which is why the progress bar and the
  * end-of-track check need this. Binary-searching the last readable offset
- * needs no notification, no struct layout and no status semantics. */
+ * needs no notification, no struct layout and no status semantics.
+ *
+ * Kept blocking for the one caller that cannot wait: the seek backstop, where
+ * the answer is needed before the seek it was asked for. */
 static uint32_t probe_file_size(void)
 {
     probe_clamps = 0;
@@ -5990,8 +6083,32 @@ static void refill_pump(void)
      * still collected above. */
     if (reload_armed || reload_pending) return;
 
+    /* Playing PAST the measured end proves the measurement was short, which
+     * is exactly what an early probe on a 0192-opened file produces. Measure
+     * again rather than carrying a number the file has already disproved --
+     * the seek bracket, the progress bar and the bitrate all read it. */
+    if (szp_phase == 4u && slot_size && file_pos > slot_size && !eof_hit)
+        size_probe_arm();
+
     /* Ring first, always -- audio starvation beats a late tag update. */
     if (ring_fill - ring_rd >= RING_SIZE / 2u) {
+        /* The ring is at least half ahead, so this pass has an I/O slot going
+         * spare: spend it measuring the file, one 512-byte probe at a time.
+         * This is the "one read per pass while the buffer is full" the size
+         * probe was always meant to use -- it stalls nothing, and it is why
+         * load_track() no longer blocks for 480 ms. */
+        if (szp_phase && szp_phase < 4u && size_probe_step()) {
+            /* The bitrate is derived from the size, so it becomes knowable at
+             * the same instant. The info row is change-detected and will pick
+             * it up; before this point track_kbps is 0 and the row draws
+             * nothing, which is right -- an unknown rate should not be shown
+             * as a wrong one. */
+            if (track_fmt == FMT_FLAC && track_secs &&
+                slot_size > fl_first_frame) {
+                uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
+                track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
+            }
+        }
         return;
     }
     if (eof_hit) return;                    /* nothing past the end to fetch */
@@ -6815,14 +6932,15 @@ static int load_track(void)
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
     if (slot_size <= audio_start)
-        /* Blocking, and DELIBERATELY so, here and only here: this is the
-         * silent part of a load -- the FIFO is flushed and its output has
-         * glided to zero -- so these reads cost gap length, not audio. This
-         * probe was deleted while hunting the transition tic; the tic turned
-         * out to be the FIFO edges and the outgoing-track stutter, fixed where
-         * they actually were. Deleting this only traded away the instant,
-         * accurate total time. It was never the click. */
-        slot_size = probe_file_size();
+        /* ARMED, not run. It used to block here, deliberately, on the argument
+         * that a load is silent anyway so the reads cost gap length rather
+         * than audio. True, but it cost 480 ms of every FLAC load, and worse,
+         * it produced the WRONG answer for a file opened by name -- the slot
+         * has only just been opened and a random read far into it still fails,
+         * so a 30 MB track measured 5 MB and seeking could not work at all.
+         * Running it a second later, spread across the main loop, is both
+         * faster to load and correct. */
+        size_probe_arm();
     /* FLAC's bitrate is only knowable once the file SIZE is -- the stream
      * carries a duration but never a rate, and it is variable anyway, so this
      * is the average over the whole file. It has to be here rather than in the
@@ -7859,7 +7977,17 @@ int main(void)
              * with one that stalls first. */
             if (!seek_size_tried) {
                 seek_size_tried = 1u;
-                uint32_t z = probe_file_size();
+                /* Finish the incremental search rather than starting a second
+                 * one: same reads, none of them repeated. It has usually
+                 * completed during playback long before a seek, in which case
+                 * this costs nothing at all -- which is the point, because
+                 * paying ~480 ms on the first press of every track was the
+                 * "not as smooth as MP3" complaint. */
+                uint32_t guard = 0;
+                while (szp_phase && szp_phase < 4u && ++guard < 64u)
+                    size_probe_step();
+
+                uint32_t z = slot_size ? slot_size : probe_file_size();
                 if (z > slot_size) {
                     slot_size = z;
                     /* The bitrate was derived from the old figure and is on
