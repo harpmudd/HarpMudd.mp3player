@@ -1203,11 +1203,6 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
 #define UI_TIME_Y   288u
 #define UI_PROG_Y   334u
 #define UI_PROG_H   5u
-/* Knob radius. Sized against the CLEARED BAND, which is UI_PROG_H + 6 tall:
- * a disc of 5 spans 9 rows once the empty top and bottom rows are dropped,
- * which fits inside that band exactly. Raising this without widening the band
- * would leave a row of the knob uncleared, and it would smear along the bar. */
-#define PROG_KNOB_R 5u
 #define UI_INNER_W  (FB_W - 2u * UI_MARGIN)
 /* Right edge a painted glyph CELL may not cross on the info card. The card
  * spans UI_MARGIN-8 .. UI_MARGIN-8+UI_INNER_W+16, so this leaves 8px of
@@ -1649,26 +1644,6 @@ static void fb_round_rect_on(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
         fb_rect(x + w - cut, y + i, cut, 1, bg);
         fb_rect(x, y + h - 1u - i, cut, 1, bg);
         fb_rect(x + w - cut, y + h - 1u - i, cut, 1, bg);
-    }
-}
-
-/* Filled circle, by the same integer search fb_round_rect uses: for each row's
- * distance from the centre, the widest span still inside the radius. One rect
- * per row, so an 11-row disc is eleven draw commands.
- *
- * The top and bottom rows are drawn as a SINGLE PIXEL rather than skipped.
- * Skipping them is the obvious reading of "half is zero, there is nothing to
- * draw", and it is wrong: it costs the shape one row at each end while leaving
- * the full width, so a radius-5 disc came out 11 wide and 9 tall. On a 5 px
- * progress bar that squashed knob was reported as looking a pixel low -- it
- * was not off-centre, it was not round. */
-static void fb_disc(uint32_t cx, uint32_t cy, uint32_t r, uint16_t color)
-{
-    for (uint32_t i = 0; i <= 2u * r; i++) {
-        uint32_t dy = (i > r) ? (i - r) : (r - i);
-        uint32_t half = 0;
-        while ((half + 1u) * (half + 1u) + dy * dy <= r * r) half++;
-        fb_rect(cx - half, cy - r + i, half * 2u + 1u, 1u, color);
     }
 }
 
@@ -4291,13 +4266,10 @@ ui_tail:
     }
     if (done != ui_last_prog) {
         ui_last_prog = done;
-        /* Clear a band larger than the bar in BOTH axes: the knob overhangs it
-         * above and below, and now also to the sides, so redrawing only the
-         * bar would leave the old knob's overhang behind as floating stubs.
-         * The horizontal margin is the knob radius -- at either end of its
-         * travel the disc reaches PROG_KNOB_R past the bar. */
-        fb_rect(UI_MARGIN - PROG_KNOB_R - 1u, UI_PROG_Y - 3u,
-                UI_INNER_W + 2u * (PROG_KNOB_R + 1u), UI_PROG_H + 6u,
+        /* Clear a band taller than the bar first: the knob overhangs it above
+         * and below, so redrawing only the bar would leave the old knob's
+         * overhang behind as two floating stubs. */
+        fb_rect(UI_MARGIN, UI_PROG_Y - 3u, UI_INNER_W, UI_PROG_H + 6u,
                 ui_grad_at(UI_PROG_Y));
         if (done) {
             fb_rect(UI_MARGIN, UI_PROG_Y, done, UI_PROG_H, ui_accent);
@@ -4339,18 +4311,18 @@ ui_tail:
         }
 
         /* Position knob -- also the visual handle the seek controls move.
-         * A disc rather than the 5x11 bar it was: a round handle reads as
-         * something you move, where a bar reads as another piece of the
-         * track. Drawn last so the corner cuts above cannot bite it.
          *
-         * No clamping any more. The old knob was held 2 px inside each end to
-         * keep it on the bar; the disc is allowed all the way to the ends
-         * because the cleared band was widened to cover its overhang, so it
-         * reaches 0% and 100% honestly instead of stopping just short. */
+         * A vertical marker, not a disc. A round handle was tried and looked
+         * wrong here: at 5 px of bar it has to overhang so far to read as
+         * round that it stops being a mark on a track and becomes a blob
+         * sitting over one. Taller than it is wide is what makes it read as a
+         * position rather than an object. Drawn last, so the end rounding
+         * above cannot bite it. */
         {
             uint32_t kx = UI_MARGIN + done;
-            if (kx > UI_MARGIN + UI_INNER_W) kx = UI_MARGIN + UI_INNER_W;
-            fb_disc(kx, UI_PROG_Y + UI_PROG_H / 2u, PROG_KNOB_R, UI_WHITE);
+            if (kx < UI_MARGIN + 2u) kx = UI_MARGIN + 2u;
+            if (kx > UI_MARGIN + UI_INNER_W - 3u) kx = UI_MARGIN + UI_INNER_W - 3u;
+            fb_rect(kx - 2u, UI_PROG_Y - 3u, 5u, UI_PROG_H + 6u, UI_WHITE);
         }
     }
 

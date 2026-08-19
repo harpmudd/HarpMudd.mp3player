@@ -15,9 +15,8 @@ What changed in each release, newest first.
   counter; at normal speed nothing is shown.
 - Small visual tidying: the format line shows the full codec (**FLAC 16-bit**
   was appearing as *FLAC 16-*), the selected row in the playlist has rounded
-  corners to match the panel it sits in, and the progress bar has softened
-  ends, a lit top edge and a round position handle that now reaches both ends
-  of the track.
+  corners to match the panel it sits in, and the progress bar has softened ends
+  and a lit top edge.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
 - Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was
