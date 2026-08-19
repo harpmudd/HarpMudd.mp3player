@@ -964,6 +964,7 @@ static uint32_t cur_file_id;           /* 0190 identity of the loaded file   */
 static int      slot_changed(void);    /* defined with the 0190 helpers      */
 static uint32_t tk_poll_at;            /* next track-slot identity check     */
 static uint32_t force_size_probe;      /* R_SLOT_SZ is stale: measure instead */
+static uint8_t  seek_size_tried;       /* backstop size probe already attempted */
 static uint32_t stale_ref_file_id;     /* ...and of the one being left       */
 static uint32_t reload_retries;
 static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
@@ -1072,6 +1073,9 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #endif
 #if UI_SHOW_SEEK_DIAG
 static uint32_t dg_tgt, dg_at, dg_pos, dg_ui, dg_blk, dg_rate;
+/* The load-path fields. Copied rather than read where the rows are drawn:
+ * ui_draw_dynamic() sits above every FLAC declaration in this file. */
+static uint32_t dg_size, dg_dur, dg_first, dg_pts, dg_len, dg_intent;
 static uint32_t dg_num[3];
 static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
 #endif
@@ -4439,12 +4443,15 @@ ui_tail:
      * R read zero, the position arithmetic never had valid inputs -- which
      * would explain both failed fixes at a stroke. */
     {
+        /* Row A is everything a seek DEPENDS ON, so the same file loaded two
+         * ways can be compared field by field. Reported: seeking works after
+         * Load MP3 and not from a .m3u, which means one of these differs. */
         char b[64], *q = b;
-        *q++ = 'T'; q = ui_dec(q, dg_tgt);
-        *q++ = ' '; *q++ = 'A'; q = ui_dec(q, dg_at >> 10);
-        *q++ = ' '; *q++ = 'B'; q = ui_dec(q, dg_blk);
-        *q++ = ' '; *q++ = 'R'; q = ui_dec(q, dg_rate / 100u);
-        *q++ = ' '; *q++ = 'S'; q = ui_dec(q, dg_samp);
+        *q++ = 'Z'; q = ui_dec(q, dg_size >> 10);        /* file size, KB   */
+        *q++ = ' '; *q++ = 'D'; q = ui_dec(q, dg_dur);   /* track_secs      */
+        *q++ = ' '; *q++ = 'F'; q = ui_dec(q, dg_first >> 10);
+        *q++ = ' '; *q++ = 'K'; q = ui_dec(q, dg_pts);   /* seek points     */
+        *q++ = ' '; *q++ = 'L'; q = ui_dec(q, dg_len);   /* STREAMINFO secs */
         *q = 0;
         uint16_t g = ui_grad_at((FB_H - 40u));
         fb_rect(UI_MARGIN, FB_H - 40u, UI_INNER_W, FB_CELL(TS_1X), g);
@@ -4452,11 +4459,11 @@ ui_tail:
         fb_text_clipped(UI_MARGIN, FB_H - 40u, b, TS_1X, TS_1X, UI_INNER_W);
 
         q = b;
-        *q++ = 'N'; q = ui_dec(q, dg_num[0]);
-        *q++ = ','; q = ui_dec(q, dg_num[1]);
-        *q++ = ','; q = ui_dec(q, dg_num[2]);
-        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, dg_pos);
+        *q++ = 'T'; q = ui_dec(q, dg_tgt);               /* asked for       */
+        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, dg_pos);   /* measured landing*/
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, ui_sec);
+        *q++ = ' '; *q++ = 'I'; q = ui_dec(q, dg_intent);
+        *q++ = ' '; *q++ = 'A'; q = ui_dec(q, dg_at >> 10);
         *q++ = ' '; *q++ = 'E'; q = ui_dec(q, dg_fe == 0xFFu ? 99u : dg_fe);
         *q = 0;
         g = ui_grad_at((FB_H - 24u));
@@ -6622,6 +6629,7 @@ static int load_track(void)
      * end-of-track, and an end-of-track that fires early or never. */
     slot_size = force_size_probe ? 0u : REG(R_SLOT_SZ);
     force_size_probe = 0;
+    seek_size_tried  = 0;
 
     uint32_t t0 = cycles(), tphase = t0;
     if (!read_track_head()) { REG(R_STAT2) = 0xE0000000u; return 0; }
@@ -7755,6 +7763,41 @@ int main(void)
          * ABOVE the paused check for that reason; it used to be below it, so
          * the controls did nothing unless audio was running. */
         if (seek_req) {
+            /* A track opened from a PLAYLIST arrives with no size: pl_arm_load()
+             * zeroes slot_size and sets force_size_probe, because the file was
+             * opened by name rather than mounted as a sized slot. Playback
+             * never notices -- it only reads forward, and refill_pump()
+             * records the real end when a read finally comes back short.
+             * Seeking notices immediately: it needs to know where the end IS
+             * before it can aim at a point inside the file.
+             *
+             * This is why the same FLAC seeks correctly after Load MP3 and not
+             * after being played from a .m3u -- reported against Crash Test
+             * Dummies, and true of any file whose size was never mounted.
+             * flac_seek_locate() refuses outright on an unknown size, and
+             * ui_byte_rate() below has the same dependency, so the MP3 path
+             * was degraded by it too.
+             *
+             * ONCE per track, and only as a backstop: load_track() already
+             * probes, so this fires solely when that probe came back empty.
+             * The flag matters -- the probe is ~20 blocking reads, measured at
+             * 480 ms, and repeating it on every press would replace a seek
+             * that does not move with one that stalls for half a second and
+             * then does not move. */
+            if (!slot_size && !seek_size_tried) {
+                seek_size_tried = 1u;
+                slot_size = probe_file_size();
+            }
+#if UI_SHOW_SEEK_DIAG
+            dg_size  = slot_size;
+            dg_dur   = track_secs;
+            dg_first = fl_first_frame;
+            dg_pts   = fl_seek_pts;
+            dg_len   = (fl.rate && fl.total_samples)
+                     ? (uint32_t)(fl.total_samples / (uint64_t)fl.rate) : 0u;
+            dg_intent = fl_seek_intent;
+#endif
+
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
             uint32_t want;
 
@@ -7790,6 +7833,13 @@ int main(void)
                 uint32_t at = flac_seek_locate((uint64_t)tgt * (uint64_t)fl.rate,
                                                &landed);
                 seek_req = 0;
+#if UI_SHOW_SEEK_DIAG
+                /* A REFUSED seek leaves the rows stale and reads as "nothing
+                 * happened", which is the one outcome that must not be
+                 * ambiguous. Record it. */
+                if (!at) { dg_tgt = tgt; dg_at = 0; dg_pos = 0; dg_fe = 98u; }
+                dg_intent = fl_seek_intent;
+#endif
                 if (at && at != file_pos) {
                     file_pos = at;
                     stopped  = 0;
@@ -7806,8 +7856,9 @@ int main(void)
                     dg_blk  = fl.max_blocksize;
                     dg_rate = fl.rate;
                     dg_ui   = ui_sec;
-                    dg_n    = 0;     dg_fe   = 0xFFu;
-                    dg_pos  = 0;     dg_live = 1u;
+                    dg_pos  = fl.rate ? (uint32_t)(landed / (uint64_t)fl.rate)
+                                      : 0u;
+                    dg_n    = 0;     dg_fe   = 0xFFu;  dg_live = 1u;
                     dg_num[0] = dg_num[1] = dg_num[2] = 0;
 #endif
 
