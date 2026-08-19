@@ -4086,6 +4086,29 @@ ui_tail:
         fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_15X), cbg);
         fb_set_color(UI_WHITE, cbg);
         fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_15X, TS_15X, UI_INNER_W);
+
+        /* 1.2x, while it is on. Right-aligned on this row, which puts it
+         * directly under the track counter -- that is drawn right-aligned on
+         * the transport row above, and the elapsed time only reaches about
+         * halfway across, so the space is free.
+         *
+         * Drawn HERE rather than anywhere else because the clear above spans
+         * the full inner width every second; anything painted on this row
+         * outside this block is erased within a second of appearing. A toggle
+         * forces ui_last_sec, so it shows up on the press rather than on the
+         * next tick.
+         *
+         * Accent, not white: it is a state the user chose, and the same colour
+         * every other active mode indicator uses. */
+        if (speed_fast) {
+            const char *sp = "1.2x";
+            uint32_t sw = fb_text_width(sp, TS_1X);
+            uint32_t sx = FB_W - UI_MARGIN - sw;
+            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_15X) > FB_CELL(TS_1X)
+                                     ? (FB_CELL(TS_15X) - FB_CELL(TS_1X)) / 2u : 0u);
+            fb_set_color(ui_accent, cbg);
+            fb_text_clipped(sx, sy, sp, TS_1X, TS_1X, sw + 2u);
+        }
     }
 
     /* Slide the art panel toward its target. Each step is a background repaint
@@ -4883,43 +4906,50 @@ static void poll_input(void)
     /* A plays and pauses. Start only ever STOPS -- pressing it again does
      * nothing, which is what separates it from pause: stop is a state you
      * leave with play, not a toggle. Stopping also returns to 0:00. */
-    /* A: TAP plays/pauses, HOLD toggles 1.2x speed.
+    /* A: TAP plays/pauses. SELECT+A toggles 1.2x speed.
      *
-     * Resolves on RELEASE, the same discipline Left/Right and Select already
-     * use. Firing the tap action on the press instead would mean a long press
-     * pauses AND changes speed -- it is on the way into every hold. Same
-     * PL_HOLD_MS the Left/Right scrub uses, rather than a second threshold to
-     * learn. */
+     * Was a HOLD on A, which had two problems. It shared PL_HOLD_MS with the
+     * Left/Right scrub, so a slow press changed the speed when it meant to
+     * pause; and it made A resolve on RELEASE for everyone, since firing the
+     * tap on the press would mean a long press paused AND changed speed. Select
+     * is already the modifier for volume and for the diagnostics, so this joins
+     * a convention rather than inventing one.
+     *
+     * Still resolves on release. Nothing needs it to any more, but changing WHEN
+     * plain A acts is a change to the feel of the main button and was not what
+     * was asked for; it can move to the press separately if that reads better.
+     *
+     * sel_used stops the Select release from also opening the playlist -- the
+     * same guard every other Select combination uses. */
     {
-        static uint32_t a_t0;
-        static uint8_t  a_fired;      /* the hold action already ran this press */
-        const uint32_t  a_hold_cy = CLK_HZ / 1000u * PL_HOLD_MS;
-
-        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
-
-        if ((keys & KEY_A) && !a_fired &&
-            (int32_t)(cycles() - a_t0) >= (int32_t)a_hold_cy) {
-            a_fired = 1;
-            speed_fast ^= 1u;
-            pcm_rate_apply(track_hz);
-            /* Name the speed. An unlabelled 1.2x just sounds like a bad rip,
-             * and the only other clue is the elapsed clock running fast. */
-            ui_toast_msg(speed_fast ? "SPEED 1.2x" : "SPEED NORMAL");
-        }
-
-        if ((fall & KEY_A) && !a_fired) {
-            /* Select+A shows the boot datatable snapshot, mirroring Select+B
-             * for the 0190 struct. Plain A still plays/pauses. */
-#if DEBUG_DIAG
-            if (keys & KEY_SELECT) { sel_used = 1; dt_dump_req = 1u; }
+        if (fall & KEY_A) {
+            if (keys & KEY_SELECT) {
+                sel_used = 1;
+                speed_fast ^= 1u;
+                pcm_rate_apply(track_hz);
+                /* Name the speed. An unlabelled 1.2x just sounds like a bad
+                 * rip, and the only other clue is the elapsed clock running
+                 * fast. The indicator below makes it permanent; the toast still
+                 * confirms the press. */
+                ui_toast_msg(speed_fast ? "SPEED 1.2x" : "SPEED NORMAL");
+                /* Repaint the indicator now rather than on the next second
+                 * tick: it is drawn with the elapsed time, which only redraws
+                 * when the seconds change. */
+                ui_last_sec = 0xFFFFFFFFu;
+            }
             else
-#endif
             {
                 paused ^= 1u;
                 if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
             }
         }
     }
+#if DEBUG_DIAG
+    /* Select+X shows the boot datatable snapshot, mirroring Select+B for the
+     * 0190 struct. It was Select+A until 1.2x speed moved there. */
+    if ((edge & KEY_X) && (keys & KEY_SELECT)) { sel_used = 1; dt_dump_req = 1u; }
+    else
+#endif
     if (edge & KEY_X) {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
          * modes wrap in a handful of taps, and every Select combo the user has to
