@@ -4196,7 +4196,15 @@ ui_tail:
          * repeated, which it was when this had its own view. */
         if (track_encoder[0]) {
             *q++ = ' '; *q++ = '-'; *q++ = ' ';
-            for (const char *t = track_encoder; *t && q - b < 30; ) *q++ = *t++;
+            /* Bound by the BUFFER, not by a number that happened to work.
+             * This was `q - b < 30`, and the prefix "430 kbps - 44.1 kHz - "
+             * is 22 characters, so the codec field got exactly 8 -- which is
+             * the length of "LAME3.99", so MP3 fit by luck and nothing ever
+             * looked wrong. FLAC writes "FLAC 16-bit" and it showed as
+             * "FLAC 16-" on every lossless track. b is char[40] and the whole
+             * line is 34, so the space was always there. */
+            for (const char *t = track_encoder;
+                 *t && q < b + sizeof(b) - 1u; ) *q++ = *t++;
         }
         *q = 0;
         fb_set_color(UI_FAINT, UI_PANEL);
