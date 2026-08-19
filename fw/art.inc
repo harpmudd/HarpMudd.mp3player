@@ -327,11 +327,23 @@ static int art_find_flac_picture(void)
  * is 1200x1200 and already takes picojpeg's 1/8 path, so a smaller panel would
  * save nothing. Not decoding it is the only thing that helps.
  *
- * Length plus a hash of the first kilobyte. The finders have just read that
- * kilobyte to parse the MIME type and description, so this is very nearly free
- * -- and two different covers agreeing on both their length and their first
- * kilobyte is not a case worth carrying code for. Returns 0 when there is no
- * image, which never matches a cached signature. */
+ * Length, the HEAD of the image and the TAIL of it.
+ *
+ * The head alone is not enough, and the reason is worth stating because it is
+ * the one way this could show the WRONG cover rather than merely miss. The
+ * first kilobyte of a JPEG is nearly all encoder boilerplate -- SOI, the JFIF
+ * header, the quantisation tables, the Huffman tables. Two different covers
+ * exported by the same tool at the same size and quality have IDENTICAL first
+ * kilobytes, and then only the length separates them. Two unrelated photographs
+ * compressing to exactly the same byte count is unlikely but it is the kind of
+ * unlikely that eventually happens to somebody, and the failure is silent: the
+ * previous album's cover, sitting next to the right title.
+ *
+ * The last 512 bytes are entropy-coded image data, which differs between any
+ * two pictures. Sampling both ends costs one extra small read against a 2801 ms
+ * decode.
+ *
+ * Returns 0 when there is no image, which never matches a cached signature. */
 static uint32_t art_sig_of(uint32_t tag_len)
 {
     int found = (track_fmt == FMT_FLAC)
@@ -340,11 +352,19 @@ static uint32_t art_sig_of(uint32_t tag_len)
     if (!found || art_jpg_end <= art_jpg_pos) return 0;
 
     uint32_t len = art_jpg_end - art_jpg_pos;
-    uint32_t win = len < 1024u ? len : 1024u;
-    if (!target_read_slot(MP3_SLOT_ID, art_jpg_pos, TAG_OFF, win)) return 0;
+    uint32_t h   = 2166136261u;
 
-    uint32_t h = 2166136261u;
+    uint32_t win = len < 512u ? len : 512u;
+    if (!target_read_slot(MP3_SLOT_ID, art_jpg_pos, TAG_OFF, win)) return 0;
     for (uint32_t i = 0; i < win; i++) { h ^= tagbuf[i]; h *= 16777619u; }
+
+    if (len > win) {
+        uint32_t tail = (len - win) < 512u ? (len - win) : 512u;
+        if (!target_read_slot(MP3_SLOT_ID, art_jpg_end - tail, TAG_OFF, tail))
+            return 0;
+        for (uint32_t i = 0; i < tail; i++) { h ^= tagbuf[i]; h *= 16777619u; }
+    }
+
     h ^= len; h *= 16777619u;
     return h ? h : 1u;
 }
