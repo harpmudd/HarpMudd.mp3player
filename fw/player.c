@@ -784,13 +784,15 @@ static uint32_t stop_req;
  * It used to share PL_HOLD_MS with the scrub and the art panel, and 400 ms is
  * short enough to reach by lingering on the play button -- users were ending up
  * in 1.2x without knowing they had done anything, with only the music sounding
- * fast to tell them. Three times the length makes it a gesture rather than a
- * slip, and the on-screen indicator covers the case where it happens anyway.
+ * fast to tell them. Two and a half times the length makes it a gesture rather
+ * than a slip, and the on-screen indicator covers the case where it happens
+ * anyway. Started at 1200 ms and came down to 1000 on the only authority that
+ * counts for a hold, which is a thumb.
  *
  * A modifier was tried instead and does not work here: holding Select is
  * already the album-art panel, so Select+A fights a binding that fires at the
  * same threshold. */
-#define SPEED_HOLD_MS 1200u              /* A held this long = 1.2x toggle    */
+#define SPEED_HOLD_MS 1000u              /* A held this long = 1.2x toggle    */
 
 /* Defined in playlist.inc / settings.inc, called from the input handler that
  * sits above both includes. */
