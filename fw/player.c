@@ -1654,14 +1654,20 @@ static void fb_round_rect_on(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 
 /* Filled circle, by the same integer search fb_round_rect uses: for each row's
  * distance from the centre, the widest span still inside the radius. One rect
- * per row, so a 9-row disc is nine draw commands. */
+ * per row, so an 11-row disc is eleven draw commands.
+ *
+ * The top and bottom rows are drawn as a SINGLE PIXEL rather than skipped.
+ * Skipping them is the obvious reading of "half is zero, there is nothing to
+ * draw", and it is wrong: it costs the shape one row at each end while leaving
+ * the full width, so a radius-5 disc came out 11 wide and 9 tall. On a 5 px
+ * progress bar that squashed knob was reported as looking a pixel low -- it
+ * was not off-centre, it was not round. */
 static void fb_disc(uint32_t cx, uint32_t cy, uint32_t r, uint16_t color)
 {
     for (uint32_t i = 0; i <= 2u * r; i++) {
         uint32_t dy = (i > r) ? (i - r) : (r - i);
         uint32_t half = 0;
         while ((half + 1u) * (half + 1u) + dy * dy <= r * r) half++;
-        if (!half) continue;
         fb_rect(cx - half, cy - r + i, half * 2u + 1u, 1u, color);
     }
 }
