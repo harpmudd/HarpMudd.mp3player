@@ -1581,11 +1581,27 @@ static uint32_t spec_n;                   /* samples in the window           */
 static unsigned char spec_lvl[SPEC_BANDS];    /* published, 0..255           */
 static unsigned char spec_drawn[SPEC_BANDS];  /* last drawn; 0xFF = repaint  */
 
-/* Per-band gain, Q4, low band first. Music is bass-heavy and an untilted
- * display is a wall on the left and nothing on the right; every analyser
- * applies a tilt. Set by eye and fully expected to want adjusting. */
-static const unsigned char spec_gain[SPEC_BANDS] =
-    { 6u, 8u, 11u, 14u, 18u, 24u, 30u, 36u };
+/* Per-band gain, Q4, low band first.
+ *
+ * MEASURED, not chosen. The first table was set by eye and every value was
+ * roughly twenty times too small -- band means come out at 250..1950 in sample
+ * units, which those gains turned into a `v` of 4..13 out of 255, so the meter
+ * lit its bottom row and nothing else.
+ *
+ * tools/host/spectrum_harness.c runs this exact cascade over real music
+ * decoded by the real fw/flac.c and reports each band's mean magnitude. Two
+ * tracks, averaged, with each band's gain set to put that average around 150
+ * of 255 -- roughly seven of twelve rows, high enough to see and with room to
+ * move in both directions:
+ *
+ *     band        0    1    2    3    4    5    6    7
+ *     mean      412  644  937 1272 1571 1684 1398  894
+ *
+ * uint16_t, not unsigned char: the top band needs 749 and the old type
+ * silently caps at 255, which would have quietly flattened the treble end
+ * while looking like a working table. */
+static const uint16_t spec_gain[SPEC_BANDS] =
+    { 345u, 221u, 183u, 196u, 242u, 329u, 479u, 749u };
 
 /* The ladder's own palette, RGB565. Green low, amber through the middle, red
  * at the top -- fixed rather than accent-derived, because on this meter the
