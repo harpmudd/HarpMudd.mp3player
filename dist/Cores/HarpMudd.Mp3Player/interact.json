@@ -71,7 +71,7 @@
                 "graphical": {
                     "signed": false,
                     "min": 0,
-                    "max": 9,
+                    "max": 10,
                     "adjust_small": 1,
                     "adjust_large": 1
                 }

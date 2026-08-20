@@ -1238,7 +1238,15 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * every user's saved meter at a different one. Same rule as the interact.json
  * ids. New modes go immediately before VIZ_COUNT. */
 enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
-       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_EYE, VIZ_COUNT };
+       VIZ_SCROLL, VIZ_MIRROR, VIZ_DOTS, VIZ_EYE,
+       /* APPENDED, and it must stay that way: viz_mode persists as an INDEX,
+        * so inserting a meter anywhere but the end silently repoints every
+        * saved preference at a different one. Adding this also required the
+        * Meter slider's max in interact.json to go from 9 to 10 -- without
+        * that the setting stops persisting and the firmware looks correct
+        * throughout while doing it. */
+       VIZ_LED,
+       VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
  * the vertical -- the standard goniometer orientation, and the reason it reads
@@ -1482,6 +1490,33 @@ static uint8_t     scope_head;   /* newest frame */
 static uint8_t  viz_mode;
 static uint32_t peak_l, peak_r;          /* per-channel, for LEVELS */
 static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
+
+/* ---- LED LADDER -------------------------------------------------------
+ * Two channels, nine rows, three blocks across each row.
+ *
+ * The row count is vertical so it does not change with the panel, but the
+ * WIDTH does -- 360 px with the art hidden, 252 with it showing. One block per
+ * row would be 25:1 hidden, a stack of thin lines rather than LEDs; splitting
+ * each row three ways gives 7.9:1 and 5.3:1, so it reads as the same
+ * instrument either way. True square LEDs across a 176 px column would need
+ * roughly 340 rects a frame, which is not worth it on the audio budget; this
+ * costs 54.
+ *
+ * Nine rows also divides the 72 px band exactly at 7 px plus a 1 px gap, and
+ * gives 11% steps -- with the 3/4 meter headroom, real music sits at 4..7 of
+ * 9 and never pegs. */
+#define LED_ROWS 9u
+#define LED_GAPV 1u
+#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 7 px */
+#define LED_NB   3u
+#define LED_GAPX 4u
+#define LED_MID  10u                                   /* between L and R */
+
+static unsigned char led_l, led_r, led_pl, led_pr;     /* 0..255 */
+/* Last drawn, so a still passage costs nothing. 0xFF is the sentinel every
+ * other meter here uses for "the chrome repainted underneath you". */
+static unsigned char led_dl = 0xFFu, led_dr = 0xFFu,
+                     led_dpl = 0xFFu, led_dpr = 0xFFu;
 
 static unsigned char wave[UI_WAVE_N], wave_drawn[UI_WAVE_N];
 static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
@@ -1962,7 +1997,8 @@ static void ui_wave_clear(void)
 
     for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
-    for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu; }
+    for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            led_dl = led_dr = led_dpl = led_dpr = 0xFFu; }
 }
 
 /* Transport glyphs drawn as shapes, not characters: the font atlas is ASCII
@@ -3458,6 +3494,67 @@ static void ui_draw_dynamic(void)
         /* ---- MIRRORED BARS ------------------------------------------------
          * The same wave[] history the bars use, grown up AND down from a
          * centre line. Same cost as the bars; different shape entirely. */
+        /* ---- LED LADDER ---------------------------------------------- */
+        if (viz_mode == VIZ_LED) {
+            uint32_t vl = (peak_l * 255u) / 32768u; if (vl > 255u) vl = 255u;
+            uint32_t vr = (peak_r * 255u) / 32768u; if (vr > 255u) vr = 255u;
+            if (paused) { vl = 0; vr = 0; }
+            led_l = (unsigned char)vl;
+            led_r = (unsigned char)vr;
+            /* Caps rise instantly and sink one step per update -- the same
+             * rule and the same rate the L/R levels use, so the two read as
+             * the same instrument. (A proportional fall was written once and
+             * reverted along with the mean-driven meters; matching what
+             * actually ships matters more than matching what was tried.) */
+            if (led_l > led_pl) led_pl = led_l; else if (led_pl) led_pl--;
+            if (led_r > led_pr) led_pr = led_r; else if (led_pr) led_pr--;
+
+            if (led_l != led_dl || led_r != led_dr ||
+                led_pl != led_dpl || led_pr != led_dpr) {
+
+                /* The gaps between blocks show the background, and the
+                 * background is a per-row ramp -- painting the box with one
+                 * flat colour is the mistake the magic eye made. ui_bg_restore
+                 * copies the real ramp row for row. Only on a full repaint:
+                 * the gaps never move, so once they are right they stay right.
+                 */
+                int repaint = (led_dl == 0xFFu);
+                if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+
+                led_dl = led_l; led_dr = led_r;
+                led_dpl = led_pl; led_dpr = led_pr;
+
+                uint32_t col = (ww > LED_MID) ? (ww - LED_MID) / 2u : 1u;
+                uint32_t bw  = (col > LED_GAPX * (LED_NB - 1u))
+                             ? (col - LED_GAPX * (LED_NB - 1u)) / LED_NB : 1u;
+                uint32_t pitch = LED_BLKH + LED_GAPV;
+
+                for (uint32_t chn = 0; chn < 2u; chn++) {
+                    uint32_t lvl = chn ? led_r : led_l;
+                    uint32_t cap = chn ? led_pr : led_pl;
+                    uint32_t lit = (lvl * LED_ROWS) / 256u;
+                    uint32_t crow = (cap * LED_ROWS) / 256u;
+                    uint32_t x0 = chn ? (UI_MARGIN + col + LED_MID) : UI_MARGIN;
+
+                    for (uint32_t r = 0; r < LED_ROWS; r++) {
+                        uint32_t y = UI_WAVE_Y + UI_WAVE_H
+                                   - (r + 1u) * pitch;
+                        /* Brighter toward the top, so a loud passage reads as
+                         * hotter and not merely taller -- the same treatment
+                         * the waterfall gives its columns. */
+                        uint16_t c;
+                        if (crow && r == crow - 1u && r >= lit) c = UI_WHITE;
+                        else if (r < lit) c = ui_mix(ui_accent, UI_WHITE,
+                                                     r, LED_ROWS * 2u);
+                        else               c = UI_TRACK;
+                        for (uint32_t b = 0; b < LED_NB; b++)
+                            fb_rect(x0 + b * (bw + LED_GAPX), y,
+                                    bw, LED_BLKH, c);
+                    }
+                }
+            }
+        }
+
         if (viz_mode == VIZ_MIRROR) {
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
             const uint32_t half = UI_WAVE_H / 2u - 1u;
@@ -4270,6 +4367,7 @@ ui_tail:
             if (dirty)
                 for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                     wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
                 }
             ui_art_draw();
         }
@@ -5154,6 +5252,7 @@ static void poll_input(void)
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
         }
         if (art_ready && art_shown) ui_art_draw();
         ui_toast_msg(viz_mode == VIZ_BARS   ? "METER: BARS"
@@ -5165,7 +5264,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_SCROLL ? "METER: WAVEFORM"
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
-                                            : "METER: MAGIC EYE");
+                   : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
+                                            : "METER: LED LADDER");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
@@ -8603,6 +8703,7 @@ int main(void)
             ui_wave_force = 1u;
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
             }
             ui_mode_dirty = 1u;
             ui_last_info  = 0xFFFFFFFFu;
@@ -8635,6 +8736,7 @@ int main(void)
                     ui_wave_force = 1;
                     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                         wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
                     }
                 }
                 ui_was_paused = 1;
@@ -8648,6 +8750,7 @@ int main(void)
             ui_wave_force = 1;              /* recolour back to full on resume */
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
+            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
             }
             /* The FIFO drained during the pause and its output has glided to
              * zero, so the resume must ramp up from zero like any other
