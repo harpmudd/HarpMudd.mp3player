@@ -1505,11 +1505,11 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
  * Nine rows also divides the 72 px band exactly at 7 px plus a 1 px gap, and
  * gives 11% steps -- with the 3/4 meter headroom, real music sits at 4..7 of
  * 9 and never pegs. */
-#define LED_ROWS 8u
+#define LED_ROWS 12u
 #define LED_GAPV 1u
-#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 8 px */
-#define LED_NB   3u
-#define LED_GAPX 4u
+#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 5 px */
+#define LED_NB   6u                                    /* blocks per channel */
+#define LED_GAPX 3u
 #define LED_MID  10u                                   /* between L and R */
 
 /* The ladder's own palette, RGB565. Green low, amber through the middle, red
@@ -1519,11 +1519,10 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
 #define LED_MIDC 0xFE60u      /* amber  */
 #define LED_HI   0xF9C0u      /* red    */
 
-static unsigned char led_l, led_r, led_pl, led_pr;     /* 0..255 */
+static unsigned char led_l, led_r;                     /* 0..255, smoothed */
 /* Last drawn, so a still passage costs nothing. 0xFF is the sentinel every
  * other meter here uses for "the chrome repainted underneath you". */
-static unsigned char led_dl = 0xFFu, led_dr = 0xFFu,
-                     led_dpl = 0xFFu, led_dpr = 0xFFu;
+static unsigned char led_dl = 0xFFu, led_dr = 0xFFu;
 
 static unsigned char wave[UI_WAVE_N], wave_drawn[UI_WAVE_N];
 static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
@@ -2005,7 +2004,7 @@ static void ui_wave_clear(void)
     for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = led_dpl = led_dpr = 0xFFu; }
+            led_dl = led_dr = 0xFFu; }
 }
 
 /* Transport glyphs drawn as shapes, not characters: the font atlas is ASCII
@@ -3506,18 +3505,23 @@ static void ui_draw_dynamic(void)
             uint32_t vl = (peak_l * 255u) / 32768u; if (vl > 255u) vl = 255u;
             uint32_t vr = (peak_r * 255u) / 32768u; if (vr > 255u) vr = 255u;
             if (paused) { vl = 0; vr = 0; }
-            led_l = (unsigned char)vl;
-            led_r = (unsigned char)vr;
-            /* Caps rise instantly and sink one step per update -- the same
-             * rule and the same rate the L/R levels use, so the two read as
-             * the same instrument. (A proportional fall was written once and
-             * reverted along with the mean-driven meters; matching what
-             * actually ships matters more than matching what was tried.) */
-            if (led_l > led_pl) led_pl = led_l; else if (led_pl) led_pl--;
-            if (led_r > led_pr) led_pr = led_r; else if (led_pr) led_pr--;
 
-            if (led_l != led_dl || led_r != led_dr ||
-                led_pl != led_dpl || led_pr != led_dpr) {
+            /* BALLISTICS. Every other level meter here shows the raw value,
+             * which on a 12-row ladder flickers: the peak of a 26 ms window
+             * jumps by two or three rows between updates and the column looks
+             * noisy rather than alive.
+             *
+             * Instant attack, proportional release -- catch every transient,
+             * then fall back smoothly. The release is a quarter of the
+             * remaining distance per update plus one, so it is quick from
+             * high up and settles gently, and the +1 guarantees it reaches
+             * the target instead of creeping at it forever. */
+            if (vl >= led_l) led_l = (unsigned char)vl;
+            else led_l -= (unsigned char)((led_l - vl) / 4u + 1u);
+            if (vr >= led_r) led_r = (unsigned char)vr;
+            else led_r -= (unsigned char)((led_r - vr) / 4u + 1u);
+
+            if (led_l != led_dl || led_r != led_dr) {
 
                 /* The gaps between blocks show the background, and the
                  * background is a per-row ramp -- painting the box with one
@@ -3529,7 +3533,6 @@ static void ui_draw_dynamic(void)
                 if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
 
                 led_dl = led_l; led_dr = led_r;
-                led_dpl = led_pl; led_dpr = led_pr;
 
                 uint32_t col = (ww > LED_MID) ? (ww - LED_MID) / 2u : 1u;
                 uint32_t bw  = (col > LED_GAPX * (LED_NB - 1u))
@@ -3538,9 +3541,7 @@ static void ui_draw_dynamic(void)
 
                 for (uint32_t chn = 0; chn < 2u; chn++) {
                     uint32_t lvl = chn ? led_r : led_l;
-                    uint32_t cap = chn ? led_pr : led_pl;
                     uint32_t lit = (lvl * LED_ROWS) / 256u;
-                    uint32_t crow = (cap * LED_ROWS) / 256u;
                     uint32_t x0 = chn ? (UI_MARGIN + col + LED_MID) : UI_MARGIN;
 
                     for (uint32_t r = 0; r < LED_ROWS; r++) {
@@ -3556,9 +3557,7 @@ static void ui_draw_dynamic(void)
                          * Fixed hues rather than the accent: this is the one
                          * meter whose colour carries meaning. */
                         uint16_t c;
-                        if (crow && r == crow - 1u && r >= lit) {
-                            c = UI_WHITE;
-                        } else if (r < lit) {
+                        if (r < lit) {
                             uint32_t half = LED_ROWS / 2u;
                             c = (r < half)
                               ? ui_mix(LED_LO, LED_MIDC, r, half)
@@ -4394,7 +4393,7 @@ ui_tail:
             if (dirty)
                 for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                     wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
+            led_dl = led_dr = 0xFFu;
                 }
             ui_art_draw();
         }
@@ -5279,7 +5278,7 @@ static void poll_input(void)
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
+            led_dl = led_dr = 0xFFu;
         }
         if (art_ready && art_shown) ui_art_draw();
         ui_toast_msg(viz_mode == VIZ_BARS   ? "METER: BARS"
@@ -8730,7 +8729,7 @@ int main(void)
             ui_wave_force = 1u;
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
+            led_dl = led_dr = 0xFFu;
             }
             ui_mode_dirty = 1u;
             ui_last_info  = 0xFFFFFFFFu;
@@ -8763,7 +8762,7 @@ int main(void)
                     ui_wave_force = 1;
                     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                         wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
+            led_dl = led_dr = 0xFFu;
                     }
                 }
                 ui_was_paused = 1;
@@ -8777,7 +8776,7 @@ int main(void)
             ui_wave_force = 1;              /* recolour back to full on resume */
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = led_dpl = led_dpr = 0xFFu;
+            led_dl = led_dr = 0xFFu;
             }
             /* The FIFO drained during the pause and its output has glided to
              * zero, so the resume must ramp up from zero like any other
