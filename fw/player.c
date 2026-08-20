@@ -6290,6 +6290,7 @@ static uint32_t fl_cap;            /* max_blocksize, kept across reopens */
 static uint32_t fl_seek_intent;
 
 static uint32_t fl_seek_off;      /* absolute offset of the SEEKTABLE body  */
+
 static uint32_t fl_seek_pts;      /* 18-byte points; 0 = no table           */
 static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
 
@@ -6622,6 +6623,26 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
  * Safe because a read only ever writes ABOVE ring_fill while the decoder only
  * reads BELOW it. Compaction, which does move the decodable region, is gated
  * on no read being in flight. */
+/* Step the incremental search, and pick up what becomes knowable when it
+ * finishes. Returns 1 on the step that completed it.
+ *
+ * The bitrate is derived from the size, so it arrives at the same instant --
+ * and that is the FLAC format row, which stayed blank because track_kbps is
+ * computed once at load and slot_size is no longer known by then. Anything
+ * else that waits on the size belongs here too rather than in another copy of
+ * this. */
+static int size_probe_pump(void)
+{
+    if (!szp_phase || szp_phase >= 4u) return 0;
+    if (!size_probe_step()) return 0;
+
+    if (track_fmt == FMT_FLAC && track_secs && slot_size > fl_first_frame) {
+        uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
+        track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
+    }
+    return 1;
+}
+
 static void refill_pump(void)
 {
     if (rd_pending) {
@@ -6684,18 +6705,7 @@ static void refill_pump(void)
          * This is the "one read per pass while the buffer is full" the size
          * probe was always meant to use -- it stalls nothing, and it is why
          * load_track() no longer blocks for 480 ms. */
-        if (szp_phase && szp_phase < 4u && size_probe_step()) {
-            /* The bitrate is derived from the size, so it becomes knowable at
-             * the same instant. The info row is change-detected and will pick
-             * it up; before this point track_kbps is 0 and the row draws
-             * nothing, which is right -- an unknown rate should not be shown
-             * as a wrong one. */
-            if (track_fmt == FMT_FLAC && track_secs &&
-                slot_size > fl_first_frame) {
-                uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
-                track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
-            }
-        }
+        size_probe_pump();
         return;
     }
     if (eof_hit) return;                    /* nothing past the end to fetch */
@@ -8435,6 +8445,23 @@ int main(void)
         /* Only when nothing is loading: a write is an SD round trip, and the
          * quiet window means it never lands in the middle of a track change. */
         if (!reload_armed && !reload_pending) settings_pump();
+
+        /* Drive the size search from HERE as well, one step a pass.
+         *
+         * It was driven only from refill_pump()'s "ring at least half full"
+         * branch, which on a dense FLAC comes round about once a second -- so
+         * a sixteen-step search took sixteen seconds, and often never finished
+         * at all. Two things had already broken on that: resume gave up
+         * waiting for slot_size, and the FLAC format row stayed blank because
+         * track_kbps is derived from it. Both were treated as their own bugs;
+         * they were one.
+         *
+         * A step is a single 512-byte read and there are about sixteen of
+         * them, so from here the whole thing is over in a fraction of a
+         * second. Nothing new is asked of the card -- the same reads, sooner.
+         * The gate inside still holds it off until 256 KB has been read, which
+         * is what stops it measuring a file the slot has not settled into. */
+        if (!reload_armed && !reload_pending) size_probe_pump();
 
 
         if (art_toggle) {
