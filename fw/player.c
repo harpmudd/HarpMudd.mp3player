@@ -1647,6 +1647,31 @@ static void fb_round_rect_on(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
     }
 }
 
+/* A one-pixel bevel on the title card: lit along the top edge, darkened along
+ * the bottom. Makes the card read as raised rather than as a shape cut out of
+ * the background.
+ *
+ * A drop SHADOW under the card was tried first and abandoned before it shipped,
+ * because the arithmetic said it would be invisible. The background where it
+ * would fall is already almost black -- rgb(16,20,16) at that row on the
+ * default palette -- so darkening it 25% moves it to rgb(8,12,8), and the two
+ * rows of the taper even round to the SAME colour. A shadow needs a surface
+ * lighter than itself to fall on, and there is not one here.
+ *
+ * The card itself is rgb(32,36,32), which has somewhere to go in both
+ * directions: a quarter toward white is rgb(82,89,82), an obvious step.
+ *
+ * Inset by the corner radius, because that is exactly how much fb_round_rect
+ * cuts from the first and last rows -- drawing the full width would put the
+ * bevel out past the rounded corners as two ears. */
+static void ui_card_bevel(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                          uint32_t r)
+{
+    if (w <= 2u * r || h < 2u) return;
+    fb_rect(x + r, y, w - 2u * r, 1u, ui_mix(UI_PANEL, UI_WHITE, 1u, 4u));
+    fb_rect(x + r, y + h - 1u, w - 2u * r, 1u, ui_mix(UI_PANEL, 0x0000u, 1u, 4u));
+}
+
 /* The waveform gives up its right-hand end to the art panel, which occupies
  * the same rows. */
 static uint32_t ui_wave_w(void)
@@ -2139,6 +2164,8 @@ static void ui_draw_chrome(void)
      * in a little rectangle of the wrong shade. */
     fb_round_rect(UI_MARGIN - 8u, UI_TITLE_Y - 14u,
                   ui_text_w + 16u, UI_CARD_H, 8u, UI_PANEL);
+    ui_card_bevel(UI_MARGIN - 8u, UI_TITLE_Y - 14u, ui_text_w + 16u,
+                  UI_CARD_H, 8u);
 
     /* Keep each line's text + scale so its marquee can repaint that row. */
     /* Capped at 2x rather than 3x: with album and format lines below it, a 48px
@@ -2341,6 +2368,8 @@ static void ui_splash_bg(void)
      * splash has no art panel to make room for. */
     fb_round_rect(UI_MARGIN - 8u, UI_TITLE_Y - 14u,
                   UI_INNER_W + 16u, UI_CARD_H, 8u, UI_PANEL);
+    ui_card_bevel(UI_MARGIN - 8u, UI_TITLE_Y - 14u, UI_INNER_W + 16u,
+                  UI_CARD_H, 8u);
 
     fb_set_color(UI_DIM, UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_SPL_VER_Y, "v" APP_VER, TS_1X, TS_1X,
