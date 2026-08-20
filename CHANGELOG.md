@@ -17,6 +17,9 @@ What changed in each release, newest first.
   was appearing as *FLAC 16-*), the selected row in the playlist has rounded
   corners to match the panel it sits in, and the progress bar has softened ends
   and a lit top edge.
+- **A speaker icon shows the volume**, beside the repeat and shuffle icons —
+  muted, low, medium or high. The level used to appear only as a message that
+  had gone by the time you wondered why the music was quiet.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
 - Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was

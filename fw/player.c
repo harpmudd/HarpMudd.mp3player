@@ -2005,6 +2005,48 @@ static void ui_icon_shuffle(uint32_t x, uint32_t y, uint16_t c)
     fb_rect(x + UI_MODE_W - 1u, y + UI_MODE_H-3, 1u, 3u, c);
 }
 
+/* Speaker, with 0..3 waves. The volume is a MODE like repeat and shuffle --
+ * it persists, it changes what you hear, and until now the only sign of it was
+ * a toast that had already gone by the time you wondered why the music was
+ * quiet. Same 11x9 box and same 1 px construction as its neighbours.
+ *
+ * Drawn rather than typed because the font is ASCII 0x20..0x7E and has no
+ * speaker in it.
+ *
+ * The waves are arcs, not bars: the tall ones have their ends pulled back a
+ * pixel so they curve. The first is left straight -- it is three pixels tall,
+ * where a curve is indistinguishable from a wobble, and pulling its end back
+ * would put it against the cone and read as attached to it.
+ *
+ * Mute is an X rather than a slash across the whole icon. A slash would cross
+ * the cone, and at this size that turns two recognisable shapes into one
+ * unrecognisable one. */
+static void ui_icon_speaker(uint32_t x, uint32_t y, uint32_t lvl, uint16_t c)
+{
+    fb_rect(x, y + 3u, 2u, 3u, c);                   /* the box */
+    for (uint32_t i = 0; i < 3u; i++)                /* the cone, opening out */
+        fb_rect(x + 2u + i, y + 2u - i, 1u, 5u + 2u * i, c);
+
+    if (!lvl) {
+        for (uint32_t i = 0; i < 5u; i++) {
+            fb_rect(x + 6u + i,  y + 2u + i, 1u, 1u, c);
+            fb_rect(x + 10u - i, y + 2u + i, 1u, 1u, c);
+        }
+        return;
+    }
+    for (uint32_t k = 0; k < lvl && k < 3u; k++) {
+        uint32_t wx = x + 6u + 2u * k;
+        uint32_t top = y + 3u - k, h = 3u + 2u * k;
+        if (!k) {
+            fb_rect(wx, top, 1u, h, c);
+        } else {
+            fb_rect(wx, top + 1u, 1u, h - 2u, c);
+            fb_rect(wx - 1u, top, 1u, 1u, c);
+            fb_rect(wx - 1u, top + h - 1u, 1u, 1u, c);
+        }
+    }
+}
+
 /* Stop: a filled square, the universal counterpart to the pause bars. */
 static void ui_icon_stop(uint32_t x, uint32_t y, uint16_t c)
 {
@@ -4458,7 +4500,7 @@ ui_tail:
             /* Cleared to the WIDEST name, not the current one: CLASSICAL is
              * 101 px and POP is 35, so a narrower clear would leave the tail of
              * the previous preset on screen. */
-            fb_rect(mx, iy, (UI_MODE_W + 10u) * 2u + 106u, UI_ICONBOX_H, tbg);
+            fb_rect(mx, iy, (UI_MODE_W + 10u) * 3u + 106u, UI_ICONBOX_H, tbg);
             /* Inactive modes stay visible but recede, so the controls advertise
              * themselves instead of only appearing once found. */
             ui_icon_repeat(mx, my,
@@ -4473,8 +4515,19 @@ ui_tail:
              * back can see the state without pressing anything. Dimmed on FLAT,
              * the same "off but still visible" treatment the repeat and shuffle
              * icons use. */
+            /* Volume, as a level rather than a number. Faint at mute, the
+             * same "off but still visible" treatment repeat and shuffle use
+             * when they are off. */
+            {
+                uint32_t vl = (volume == 0u)   ? 0u
+                            : (volume <= 33u)  ? 1u
+                            : (volume <= 66u)  ? 2u : 3u;
+                ui_icon_speaker(mx + (UI_MODE_W + 10u) * 2u, my, vl,
+                                vl ? ui_accent : UI_FAINT);
+            }
+
             fb_set_color(eq_idx ? ui_accent : UI_FAINT, tbg);
-            fb_text_clipped(mx + (UI_MODE_W + 10u) * 2u, my - 2u,
+            fb_text_clipped(mx + (UI_MODE_W + 10u) * 3u, my - 2u,
                             eq_name[eq_idx], TS_1X, TS_1X, 110u);
 
             /* "4 / 12", right-aligned so the numbers do not shuffle sideways as
@@ -5204,9 +5257,11 @@ static void poll_input(void)
         if (edge & KEY_UP)   { volume = (volume + VOL_STEP > VOL_MAX)
                                       ? VOL_MAX : volume + VOL_STEP;
                                vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                               ui_mode_dirty = 1u;   /* the speaker icon */
                                settings_mark_dirty(); }
         if (edge & KEY_DOWN) { volume = (volume < VOL_STEP) ? 0u : volume - VOL_STEP;
                                vol_apply(); ui_toast_set("VOLUME", volume, "%");
+                               ui_mode_dirty = 1u;   /* the speaker icon */
                                settings_mark_dirty(); }
     }
 
