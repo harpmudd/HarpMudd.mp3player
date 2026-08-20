@@ -656,7 +656,19 @@ static void vol_apply(void)
  * the leftover the linker reports, and keep 1 KB for the token heap. And do
  * not raise one without the other -- that mismatch has already shipped once,
  * in the direction that made the documented cap a lie. */
-#define PL_TEXT_MAX  16384u
+/* 12 KB, down from 16, to buy back heap.
+ *
+ * The 256-track cap still binds first for ordinary filenames -- at 44 bytes a
+ * line, which is what a flat list measures, 12 KB holds 279 and the cap stops
+ * it at 256. Only playlists whose entries carry a folder path lose anything,
+ * and they go from about 180 tracks to about 135. The largest list ever on
+ * this card was 240 tracks in 10.6 KB, which still fits.
+ *
+ * Spent on heap because there was 1600 bytes of it left against a 1024-byte
+ * assert -- not enough to add anything at all, including a diagnostic. This is
+ * the cheapest 4 KB available and the only one that costs no code risk: no
+ * function moves, no static is exported, nothing is reordered. */
+#define PL_TEXT_MAX  12288u
 
 static char     pl_text[PL_TEXT_MAX];
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was

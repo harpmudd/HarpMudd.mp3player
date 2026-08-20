@@ -94,9 +94,9 @@ remembered.
 | | Limit | What happens past it |
 | --- | --- | --- |
 | Tracks per playlist | 256 | Says how many were dropped |
-| `.m3u` file size | 16 KB | Same — about 64 characters per line at 256 tracks |
+| `.m3u` file size | 12 KB | Same — about 48 characters per line at 256 tracks |
 | Remembered playlist name | any length, with `playlists.m3u` — otherwise 12 characters | Falls back to `playlist.m3u` next launch |
-| Line length | 16 KB ÷ number of tracks | — |
+| Line length | 12 KB ÷ number of tracks | — |
 
 ### Remembering which playlist you were using
 
@@ -238,8 +238,8 @@ framework bugs that had to be found first — is in
 - **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
   skipped rather than shown wrong — re-save as baseline if a cover doesn't
   appear. See [ROADMAP.md](ROADMAP.md).
-- **Playlists are capped at 256 tracks**, or 16 KB of `.m3u` text — whichever
-  comes first, which allows about 64 characters per line. A playlist that runs
+- **Playlists are capped at 256 tracks**, or 12 KB of `.m3u` text — whichever
+  comes first, which allows about 48 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
 - **A playlist with a name longer than 12 characters needs a `playlists.m3u`
   to be remembered.** Without one it plays fine but won't be the list that
