@@ -4842,6 +4842,7 @@ ui_tail:
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), g);
         fb_set_color(UI_RED, g);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+
     }
 #endif
 
@@ -8340,7 +8341,26 @@ int main(void)
          * the resume is simply dropped and the track plays from the start --
          * a wrong seek is worse than none. */
         if (resume_seek_req) {
-            /* Drive the size probe HERE, not just from the idle path.
+            /* Get the size the way it used to be got: BLOCKING, once.
+             *
+             * Stepping the incremental probe from here was tried and still
+             * came back Y9. Rather than keep guessing at why -- three attempts
+             * and three hardware trips -- this restores exactly what worked
+             * before the probe was moved out of load_track(), scoped to the
+             * one case that needs it. resume is opt-in, happens once per boot,
+             * and the ~480 ms lands while the track is already playing from
+             * the start, which is the thing being corrected anyway.
+             *
+             * seek_size_tried is shared with the seek backstop deliberately:
+             * both mean "the blocking probe has already been spent on this
+             * track", and neither wants it twice. */
+            if (!slot_size && !seek_size_tried) {
+                seek_size_tried = 1u;
+                slot_size = probe_file_size();
+            }
+
+            /* Kept as well: on a file where the blocking probe cannot answer,
+             * the incremental one still might.
              *
              * This is what Y9 was. The seek cannot run without slot_size, and
              * since the probe moved out of load_track() it only steps from
