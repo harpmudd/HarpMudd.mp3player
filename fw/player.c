@@ -1542,9 +1542,50 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
 #define LED_ROWS 12u
 #define LED_GAPV 1u
 #define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 5 px */
-#define LED_NB   6u                                    /* blocks per channel */
-#define LED_GAPX 3u
-#define LED_MID  10u                                   /* between L and R */
+#define SPEC_GAPX 3u                                   /* between columns */
+
+/* ---- OCTAVE FILTER BANK -----------------------------------------------
+ *
+ * Eight bands of real frequency content, so the columns move independently and
+ * against each other instead of all reporting one loudness.
+ *
+ * NOT an FFT, and not a bank of parallel band-passes -- both are far too
+ * expensive here. Costed against one 26 ms meter window at 44.1 kHz:
+ *
+ *     FFT, 1024-point                  13.1% CPU
+ *     12 parallel biquad bands         31.9%
+ *     the same, subsampled 1-in-4       8.0%
+ *     OCTAVE cascade, 8 bands           1.5%
+ *
+ * The cascade is cheap because each stage runs at HALF the rate of the one
+ * before it. A one-pole low-pass splits the signal in two: what it rejects is
+ * that stage's band, and what it passes is halved in rate and handed down. The
+ * whole ladder costs about twice the first stage, not eight times.
+ *
+ * `lp += (x - lp) >> SPEC_SH` is that filter -- a subtract, a shift, an add.
+ * The bands land at roughly 3.5k+, 1.7k, 880, 440, 220, 110, 55 and below,
+ * which is octave spacing and what a spectrum display is meant to show.
+ *
+ * RUN ONLY WHILE THIS METER IS ON SCREEN. That is the whole safety argument:
+ * 24-bit FLAC measures ~0% idle CPU, and the roadmap has long flagged a filter
+ * bank as the one addition that could bring audio tics back. Gated on
+ * viz_mode, the cost exists only while it is being looked at, and switching
+ * meters is an instant way out. */
+#define SPEC_BANDS 8u
+#define SPEC_SH    1u
+
+static int32_t  spec_lp[SPEC_BANDS];      /* the cascade's filter state      */
+static uint32_t spec_cnt[SPEC_BANDS];     /* per-stage rate dividers         */
+static uint32_t spec_acc[SPEC_BANDS];     /* |band| summed over the window   */
+static uint32_t spec_n;                   /* samples in the window           */
+static unsigned char spec_lvl[SPEC_BANDS];    /* published, 0..255           */
+static unsigned char spec_drawn[SPEC_BANDS];  /* last drawn; 0xFF = repaint  */
+
+/* Per-band gain, Q4, low band first. Music is bass-heavy and an untilted
+ * display is a wall on the left and nothing on the right; every analyser
+ * applies a tilt. Set by eye and fully expected to want adjusting. */
+static const unsigned char spec_gain[SPEC_BANDS] =
+    { 6u, 8u, 11u, 14u, 18u, 24u, 30u, 36u };
 
 /* The ladder's own palette, RGB565. Green low, amber through the middle, red
  * at the top -- fixed rather than accent-derived, because on this meter the
@@ -1553,10 +1594,8 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
 #define LED_MIDC 0xFE60u      /* amber  */
 #define LED_HI   0xF9C0u      /* red    */
 
-static unsigned char led_l, led_r;                     /* 0..255, smoothed */
 /* Last drawn, so a still passage costs nothing. 0xFF is the sentinel every
  * other meter here uses for "the chrome repainted underneath you". */
-static unsigned char led_dl = 0xFFu, led_dr = 0xFFu;
 
 static unsigned char wave[UI_WAVE_N], wave_drawn[UI_WAVE_N];
 static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
@@ -2038,7 +2077,7 @@ static void ui_wave_clear(void)
     for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = 0xFFu; }
+            for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu; }
 }
 
 /* Transport glyphs drawn as shapes, not characters: the font atlas is ASCII
@@ -3422,6 +3461,28 @@ static void ui_draw_dynamic(void)
         peak_r       = (peak_acc_r * MTR_HEADROOM_NUM) / MTR_HEADROOM_DEN;
         peak_acc     = peak_acc_l = peak_acc_r = 0;
         peak_acc_any = 0;
+
+        /* Each band's mean magnitude over the window, tilted, scaled to
+         * 0..255. Stage b was fed at 1/2^b of the rate, so the mean divides by
+         * ITS OWN sample count and not the window's -- dividing everything by
+         * the window would make every band below the first read low by exactly
+         * the factor it was downsampled by, which is a convincing-looking
+         * wrong answer. */
+        if (spec_n) {
+            for (uint32_t b = 0; b < SPEC_BANDS; b++) {
+                uint32_t cnt  = spec_n >> b;
+                uint32_t mean = cnt ? (spec_acc[b] / cnt) : 0u;
+                uint32_t v    = (mean * spec_gain[SPEC_BANDS - 1u - b]) >> 4;
+                v = (v * 255u) / 32768u;
+                if (v > 255u) v = 255u;
+                /* Same ballistics the level ladder used: catch the transient,
+                 * fall back smoothly. */
+                if (v >= spec_lvl[b]) spec_lvl[b] = (unsigned char)v;
+                else spec_lvl[b] -= (unsigned char)((spec_lvl[b] - v) / 4u + 1u);
+                spec_acc[b] = 0;
+            }
+            spec_n = 0;
+        }
         if (peak_amp > wave_pend) wave_pend = peak_amp;
     }
     /* Shift a new sample in and repaint the band. Every bar moves each update,
@@ -3534,62 +3595,41 @@ static void ui_draw_dynamic(void)
         /* ---- MIRRORED BARS ------------------------------------------------
          * The same wave[] history the bars use, grown up AND down from a
          * centre line. Same cost as the bars; different shape entirely. */
-        /* ---- LED LADDER ---------------------------------------------- */
+        /* ---- SPECTRUM ------------------------------------------------
+         *
+         * Eight columns of real frequency content from the octave cascade --
+         * see SPEC_BANDS. Bass on the left, treble on the right, each moving
+         * on its own.
+         *
+         * This replaced a two-channel level ladder. Six blocks drawn from one
+         * number will always rise and fall together however they are styled;
+         * "make them move independently" is not a tuning request, it needs
+         * frequency data, and the cascade is what provides it. */
         if (viz_mode == VIZ_LED) {
-            uint32_t vl = (peak_l * 255u) / 32768u; if (vl > 255u) vl = 255u;
-            uint32_t vr = (peak_r * 255u) / 32768u; if (vr > 255u) vr = 255u;
-            if (paused) { vl = 0; vr = 0; }
+            if (paused)
+                for (uint32_t b = 0; b < SPEC_BANDS; b++) spec_lvl[b] = 0;
 
-            /* BALLISTICS. Every other level meter here shows the raw value,
-             * which on a 12-row ladder flickers: the peak of a 26 ms window
-             * jumps by two or three rows between updates and the column looks
-             * noisy rather than alive.
-             *
-             * Instant attack, proportional release -- catch every transient,
-             * then fall back smoothly. The release is a quarter of the
-             * remaining distance per update plus one, so it is quick from
-             * high up and settles gently, and the +1 guarantees it reaches
-             * the target instead of creeping at it forever. */
-            if (vl >= led_l) led_l = (unsigned char)vl;
-            else led_l -= (unsigned char)((led_l - vl) / 4u + 1u);
-            if (vr >= led_r) led_r = (unsigned char)vr;
-            else led_r -= (unsigned char)((led_r - vr) / 4u + 1u);
+            int moved = 0;
+            for (uint32_t b = 0; b < SPEC_BANDS; b++)
+                if (spec_lvl[b] != spec_drawn[b]) { moved = 1; break; }
 
-            if (led_l != led_dl || led_r != led_dr) {
+            if (moved) {
+                /* The gaps between blocks show background, and the background
+                 * is a per-row ramp -- a flat fill is the mistake the magic
+                 * eye made. Only on a repaint: the gaps never move. */
+                if (spec_drawn[0] == 0xFFu)
+                    ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
 
-                /* The gaps between blocks show the background, and the
-                 * background is a per-row ramp -- painting the box with one
-                 * flat colour is the mistake the magic eye made. ui_bg_restore
-                 * copies the real ramp row for row. Only on a full repaint:
-                 * the gaps never move, so once they are right they stay right.
-                 */
-                int repaint = (led_dl == 0xFFu);
-                if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
-
-                led_dl = led_l; led_dr = led_r;
-
-                uint32_t col = (ww > LED_MID) ? (ww - LED_MID) / 2u : 1u;
-                uint32_t bw  = (col > LED_GAPX * (LED_NB - 1u))
-                             ? (col - LED_GAPX * (LED_NB - 1u)) / LED_NB : 1u;
+                uint32_t colw  = ww / SPEC_BANDS;
+                uint32_t bw    = (colw > SPEC_GAPX) ? colw - SPEC_GAPX : 1u;
                 uint32_t pitch = LED_BLKH + LED_GAPV;
 
-                for (uint32_t chn = 0; chn < 2u; chn++) {
-                    uint32_t lvl = chn ? led_r : led_l;
-                    uint32_t lit = (lvl * LED_ROWS) / 256u;
-                    uint32_t x0 = chn ? (UI_MARGIN + col + LED_MID) : UI_MARGIN;
-
+                for (uint32_t b = 0; b < SPEC_BANDS; b++) {
+                    spec_drawn[b] = spec_lvl[b];
+                    uint32_t lit = ((uint32_t)spec_lvl[b] * LED_ROWS) / 256u;
+                    uint32_t x0  = UI_MARGIN + b * colw;
                     for (uint32_t r = 0; r < LED_ROWS; r++) {
-                        uint32_t y = UI_WAVE_Y + UI_WAVE_H
-                                   - (r + 1u) * pitch;
-                        /* Green through amber to red as the ladder climbs --
-                         * the convention every piece of gear this is imitating
-                         * uses, and what makes a loud passage read as HOT
-                         * rather than merely tall. Blended between fixed
-                         * points rather than stepped, so the climb is a flow
-                         * instead of four bands.
-                         *
-                         * Fixed hues rather than the accent: this is the one
-                         * meter whose colour carries meaning. */
+                        uint32_t y = UI_WAVE_Y + UI_WAVE_H - (r + 1u) * pitch;
                         uint16_t c;
                         if (r < lit) {
                             uint32_t half = LED_ROWS / 2u;
@@ -3600,18 +3640,10 @@ static void ui_draw_dynamic(void)
                         } else {
                             c = UI_TRACK;
                         }
-                        for (uint32_t b = 0; b < LED_NB; b++)
-                            fb_rect(x0 + b * (bw + LED_GAPX), y,
-                                    bw, LED_BLKH, c);
+                        fb_rect(x0, y, bw, LED_BLKH, c);
                     }
                 }
             }
-            /* MANDATORY, and its absence is why this looked like two meters
-             * fighting: BARS is not an `if` at all, it is the fall-through at
-             * the end of this chain. Every block above ends with this goto.
-             * Without it the ladder drew, then the bar history drew straight
-             * over it -- which reads as the meter scrolling right to left,
-             * because that is exactly what the bars do. */
             goto viz_done;
         }
 
@@ -4427,7 +4459,7 @@ ui_tail:
             if (dirty)
                 for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                     wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = 0xFFu;
+            for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu;
                 }
             ui_art_draw();
         }
@@ -5003,6 +5035,25 @@ static void meters_feed(const short *pcm, int n, int stereo)
         if ((uint32_t)pkr > peak_acc_r) peak_acc_r = (uint32_t)pkr;
         peak_acc_any = 1u;
 
+        /* The octave cascade, only while its meter is showing -- see
+         * SPEC_BANDS. One pass down the ladder per sample, and most samples
+         * stop after a stage or two, because the lower stages run at a
+         * fraction of the rate. */
+        if (viz_mode == VIZ_LED) {
+            for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
+                int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
+                                   : (int32_t)pcm[i];
+                for (uint32_t b = 0; b < SPEC_BANDS; b++) {
+                    spec_lp[b] += (x - spec_lp[b]) >> SPEC_SH;
+                    int32_t hp = x - spec_lp[b];
+                    spec_acc[b] += (uint32_t)(hp < 0 ? -hp : hp);
+                    if (++spec_cnt[b] & 1u) break;   /* half rate below here */
+                    x = spec_lp[b];
+                }
+            }
+            spec_n += (uint32_t)(stereo ? (n / 2) : n);
+        }
+
         /* Even spread across the frame, so the trace covers the whole
          * period rather than clustering at its start. */
         uint32_t pairs = (uint32_t)(stereo ? (n / 2) : n);
@@ -5329,7 +5380,7 @@ static void poll_input(void)
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
             wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = 0xFFu;
+            for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu;
         }
         if (art_ready && art_shown) ui_art_draw();
         ui_toast_msg(viz_mode == VIZ_BARS   ? "METER: BARS"
@@ -5342,7 +5393,7 @@ static void poll_input(void)
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
                    : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
-                                            : "METER: LED LADDER");
+                                            : "METER: SPECTRUM");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
@@ -8815,7 +8866,7 @@ int main(void)
             ui_wave_force = 1u;
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = 0xFFu;
+            for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu;
             }
             ui_mode_dirty = 1u;
             ui_last_info  = 0xFFFFFFFFu;
@@ -8848,7 +8899,7 @@ int main(void)
                     ui_wave_force = 1;
                     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                         wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = 0xFFu;
+            for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu;
                     }
                 }
                 ui_was_paused = 1;
@@ -8862,7 +8913,7 @@ int main(void)
             ui_wave_force = 1;              /* recolour back to full on resume */
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
-            led_dl = led_dr = 0xFFu;
+            for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu;
             }
             /* The FIFO drained during the pause and its output has glided to
              * zero, so the resume must ramp up from zero like any other

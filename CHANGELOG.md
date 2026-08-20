@@ -17,9 +17,9 @@ What changed in each release, newest first.
   was appearing as *FLAC 16-*), the selected row in the playlist has rounded
   corners to match the panel it sits in, and the progress bar has softened ends
   and a lit top edge.
-- **A new meter: LED LADDER.** Left and right channels as a grid of lit blocks,
-  twelve rows of six, coloured green through amber to red as they climb.
-  Eleven meters now.
+- **A new meter: SPECTRUM.** Eight columns of lit blocks, bass on the left
+  through treble on the right, each moving on its own with the music. Coloured
+  green through amber to red as they climb. Eleven meters now.
 - **A speaker icon shows the volume**, beside the repeat and shuffle icons —
   muted, low, medium or high. The level used to appear only as a message that
   had gone by the time you wondered why the music was quiet.
