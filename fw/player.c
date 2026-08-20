@@ -1505,12 +1505,19 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
  * Nine rows also divides the 72 px band exactly at 7 px plus a 1 px gap, and
  * gives 11% steps -- with the 3/4 meter headroom, real music sits at 4..7 of
  * 9 and never pegs. */
-#define LED_ROWS 9u
+#define LED_ROWS 8u
 #define LED_GAPV 1u
-#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 7 px */
+#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 8 px */
 #define LED_NB   3u
 #define LED_GAPX 4u
 #define LED_MID  10u                                   /* between L and R */
+
+/* The ladder's own palette, RGB565. Green low, amber through the middle, red
+ * at the top -- fixed rather than accent-derived, because on this meter the
+ * colour is information. */
+#define LED_LO   0x0600u      /* green  */
+#define LED_MIDC 0xFE60u      /* amber  */
+#define LED_HI   0xF9C0u      /* red    */
 
 static unsigned char led_l, led_r, led_pl, led_pr;     /* 0..255 */
 /* Last drawn, so a still passage costs nothing. 0xFF is the sentinel every
@@ -3539,20 +3546,40 @@ static void ui_draw_dynamic(void)
                     for (uint32_t r = 0; r < LED_ROWS; r++) {
                         uint32_t y = UI_WAVE_Y + UI_WAVE_H
                                    - (r + 1u) * pitch;
-                        /* Brighter toward the top, so a loud passage reads as
-                         * hotter and not merely taller -- the same treatment
-                         * the waterfall gives its columns. */
+                        /* Green through amber to red as the ladder climbs --
+                         * the convention every piece of gear this is imitating
+                         * uses, and what makes a loud passage read as HOT
+                         * rather than merely tall. Blended between fixed
+                         * points rather than stepped, so the climb is a flow
+                         * instead of four bands.
+                         *
+                         * Fixed hues rather than the accent: this is the one
+                         * meter whose colour carries meaning. */
                         uint16_t c;
-                        if (crow && r == crow - 1u && r >= lit) c = UI_WHITE;
-                        else if (r < lit) c = ui_mix(ui_accent, UI_WHITE,
-                                                     r, LED_ROWS * 2u);
-                        else               c = UI_TRACK;
+                        if (crow && r == crow - 1u && r >= lit) {
+                            c = UI_WHITE;
+                        } else if (r < lit) {
+                            uint32_t half = LED_ROWS / 2u;
+                            c = (r < half)
+                              ? ui_mix(LED_LO, LED_MIDC, r, half)
+                              : ui_mix(LED_MIDC, LED_HI, r - half,
+                                       LED_ROWS - half);
+                        } else {
+                            c = UI_TRACK;
+                        }
                         for (uint32_t b = 0; b < LED_NB; b++)
                             fb_rect(x0 + b * (bw + LED_GAPX), y,
                                     bw, LED_BLKH, c);
                     }
                 }
             }
+            /* MANDATORY, and its absence is why this looked like two meters
+             * fighting: BARS is not an `if` at all, it is the fall-through at
+             * the end of this chain. Every block above ends with this goto.
+             * Without it the ladder drew, then the bar history drew straight
+             * over it -- which reads as the meter scrolling right to left,
+             * because that is exactly what the bars do. */
+            goto viz_done;
         }
 
         if (viz_mode == VIZ_MIRROR) {
