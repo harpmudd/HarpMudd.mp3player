@@ -1571,11 +1571,14 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
  * bank as the one addition that could bring audio tics back. Gated on
  * viz_mode, the cost exists only while it is being looked at, and switching
  * meters is an instant way out. */
-#define SPEC_BANDS 8u
-#define SPEC_SH    1u
+#define SPEC_OCT   8u                      /* cascade stages = octaves      */
+#define SPEC_BANDS (SPEC_OCT * 2u)         /* each octave split in half     */
+#define SPEC_SH    1u                      /* octave split                  */
+#define SPEC_SH2   2u                      /* the half-octave split within  */
 
-static int32_t  spec_lp[SPEC_BANDS];      /* the cascade's filter state      */
-static uint32_t spec_cnt[SPEC_BANDS];     /* per-stage rate dividers         */
+static int32_t  spec_lp[SPEC_OCT];        /* the cascade's filter state      */
+static int32_t  spec_slp[SPEC_OCT];       /* the half-octave splitter        */
+static uint32_t spec_cnt[SPEC_OCT];       /* per-stage rate dividers         */
 static uint32_t spec_acc[SPEC_BANDS];     /* |band| summed over the window   */
 static uint32_t spec_n;                   /* samples in the window           */
 static unsigned char spec_lvl[SPEC_BANDS];    /* published, 0..255           */
@@ -1611,8 +1614,19 @@ static unsigned char spec_drawn[SPEC_BANDS];
  * uint16_t, not unsigned char: the top band needs 749 and the old type
  * silently caps at 255, which would have quietly flattened the treble end
  * while looking like a working table. */
-static const uint16_t spec_gain[SPEC_BANDS] =
-    { 345u, 221u, 183u, 196u, 242u, 329u, 479u, 749u };
+static const uint16_t spec_gain[SPEC_BANDS] = {
+    /* MEASURED for the HALF-OCTAVE cascade, low band first. Re-measured rather
+     * than carried over: splitting each octave in two changes every level, and
+     * the two halves are not equal -- the upper half of an octave carries less
+     * than the lower in most music, so a table that reused the octave figures
+     * would have leant the whole display one way.
+     *
+     * Two tracks averaged, each band set to land near 150 of 255. Predicted
+     * from those same measurements: the busy track lights 6..11 rows across
+     * the sixteen, the sparse one 2..7. */
+    1428u, 411u, 788u, 266u, 506u, 228u, 411u, 255u,
+    430u, 345u, 521u, 496u, 699u, 764u, 1010u, 1312u
+};
 
 /* The ladder's own palette, RGB565. Green low, amber through the middle, red
  * at the top -- fixed rather than accent-derived, because on this meter the
@@ -3497,7 +3511,9 @@ static void ui_draw_dynamic(void)
          * wrong answer. */
         if (spec_n) {
             for (uint32_t b = 0; b < SPEC_BANDS; b++) {
-                uint32_t cnt  = spec_n >> b;
+                /* Both halves of an octave were fed at that OCTAVE's rate, so
+                 * the divisor is per stage, not per band. */
+                uint32_t cnt  = spec_n >> (b / 2u);
                 uint32_t mean = cnt ? (spec_acc[b] / cnt) : 0u;
                 uint32_t v    = (mean * spec_gain[SPEC_BANDS - 1u - b]) >> 4;
                 v = (v * 255u) / 32768u;
@@ -5074,12 +5090,26 @@ static void meters_feed(const short *pcm, int n, int stereo)
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
                 int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
                                    : (int32_t)pcm[i];
-                for (uint32_t b = 0; b < SPEC_BANDS; b++) {
-                    spec_lp[b] += (x - spec_lp[b]) >> SPEC_SH;
-                    int32_t hp = x - spec_lp[b];
-                    spec_acc[b] += (uint32_t)(hp < 0 ? -hp : hp);
-                    if (++spec_cnt[b] & 1u) break;   /* half rate below here */
-                    x = spec_lp[b];
+                for (uint32_t o = 0; o < SPEC_OCT; o++) {
+                    spec_lp[o] += (x - spec_lp[o]) >> SPEC_SH;
+                    int32_t hp = x - spec_lp[o];
+
+                    /* Split the octave in two. Extending the cascade instead
+                     * does NOT give more bands worth having: every extra stage
+                     * halves the frequency AND the rate, so stage 8 is already
+                     * at 86 Hz with four samples per window and stage 12 is at
+                     * 5 Hz with a quarter of one. There are only about eight
+                     * audible octaves; resolution has to come from inside them
+                     * rather than below them. */
+                    spec_slp[o] += (hp - spec_slp[o]) >> SPEC_SH2;
+                    int32_t sl = spec_slp[o];
+                    int32_t sh = hp - sl;
+
+                    spec_acc[o * 2u]      += (uint32_t)(sh < 0 ? -sh : sh);
+                    spec_acc[o * 2u + 1u] += (uint32_t)(sl < 0 ? -sl : sl);
+
+                    if (++spec_cnt[o] & 1u) break;   /* half rate below here */
+                    x = spec_lp[o];
                 }
             }
             spec_n += (uint32_t)(stereo ? (n / 2) : n);

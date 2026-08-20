@@ -12,12 +12,14 @@
 #include "hostio.h"
 #include "../../fw/flac.h"
 
-#define SPEC_BANDS 8u
+#define SPEC_OCT   8u
+#define SPEC_BANDS (SPEC_OCT * 2u)
 #define SPEC_SH    1u
+#define SPEC_SH2   2u
 #define LED_ROWS   12u
 
-static int32_t  lp[SPEC_BANDS];
-static uint32_t cnt[SPEC_BANDS];
+static int32_t  lp[SPEC_OCT], slp[SPEC_OCT];
+static uint32_t cnt[SPEC_OCT];
 static uint64_t acc[SPEC_BANDS];
 static uint32_t nsamp;
 
@@ -36,12 +38,15 @@ static void sink(void *ctx, const int16_t *pcm, uint32_t frames)
     (void)ctx;
     for (uint32_t p = 0; p < frames; p++) {
         int32_t x = ((int32_t)pcm[p * 2u] + (int32_t)pcm[p * 2u + 1u]) >> 1;
-        for (uint32_t b = 0; b < SPEC_BANDS; b++) {
-            lp[b] += (x - lp[b]) >> SPEC_SH;
-            int32_t hp = x - lp[b];
-            acc[b] += (uint32_t)(hp < 0 ? -hp : hp);
-            if (++cnt[b] & 1u) break;
-            x = lp[b];
+        for (uint32_t o = 0; o < SPEC_OCT; o++) {
+            lp[o] += (x - lp[o]) >> SPEC_SH;
+            int32_t hp = x - lp[o];
+            slp[o] += (hp - slp[o]) >> SPEC_SH2;
+            int32_t sl = slp[o], sh = hp - sl;
+            acc[o * 2u]      += (uint32_t)(sh < 0 ? -sh : sh);
+            acc[o * 2u + 1u] += (uint32_t)(sl < 0 ? -sl : sl);
+            if (++cnt[o] & 1u) break;
+            x = lp[o];
         }
     }
     nsamp += frames;
@@ -83,10 +88,11 @@ int main(void)
         if (flac_decode_frame(&f, sink, 0) != FLAC_OK) break;
 
     hputs("band mean_mag  cur_v  cur_rows"); hnl();
-    static const unsigned char gain[SPEC_BANDS] =
-        { 6u, 8u, 11u, 14u, 18u, 24u, 30u, 36u };
+    static const unsigned short gain[SPEC_BANDS] = {
+        345u, 345u, 221u, 221u, 183u, 183u, 196u, 196u,
+        242u, 242u, 329u, 329u, 479u, 479u, 749u, 749u };
     for (uint32_t b = 0; b < SPEC_BANDS; b++) {
-        uint32_t c = nsamp >> b;
+        uint32_t c = nsamp >> (b / 2u);
         uint32_t mean = c ? (uint32_t)(acc[b] / c) : 0u;
         uint32_t v = (mean * gain[SPEC_BANDS - 1u - b]) >> 4;
         v = (v * 255u) / 32768u;
