@@ -469,6 +469,9 @@ static void pcm_rate_apply(uint32_t hz)
     REG(R_PCM_RATE) = (uint32_t)inc;
 }
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
+static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
+enum { FMT_MP3 = 0, FMT_FLAC };
+static uint8_t  track_fmt;
 static uint8_t  size_suspect;     /* directory disagrees with the file itself   */
 static uint8_t  ui_size_warned;
 /* Load timing, in milliseconds, for the phases between pcm_flush() and
@@ -4534,6 +4537,24 @@ ui_tail:
     /* Format line, drawn once the decoder has told us what the stream is. */
     uint32_t info = track_kbps * 1000u + track_hz / 100u
                   + (track_encoder[0] ? (uint32_t)track_encoder[0] << 24 : 0u);
+    /* Work it out HERE if it is still unknown.
+     *
+     * track_kbps is derived from slot_size, and slot_size is no longer known at
+     * load time -- the size search runs during playback now. Computing it only
+     * where the search happens to finish made the row's appearance depend on
+     * WHEN that was, and it showed up unreliably. This asks the question every
+     * time the row is considered instead, so the answer appears the moment it
+     * exists, whichever path produced it.
+     *
+     * Cheap: one compare while it is unknown, nothing at all afterwards. */
+    if (!track_kbps && track_fmt == FMT_FLAC && track_secs &&
+        slot_size > fl_first_frame) {
+        uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
+        track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
+        info = track_kbps * 1000u + track_hz / 100u
+             + (track_encoder[0] ? (uint32_t)track_encoder[0] << 24 : 0u);
+    }
+
     if (track_kbps && info != ui_last_info && !size_suspect && !pl_ui_open) {
         ui_last_info = info;
         char b[40], *q = b;
@@ -6081,8 +6102,7 @@ static void target_flush_slot_cache(void)
 /* Which decoder the current track needs. Detected from the file's first four
  * bytes, not its extension -- a .flac that is really an MP3 should play, and a
  * mislabelled file should not silently fail. */
-enum { FMT_MP3 = 0, FMT_FLAC };
-static uint8_t  track_fmt;
+/* Declared up with the other track state -- see fl_first_frame. */
 static flac_t   fl;
 static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
@@ -6292,7 +6312,9 @@ static uint32_t fl_seek_intent;
 static uint32_t fl_seek_off;      /* absolute offset of the SEEKTABLE body  */
 
 static uint32_t fl_seek_pts;      /* 18-byte points; 0 = no table           */
-static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
+/* Declared up with the other track state, not down with the FLAC seek code
+ * where it used to live: the format row needs it, and that is drawn well above
+ * here. A tentative definition either way -- it is the same object. */
 
 static uint32_t fl_be32(const uint8_t *p)
 {
