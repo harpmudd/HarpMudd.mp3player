@@ -1683,22 +1683,6 @@ static uint16_t ui_mix(uint16_t a, uint16_t b, uint32_t t, uint32_t n)
     return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
-/* Level to colour, for the meters that show intensity rather than height.
- *
- * Dark through green and amber to red, which is the convention a spectrogram
- * is read by -- and the same three colours the ladder climbs through, so the
- * two meters look like they come from the same instrument.
- *
- * The bottom leg starts at UI_TRACK rather than at black: a band with nothing
- * in it should look like the meter's own background, not like a hole. */
-static uint16_t spec_colour(uint32_t v)
-{
-    if (v < 85u)  return ui_mix(UI_TRACK, LED_LO,   v, 85u);
-    if (v < 170u) return ui_mix(LED_LO,   LED_MIDC, v - 85u, 85u);
-    if (v < 255u) return ui_mix(LED_MIDC, LED_HI,   v - 170u, 85u);
-    return LED_HI;
-}
-
 /* Top of the background ramp, tinted toward the user's accent. Recomputed
  * whenever the accent changes; the bottom stays black. */
 static uint16_t ui_grad_top_c = UI_GRAD_TOP;
@@ -3671,7 +3655,6 @@ static void ui_draw_dynamic(void)
             if (paused)
                 for (uint32_t b = 0; b < SPEC_BANDS; b++) spec_lvl[b] = 0;
 
-
             /* The gaps between blocks show background, and the background is
              * a per-row ramp -- a flat fill is the mistake the magic eye made.
              * Only on a repaint: the gaps never move. */
@@ -3786,39 +3769,22 @@ static void ui_draw_dynamic(void)
             goto viz_done;
         }
 
-        /* ---- WATERFALL, as a spectrogram -----------------------------
-         *
-         * Frequency up the column, time scrolling left, level as colour. That
-         * is what a waterfall IS, and it was showing loudness -- one number
-         * drawn as a bar, scrolled. The filter bank built for the spectrum
-         * meter is exactly the missing half, and this is the display it suits
-         * best: the scroll gives it the time axis the ladder cannot show.
-         *
-         * Bass at the bottom, treble at the top, which is the way round every
-         * spectrogram is drawn.
-         *
-         * The whole column is painted every step -- no change detection --
-         * because it is one pixel wide and there is nothing to compare it to:
-         * it did not exist before this scroll. */
         if (viz_mode == VIZ_WATER) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             if (!paused) {
                 fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
 
+                uint32_t a = (peak_amp * UI_WAVE_H) / 32768u;
+                if (a > UI_WAVE_H) a = UI_WAVE_H;
+
+                /* Column drawn as three bands -- quiet bed, body, hot tip --
+                 * so loud passages read as brighter AND taller. */
                 uint32_t cx = x0 + w - 1u;
-                uint32_t prev_y = 0;
-                for (uint32_t b = 0; b < SPEC_BANDS; b++) {
-                    /* Band 0 is the highest frequency, so it takes the TOP of
-                     * the column. Boundaries are computed rather than assumed
-                     * even: 72 rows over 16 bands is 4.5 each, and rounding
-                     * every band down would leave eight rows unpainted at the
-                     * bottom of every column. */
-                    uint32_t y_end = ((b + 1u) * UI_WAVE_H) / SPEC_BANDS;
-                    if (y_end > prev_y) {
-                        fb_rect(cx, UI_WAVE_Y + prev_y, 1, y_end - prev_y,
-                                spec_colour(spec_lvl[b]));
-                    }
-                    prev_y = y_end;
+                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H - a);
+                if (a) {
+                    uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_H);
+                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, a, c);
+                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, 1, UI_WHITE);
                 }
             }
             goto viz_done;
@@ -5141,7 +5107,7 @@ static void meters_feed(const short *pcm, int n, int stereo)
          * SPEC_BANDS. One pass down the ladder per sample, and most samples
          * stop after a stage or two, because the lower stages run at a
          * fraction of the rate. */
-        if (viz_mode == VIZ_LED || viz_mode == VIZ_WATER) {
+        if (viz_mode == VIZ_LED) {
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
                 int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
                                    : (int32_t)pcm[i];
