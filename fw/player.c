@@ -1114,6 +1114,28 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 /* 0 for any build a user sees -- the standing rule is that no diagnostic ever
  * reaches one. Set to 1 to bring the D/O/U/F row back while investigating. */
 #define UI_SHOW_SPEED_DIAG 0
+/* Resume instrumentation. EXTRA_CFLAGS="-DUI_SHOW_RESUME_DIAG=1 -Os"
+ *
+ * The -Os is not optional: the normal build has under 1 KB of heap left and
+ * will not link with another diagnostic row in it.
+ *
+ *   Y  resume_dbg   1 armed         2 past the end of the track
+ *                   3 not applicable, or the point is under 2 s
+ *                   4 not from a playlist        6 REPOSITIONED
+ *                   7 idle at deadline           8 no byte rate
+ *                   9 no slot_size              10 other at deadline
+ *                  11 reload or stop pending at deadline
+ *   N  resume_saves points published this session. The saver holds off while
+ *                  a resume is pending, so 0 early on is expected.
+ *   A  resume_at   the second being aimed at   S ui_sec   T pl_pos
+ *
+ * This row corrected me twice in one session and both times I was about to fix
+ * the wrong half: Y3 A1 was the restore correctly declining a 1 s point, and
+ * two small saved values looked like a broken saver that was working fine. It
+ * stays. */
+#ifndef UI_SHOW_RESUME_DIAG
+#define UI_SHOW_RESUME_DIAG 0
+#endif
 /* Seek instrumentation. Build with EXTRA_CFLAGS=-DUI_SHOW_SEEK_DIAG=1.
  *
  * This build CHANGES NO BEHAVIOUR. Two reasoned fixes for the post-seek clock
