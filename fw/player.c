@@ -1502,6 +1502,16 @@ static uint32_t art_sig;          /* fingerprint of the IMAGE the stash holds  *
  * cannot read is re-attempted on every track of the album -- and, worse, the
  * message explaining why appears on every one of them. */
 static uint32_t art_bad_sig;
+static uint8_t  art_bad;          /* a cover IS present and cannot be decoded */
+static uint8_t  art_bad_code;     /* which picojpeg complaint, for the label  */
+
+/* The panel is shown for a cover that exists but cannot be read, as well as
+ * for one that decoded. Those two are worth telling apart and were not:
+ * has_art went to 0 either way, art_shown followed it, and the panel vanished
+ * entirely -- so a file WITH artwork the core cannot read looked exactly like
+ * a file with none. That is why "no art, and no message either" was the
+ * report: there was no frame to put a message in. */
+#define ART_PANEL_WANTED (art_have || art_bad)
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -1908,6 +1918,33 @@ static void ui_art_placeholder(void)
      * darker fill than the plate so an artless track reads as an empty frame
      * rather than a solid grey slab. */
     fb_rect(ART_PAD, ART_STASH_Y + ART_PAD, ART_IMG, ART_IMG, UI_TRACK);
+    art_ready = 1;
+}
+
+/* The same frame, captioned, for a cover that is present and unreadable.
+ *
+ * Two short lines because the panel is 92 px wide and the words are not:
+ * "PROGRESSIVE" alone is 121 px. "PROG." and "JPEG" are 54 and 44, which fit
+ * with room to centre them. Terse, but it is the difference between "this
+ * player is broken" and "this file's cover is in a format it cannot read",
+ * and the toast carries the full sentence for anyone who catches it.
+ *
+ * Persistent, unlike the toast. That is the point: a cover being unreadable is
+ * a standing fact about the file, not an event. */
+static void ui_art_reason(int progressive)
+{
+    /* A boolean, not the picojpeg status: this lives well above the point
+     * where art.inc pulls picojpeg.h in, so the enum is not in scope here.
+     * The caller does the comparison, where it is. */
+    const char *a = progressive ? "PROG." : "COVER";
+    const char *b = progressive ? "JPEG"  : "ERROR";
+    ui_art_placeholder();
+    fb_set_color(UI_FAINT, UI_TRACK);
+    uint32_t wa = fb_text_width(a, TS_1X), wb = fb_text_width(b, TS_1X);
+    uint32_t cx = ART_PAD + ART_IMG / 2u;
+    uint32_t cy = ART_STASH_Y + ART_PAD + ART_IMG / 2u;
+    fb_text_clipped(cx - wa / 2u, cy - FB_CELL(TS_1X), a, TS_1X, TS_1X, wa + 2u);
+    fb_text_clipped(cx - wb / 2u, cy + 2u,             b, TS_1X, TS_1X, wb + 2u);
     art_ready = 1;
 }
 
@@ -7241,20 +7278,32 @@ static int load_track(void)
          * panel colour -- checking afterwards would compare against an image
          * it had already destroyed. */
         uint32_t sig = art_sig_of(audio_start);
+        art_bad = 0;
         if (art_have && sig && sig == art_sig) {
             has_art = 1;                 /* the stash already holds this cover */
         } else if (sig && sig == art_bad_sig) {
-            /* Known bad. Say nothing and try nothing: it was explained when
-             * this image was first met, and repeating either the work or the
-             * message on all thirteen tracks of an album helps nobody. */
+            /* Known bad. The frame and its reason are still drawn -- that is a
+             * standing fact about the file, not an event -- but nothing is
+             * decoded again and nothing is announced again. Repeating either
+             * on all thirteen tracks of an album helps nobody. */
             ui_art_mount();
-            ui_art_placeholder();
+            ui_art_reason(art_bad_code == PJPG_UNSUPPORTED_MODE);
             ui_art_round();
             has_art = 0;
+            art_bad = 1;
         } else {
             ui_art_mount();
             has_art = art_decode(audio_start);
-            if (!has_art) ui_art_placeholder();
+            if (!has_art) {
+                if (art_fail_code) {     /* present, and unreadable */
+                    art_bad      = 1;
+                    art_bad_code = art_fail_code;
+                    art_bad_sig  = sig;
+                    ui_art_reason(art_bad_code == PJPG_UNSUPPORTED_MODE);
+                } else {
+                    ui_art_placeholder();   /* simply no artwork */
+                }
+            }
             ui_art_round();
             art_sig = has_art ? sig : 0u;
 
@@ -7266,12 +7315,10 @@ static int load_track(void)
              * Only when a picture was actually found: art_fail_code stays 0
              * when a file simply has no artwork, which is not a fault and
              * needs no announcement. */
-            if (!has_art && art_fail_code) {
-                art_bad_sig = sig;
-                ui_toast_msg(art_fail_code == PJPG_UNSUPPORTED_MODE
+            if (art_bad)
+                ui_toast_msg(art_bad_code == PJPG_UNSUPPORTED_MODE
                              ? "COVER: PROGRESSIVE JPEG"
                              : "COVER: CANNOT BE READ");
-            }
         }
         art_file_id = cur_file_id;
     }
@@ -7281,7 +7328,7 @@ static int load_track(void)
     /* Panel state follows the TRACK, not the session. art_x is set directly
      * rather than animated -- a track change should not look like a slide. */
     art_have  = (uint8_t)has_art;
-    art_shown = (uint32_t)(has_art && art_pref);
+    art_shown = (uint32_t)(ART_PANEL_WANTED && art_pref);
     art_x     = art_shown ? ART_X : FB_W;
 
     ui_draw_chrome();   /* title/artist are populated now -- draw the UI */
@@ -8104,7 +8151,7 @@ int main(void)
         if (art_toggle) {
             art_toggle = 0;
             art_pref  = (uint8_t)!art_pref;
-            art_shown = (uint32_t)(art_pref && art_have);
+            art_shown = (uint32_t)(art_pref && ART_PANEL_WANTED);
             settings_mark_dirty();
             art_next   = cycles();          /* start moving immediately */
             /* Only the waveform changes shape; repainting the whole chrome
