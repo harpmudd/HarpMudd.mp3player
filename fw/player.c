@@ -4829,6 +4829,22 @@ ui_tail:
     }
 #endif
 
+#if UI_SHOW_RESUME_DIAG
+    {
+        char b[40], *q = b;
+        *q++ = 'Y'; q = ui_dec(q, resume_dbg);
+        *q++ = ' '; *q++ = 'N'; q = ui_dec(q, resume_saves);
+        *q++ = ' '; *q++ = 'A'; q = ui_dec(q, resume_at);
+        *q++ = ' '; *q++ = 'S'; q = ui_dec(q, ui_sec);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, pl_pos);
+        *q = 0;
+        uint16_t g = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), g);
+        fb_set_color(UI_RED, g);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
 #if UI_SHOW_SEEK_DIAG
     /* Two rows, redrawn every pass so nothing erases them, and frozen on the
      * last seek so there is time to read them. Toasts are suppressed in this
@@ -8324,6 +8340,22 @@ int main(void)
          * the resume is simply dropped and the track plays from the start --
          * a wrong seek is worse than none. */
         if (resume_seek_req) {
+            /* Drive the size probe HERE, not just from the idle path.
+             *
+             * This is what Y9 was. The seek cannot run without slot_size, and
+             * since the probe moved out of load_track() it only steps from
+             * refill_pump()'s "ring at least half full" branch -- which on a
+             * dense FLAC comes round about once a second. Twenty steps then
+             * take twenty seconds, the resume gives up at twelve, and the
+             * track plays from the start with a perfectly good point saved.
+             *
+             * One step per pass of the main loop instead, and only while a
+             * resume is actually waiting: the whole search finishes in
+             * milliseconds. Each step is a single 512-byte read, the same one
+             * the idle path issues, so nothing new is being asked of the card
+             * -- only sooner. */
+            if (!slot_size && szp_phase && szp_phase < 4u) size_probe_step();
+
             uint32_t rate = ui_byte_rate();
             uint32_t want = audio_start + rate * resume_at;
 
