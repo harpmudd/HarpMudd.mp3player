@@ -38,6 +38,10 @@ What changed in each release, newest first.
   file's size too early and reading it far too small — a 30 MB track came out
   as 5 MB — which also showed as a nonsense bitrate in the header. Both are
   right now.
+- Fixed: **resume started tracks from the beginning.** It knew the right place
+  the whole time — it was waiting on the file's length, which had moved to
+  being measured during playback rather than at load, and gave up before the
+  answer arrived.
 - Fixed: **resume returned to the wrong track in playlists over 128 entries.**
   Track 200 of 240 came back as track 72.
 - **Playlists can have long names again.** The core could only remember twelve
