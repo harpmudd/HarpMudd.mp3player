@@ -6153,11 +6153,47 @@ static uint32_t flac_seek_locate(uint64_t want, uint64_t *landed)
     return best_b;
 }
 
+/* Move the stream forward without delivering the bytes -- flac_open()'s way of
+ * walking past a metadata block it does not want.
+ *
+ * Almost always the cover art. Measured on this hardware: 259318 bytes of
+ * PICTURE and 75214 of PADDING, read through the bit reader one byte at a time,
+ * 628 ms of a FLAC load -- for data load_track() then reads AGAIN by itself to
+ * decode the artwork. flac_open was not gathering it, only walking past it.
+ *
+ * Two cases. Bytes already in the ring are simply consumed, which is exactly
+ * what flac_pull does with them. Beyond that the ring is dropped and file_pos
+ * moves, so the next refill fetches from the new place -- the same manoeuvre a
+ * seek performs, minus the decoder reset, because flac_open is between blocks
+ * here and has no decoder state to lose.
+ *
+ * Refuses rather than guesses when the move would leave the file: returning 0
+ * puts flac_open back on its read-and-discard path, which is slow but always
+ * correct. */
+static int flac_skip_bytes(void *ctx, uint32_t n)
+{
+    (void)ctx;
+    if (!n) return 1;
+
+    uint32_t avail = ring_fill - ring_rd;
+    if (n <= avail) { ring_rd += n; return 1; }
+    n -= avail;
+
+    if (n > 0xFFFFFFFFu - file_pos) return 0;
+    if (slot_size && file_pos + n > slot_size) return 0;
+
+    refill_drain();                 /* no read may be in flight across this */
+    ring_fill = 0; ring_rd = 0;
+    file_pos += n;
+    return 1;
+}
+
 static int flac_restart(void)
 {
     ring_fill = 0; ring_rd = 0; file_pos = 0;
     flac_stall = 0;
     if (!prefill()) return 0;
+    fl.skip = flac_skip_bytes;      /* set BEFORE open: it survives the zeroing */
     if (flac_open(&fl, flac_pull, 0, fl_buf, fl_cap) != FLAC_OK) return 0;
     pcm_rate_apply(fl.rate);
     return 1;
@@ -7053,6 +7089,7 @@ static int load_track(void)
         fl.tag_trk    = track_trk;
         fl.tag_cap    = sizeof(track_title);
 
+        fl.skip = flac_skip_bytes;  /* set BEFORE open: it survives the zeroing */
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
         if (fe == FLAC_ERR_UNSUPPORTED) {
             /* Mirrors the order of the checks inside flac_open, so the reason

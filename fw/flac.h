@@ -34,6 +34,18 @@
  * file. */
 typedef int (*flac_read_fn)(void *ctx, uint8_t *dst, int n);
 
+/* OPTIONAL. Moves the underlying stream forward by n bytes without delivering
+ * them, returning non-zero on success. Leave null and the decoder reads and
+ * discards instead, which is correct but pays for every byte.
+ *
+ * It exists for metadata. flac_open() wants STREAMINFO and VORBIS_COMMENT and
+ * has to walk past everything else to reach the audio -- and "everything else"
+ * is usually the cover art. Measured on this hardware: 259318 bytes of PICTURE
+ * and 75214 of PADDING read through the bit reader one byte at a time, 628 ms
+ * of a 930 ms FLAC load, for data the caller then reads AGAIN by itself to
+ * decode the artwork. */
+typedef int (*flac_skip_fn)(void *ctx, uint32_t n);
+
 typedef enum {
     FLAC_OK = 0,
     FLAC_END,                 /* clean end of stream                        */
@@ -48,6 +60,7 @@ typedef enum {
 typedef struct {
     /* ---- input ---- */
     flac_read_fn  read;
+    flac_skip_fn  skip;           /* optional; see flac_skip_fn             */
     void         *ctx;
     uint8_t       buf[512];
     uint32_t      have, pos;      /* bytes in buf, and read cursor          */

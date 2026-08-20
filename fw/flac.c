@@ -191,11 +191,13 @@ flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
     char *t_ti = f->tag_title,  *t_ar = f->tag_artist, *t_al = f->tag_album;
     char *t_yr = f->tag_year,   *t_tk = f->tag_trk;
     uint32_t t_cap = f->tag_cap;
+    flac_skip_fn t_skip = f->skip;      /* set by the caller, same as above */
 
     for (uint32_t i = 0; i < sizeof(*f); i++) ((uint8_t *)f)[i] = 0;
     f->read = read; f->ctx = ctx; f->ch0 = ch0; f->ch0_cap = ch0_cap;
     f->tag_title = t_ti; f->tag_artist = t_ar; f->tag_album = t_al;
     f->tag_year  = t_yr; f->tag_trk    = t_tk; f->tag_cap   = t_cap;
+    f->skip      = t_skip;
 
     if (bits(f, 32) != 0x664C6143u) return FLAC_ERR_MAGIC;   /* "fLaC" */
 
@@ -228,7 +230,31 @@ flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
         } else if (type == 4u) {                             /* VORBIS_COMMENT */
             vorbis_comments(f, length);
         } else {
-            for (uint32_t i = 0; i < length; i++) (void)bits(f, 8);
+            /* A block we do not want -- PICTURE and PADDING, overwhelmingly.
+             * Ask the caller to move the stream instead of reading it.
+             *
+             * The accounting is the whole risk here: at this point the reader
+             * is holding bytes in `buf` AND bits in the reservoir, all of them
+             * stream content already fetched. Only what lies BEYOND that can
+             * be skipped remotely, and the held part is dropped afterwards.
+             *
+             * Ordered so a refusal is harmless: nothing is discarded until
+             * skip() has reported success, so a caller that declines leaves
+             * the reader exactly as it was and the byte loop below still runs.
+             * Byte alignment is required rather than assumed -- every read up
+             * to here is a whole number of bytes, and if that ever stops being
+             * true this quietly does the safe thing instead of losing a
+             * fraction of a byte. */
+            uint32_t left = length;
+            if (f->skip && (f->bitcnt & 7u) == 0u) {
+                uint32_t held = (f->bitcnt >> 3) + (f->have - f->pos);
+                if (length > held && f->skip(f->ctx, length - held)) {
+                    f->bitacc = 0; f->bitcnt = 0;
+                    f->pos = f->have = 0;
+                    left = 0;
+                }
+            }
+            for (uint32_t i = 0; i < left; i++) (void)bits(f, 8);
         }
         if (f->eof) return FLAC_ERR_SHORT;
     }

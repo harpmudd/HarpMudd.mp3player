@@ -42,9 +42,12 @@ What changed in each release, newest first.
 - **The meters have more headroom.** On loud material they were running close
   to the top of their range and flattening out there. They behave exactly as
   before, just lower.
-- **FLAC tracks load faster.** Measuring the file's length used to block the
-  load for about half a second; it now happens quietly during playback, so a
-  track starts sooner. The first seek of a track no longer pays for it either.
+- **FLAC tracks load faster.** Two things were slowing them down. Measuring the
+  file's length used to block the load for about half a second; it now happens
+  quietly during playback, and the first seek of a track no longer pays for it
+  either. And opening a FLAC used to read straight through the embedded cover
+  art — a quarter of a megabyte on a typical album — just to reach the audio
+  behind it; it now steps over it.
 - The playlist limits are now written down in the README.
 
 ## v1.3.0 — 15 August 2026
