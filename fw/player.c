@@ -1498,6 +1498,10 @@ static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
 static uint8_t  art_pref = 1, art_have;
 static uint32_t art_file_id;      /* 0190 identity the stash was decoded for */
 static uint32_t art_sig;          /* fingerprint of the IMAGE the stash holds  */
+/* An image already known to be undecodable. Without this, a cover the core
+ * cannot read is re-attempted on every track of the album -- and, worse, the
+ * message explaining why appears on every one of them. */
+static uint32_t art_bad_sig;
 static uint32_t art_toggle, art_next;   /* rolling amplitude history, 0..UI_WAVE_H */
 static int      ui_underrun_shown;
 
@@ -7239,12 +7243,35 @@ static int load_track(void)
         uint32_t sig = art_sig_of(audio_start);
         if (art_have && sig && sig == art_sig) {
             has_art = 1;                 /* the stash already holds this cover */
+        } else if (sig && sig == art_bad_sig) {
+            /* Known bad. Say nothing and try nothing: it was explained when
+             * this image was first met, and repeating either the work or the
+             * message on all thirteen tracks of an album helps nobody. */
+            ui_art_mount();
+            ui_art_placeholder();
+            ui_art_round();
+            has_art = 0;
         } else {
             ui_art_mount();
             has_art = art_decode(audio_start);
             if (!has_art) ui_art_placeholder();
             ui_art_round();
             art_sig = has_art ? sig : 0u;
+
+            /* A cover that IS there and cannot be read is worth a word. An
+             * empty frame with no reason for it reads as the core being
+             * broken, and the reason was already in hand -- picojpeg says
+             * exactly why and it was being thrown away.
+             *
+             * Only when a picture was actually found: art_fail_code stays 0
+             * when a file simply has no artwork, which is not a fault and
+             * needs no announcement. */
+            if (!has_art && art_fail_code) {
+                art_bad_sig = sig;
+                ui_toast_msg(art_fail_code == PJPG_UNSUPPORTED_MODE
+                             ? "COVER: PROGRESSIVE JPEG"
+                             : "COVER: CANNOT BE READ");
+            }
         }
         art_file_id = cur_file_id;
     }

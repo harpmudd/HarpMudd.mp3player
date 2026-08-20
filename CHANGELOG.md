@@ -20,6 +20,10 @@ What changed in each release, newest first.
 - **A speaker icon shows the volume**, beside the repeat and shuffle icons —
   muted, low, medium or high. The level used to appear only as a message that
   had gone by the time you wondered why the music was quiet.
+- **A cover that can't be shown now says why.** Progressive JPEG artwork isn't
+  supported and used to leave an empty frame with no explanation; the core names
+  the reason once per album instead. Re-saving the cover as a baseline JPEG
+  fixes it.
 - Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
   full level.
 - Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was

@@ -76,6 +76,13 @@ static uint16_t art_line[ART_IMG];      /* the row currently being emitted   */
 static uint8_t art_xmap[ART_FULL_MAX];  /* sx -> accumulator column   */
 static uint8_t art_yslot[ART_FULL_MAX]; /* sy -> accumulator row slot */
 static uint32_t art_jpg_pos, art_jpg_end;   /* file offsets of the image data */
+
+/* Why the last art_decode() gave up, as picojpeg reported it. 0 means either
+ * success or no picture to decode at all -- the two cases nobody needs telling
+ * about. Kept because the answer was already known and thrown away: a
+ * progressive cover comes back as PJPG_UNSUPPORTED_MODE and the user saw an
+ * empty frame with no reason for it. */
+static uint8_t art_fail_code;
 static uint32_t art_win_len, art_win_pos;   /* window currently held in tagbuf */
 
 /* picojpeg asks for at most 255 bytes at a time. Serving each of those with its
@@ -372,14 +379,18 @@ static uint32_t art_sig_of(uint32_t tag_len)
 static int art_decode(uint32_t tag_len)
 {
     /* Same decoder, different finder. */
+    art_fail_code = 0;
     int found = (track_fmt == FMT_FLAC)
               ? art_find_flac_picture()
               : (tag_len && art_find_apic(tag_len));
-    if (!found) return 0;
+    if (!found) return 0;                    /* no picture: nothing to explain */
     uint32_t jpg_start = art_jpg_pos;        /* to rewind for a second init */
 
     pjpeg_image_info_t info;
-    if (pjpeg_decode_init(&info, art_need_bytes, 0, 1 /* reduce */)) return 0;
+    {
+        unsigned char st = pjpeg_decode_init(&info, art_need_bytes, 0, 1 /* reduce */);
+        if (st) { art_fail_code = st; return 0; }
+    }
 
     uint32_t iw = (uint32_t)info.m_width, ih = (uint32_t)info.m_height;
     if (!iw || !ih) return 0;
@@ -396,7 +407,8 @@ static int art_decode(uint32_t tag_len)
         art_jpg_pos = jpg_start;
         art_win_len = 0;
         art_win_pos = 0;
-        if (pjpeg_decode_init(&info, art_need_bytes, 0, 0 /* full */)) return 0;
+        unsigned char st = pjpeg_decode_init(&info, art_need_bytes, 0, 0 /* full */);
+        if (st) { art_fail_code = st; return 0; }
     }
 
     uint32_t bxn = (uint32_t)info.m_MCUWidth / 8u;
@@ -450,7 +462,10 @@ static int art_decode(uint32_t tag_len)
     uint32_t next_ay = 0;
     for (uint32_t my = 0; my < (uint32_t)info.m_MCUSPerCol; my++) {
         for (uint32_t mx = 0; mx < (uint32_t)info.m_MCUSPerRow; mx++) {
-            if (pjpeg_decode_mcu()) return 0;
+            {
+                unsigned char st = pjpeg_decode_mcu();
+                if (st) { art_fail_code = st; return 0; }
+            }
             for (uint32_t by = 0; by < byn; by++) {
                 for (uint32_t bx = 0; bx < bxn; bx++) {
                     /* Blocks sit in a fixed 2x2 grid of 64-byte slots, so a
