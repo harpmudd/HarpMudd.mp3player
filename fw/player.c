@@ -1579,7 +1579,18 @@ static uint32_t spec_cnt[SPEC_BANDS];     /* per-stage rate dividers         */
 static uint32_t spec_acc[SPEC_BANDS];     /* |band| summed over the window   */
 static uint32_t spec_n;                   /* samples in the window           */
 static unsigned char spec_lvl[SPEC_BANDS];    /* published, 0..255           */
-static unsigned char spec_drawn[SPEC_BANDS];  /* last drawn; 0xFF = repaint  */
+/* Last drawn as a ROW COUNT, not as a level.
+ *
+ * This is what stopped the flicker. Comparing the 0..255 level means something
+ * differs on virtually every update -- 255 steps against 12 rows -- so all 96
+ * blocks were repainted continuously, overdrawing colours that had not
+ * changed. Comparing rows means a band only redraws when it crosses a
+ * boundary, and only the rows between the old count and the new get touched:
+ * typically one or two rects instead of ninety-six.
+ *
+ * 0xFF is the sentinel for "the chrome repainted underneath you", as
+ * everywhere else here. */
+static unsigned char spec_drawn[SPEC_BANDS];
 
 /* Per-band gain, Q4, low band first.
  *
@@ -3625,39 +3636,43 @@ static void ui_draw_dynamic(void)
             if (paused)
                 for (uint32_t b = 0; b < SPEC_BANDS; b++) spec_lvl[b] = 0;
 
-            int moved = 0;
-            for (uint32_t b = 0; b < SPEC_BANDS; b++)
-                if (spec_lvl[b] != spec_drawn[b]) { moved = 1; break; }
+            /* The gaps between blocks show background, and the background is
+             * a per-row ramp -- a flat fill is the mistake the magic eye made.
+             * Only on a repaint: the gaps never move. */
+            int repaint = (spec_drawn[0] == 0xFFu);
+            if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
 
-            if (moved) {
-                /* The gaps between blocks show background, and the background
-                 * is a per-row ramp -- a flat fill is the mistake the magic
-                 * eye made. Only on a repaint: the gaps never move. */
-                if (spec_drawn[0] == 0xFFu)
-                    ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            uint32_t colw  = ww / SPEC_BANDS;
+            uint32_t bw    = (colw > SPEC_GAPX) ? colw - SPEC_GAPX : 1u;
+            uint32_t pitch = LED_BLKH + LED_GAPV;
 
-                uint32_t colw  = ww / SPEC_BANDS;
-                uint32_t bw    = (colw > SPEC_GAPX) ? colw - SPEC_GAPX : 1u;
-                uint32_t pitch = LED_BLKH + LED_GAPV;
+            for (uint32_t b = 0; b < SPEC_BANDS; b++) {
+                uint32_t lit  = ((uint32_t)spec_lvl[b] * LED_ROWS) / 256u;
+                uint32_t prev = spec_drawn[b];
 
-                for (uint32_t b = 0; b < SPEC_BANDS; b++) {
-                    spec_drawn[b] = spec_lvl[b];
-                    uint32_t lit = ((uint32_t)spec_lvl[b] * LED_ROWS) / 256u;
-                    uint32_t x0  = UI_MARGIN + b * colw;
-                    for (uint32_t r = 0; r < LED_ROWS; r++) {
-                        uint32_t y = UI_WAVE_Y + UI_WAVE_H - (r + 1u) * pitch;
-                        uint16_t c;
-                        if (r < lit) {
-                            uint32_t half = LED_ROWS / 2u;
-                            c = (r < half)
-                              ? ui_mix(LED_LO, LED_MIDC, r, half)
-                              : ui_mix(LED_MIDC, LED_HI, r - half,
-                                       LED_ROWS - half);
-                        } else {
-                            c = UI_TRACK;
-                        }
-                        fb_rect(x0, y, bw, LED_BLKH, c);
+                /* Nothing crossed a row boundary: draw nothing at all. In
+                 * ordinary music most bands are in this state on most
+                 * updates, which is the whole saving. */
+                if (!repaint && lit == prev) continue;
+
+                uint32_t lo = repaint ? 0u : (lit < prev ? lit : prev);
+                uint32_t hi = repaint ? LED_ROWS : (lit > prev ? lit : prev);
+                spec_drawn[b] = (unsigned char)lit;
+
+                uint32_t x0 = UI_MARGIN + b * colw;
+                for (uint32_t r = lo; r < hi; r++) {
+                    uint32_t y = UI_WAVE_Y + UI_WAVE_H - (r + 1u) * pitch;
+                    uint16_t c;
+                    if (r < lit) {
+                        uint32_t half = LED_ROWS / 2u;
+                        c = (r < half)
+                          ? ui_mix(LED_LO, LED_MIDC, r, half)
+                          : ui_mix(LED_MIDC, LED_HI, r - half,
+                                   LED_ROWS - half);
+                    } else {
+                        c = UI_TRACK;
                     }
+                    fb_rect(x0, y, bw, LED_BLKH, c);
                 }
             }
             goto viz_done;
