@@ -801,7 +801,7 @@ static void pl_stem_of(const char *name, char *out)
      * stack and the whole of it is copied into pl_saved_stem and then written
      * to the persist file on the card, so whatever was left in those bytes
      * ends up in a file. Nothing reads past the terminator, so this never
-     * misbehaved -- but the persisted stem read back as "playlist t D", the
+     * misbehaved -- but the persisted stem read back as "playlist\0t D", the
      * tail being the remains of "Crash Test D" from a longer name stored
      * earlier, which is stack residue in a user's settings and is misleading
      * to anyone debugging from that file. */
