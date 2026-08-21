@@ -6871,8 +6871,27 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
  * computed once at load and slot_size is no longer known by then. Anything
  * else that waits on the size belongs here too rather than in another copy of
  * this. */
+/* TEST SWITCH -- 1 restores the normal behaviour.
+ *
+ * The probe binary-searches with reads at far random offsets ON THE SAME SLOT
+ * the decoder is streaming from: 60 MB out for the clamp reference, then
+ * doubling. Every measurement points here. There is no underrun at the moment
+ * of the stutter, so the bytes keep arriving -- but if a far seek disturbs the
+ * slot's sequential position, the refills that follow return the WRONG bytes,
+ * the decoder resyncs at the next frame, and that is heard as a light stutter
+ * with the FIFO still full. It starts at fl_first_frame + 256 KB, which on a
+ * ~1000 kbps FLAC is about two seconds in.
+ *
+ * Turning it off is the A/B that convicts or clears it in one sitting. With
+ * this at 0 the progress bar and the seek bracket lose their early size --
+ * seek falls back to the blocking probe on first press, which is the old
+ * behaviour, and the bitrate row is unaffected because it no longer derives
+ * from slot_size. */
+#define SZP_DURING_PLAY 0
+
 static int size_probe_pump(void)
 {
+    if (!SZP_DURING_PLAY) return 0;
     if (!szp_phase || szp_phase >= 4u) return 0;
     if (!size_probe_step()) return 0;
 
