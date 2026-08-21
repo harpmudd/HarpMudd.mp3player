@@ -170,8 +170,9 @@ and says how many it skipped.
 
 - **Title and artist** from the file's tag. One with no readable tag shows its
   filename, which is usually the song name anyway.
-- **Album art** from the tag's embedded image — baseline JPEG only; tracks
-  without it don't show the panel.
+- **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
+  cover show no panel; a cover that can't be decoded shows the panel with the
+  reason in it.
 - **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
   scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
   bars, peak dots, a magic eye and a 16-band spectrum analyser.
@@ -255,9 +256,12 @@ framework bugs that had to be found first — is in
 
 - **FLAC up to 48 kHz.** Hi-res files are turned away with the reason on
   screen; see [FLAC](#flac) for why, and what to convert them to.
-- **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
-  skipped rather than shown wrong — re-save as baseline if a cover doesn't
-  appear. See [ROADMAP.md](ROADMAP.md).
+- **Baseline JPEG album art only,** and a cover that can't be shown says so
+  rather than silently going missing. A progressive JPEG shows **PROG. JPEG**
+  in the art panel; anything else that won't decode — a PNG cover, a damaged
+  image — shows **COVER ERROR**. Re-saving the cover as a baseline JPEG fixes
+  it. A track with no embedded cover at all shows no panel, which is different
+  and intended. See [ROADMAP.md](ROADMAP.md).
 - **Playlists are capped at 256 tracks**, or 12 KB of `.m3u` text — whichever
   comes first, which allows about 48 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
