@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.4.0 — unreleased
+## v1.4.0 — 21 August 2026
 
 - **Playlist browser** — tap **Select**. **Up**/**Down** moves,
   **Left**/**Right** pages, **Y** jumps to the playing track, **A** plays.
