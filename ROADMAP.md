@@ -168,6 +168,28 @@ the true size for free from `refill_pump` when a read past EOF fails.
 Verified on hardware: stutter gone, FLAC seek unchanged, format row still
 populates.
 
+### v1.4.0 post-release verification — ALL THREE PASS, 2026-08-21
+
+The three checks the merge commit recorded as outstanding, confirmed on
+hardware after the release was published:
+
+- **Total time on a headerless MP3.** The consumer most at risk from scoping
+  the probe, since those files are the only ones that still depend on it. It
+  also covers the `fl_first_frame` leak below, which delayed the probe on any
+  MP3 that followed a FLAC — on a 128 kbps track, from 16 seconds to 56.
+- **Elapsed clock on MPEG-2.** The `samp_per_frame` fix, which was the only
+  change on the branch shipped without hardware behind it. MPEG-2 frames carry
+  576 samples against MPEG-1's 1152, so a failure would have shown as a clock
+  running at exactly double speed on 17 of the audiobook's 26 chapters and
+  correct on the other 9.
+- **No diagnostic text on screen.** This branch carried instrumentation
+  through several builds — an underrun latch, a per-sample click detector and
+  a debug row under the progress bar. `UI_SHOW_DIAG` is back to 0 and the
+  per-sample code is compiled out, but "no diagnostic reaches a user" is a
+  promise that deserves eyes rather than a grep.
+
+v1.4.0 is fully verified. No open defect on the release.
+
 ### WITHDRAWN from the README 2026-08-21 -- never actually observed
 
 The limitation below was written from INFERENCE, not observation: the probe
