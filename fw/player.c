@@ -4998,9 +4998,21 @@ ui_tail:
      *      would convict the thing already suspected once.
      * R    ring bytes ahead / 64. Under 40 (2.5 KB) is genuinely empty. */
     {
-        static uint32_t last_u = 0xFFFFFFFEu;
-        if (und1_sec != last_u) {
-            last_u = und1_sec;
+        /* BELOW the progress bar, and repainted every second.
+         *
+         * It was at FB_H-34 and FB_H-24, which are both inside the band the
+         * progress bar clears -- UI_PROG_Y-3 to +8, i.e. 331..342 -- and the
+         * bar repaints every second while this repainted only when it changed,
+         * so the bar always won and the row was invisible. The gap between the
+         * bar and the bottom edge is 342..360 and nothing else paints there;
+         * a 16px cell at 344 fits it exactly.
+         *
+         * Keyed on ui_sec as well so a stray repaint elsewhere cannot bury it
+         * again. Once a second, not once a frame -- this build is diagnosing a
+         * TIMING fault and must not add drawing to the very loop in question. */
+        static uint32_t last_u = 0xFFFFFFFEu, last_us = 0xFFFFFFFFu;
+        if (und1_sec != last_u || ui_sec != last_us) {
+            last_u = und1_sec; last_us = ui_sec;
             char b[48], *q = b;
             *q++ = 'U';
             if (und1_sec == 0xFFFFFFFFu) { *q++ = '-'; *q++ = '-'; }
@@ -5011,10 +5023,10 @@ ui_tail:
             *q++ = ' '; *q++ = 'R'; q = ui_dec(q, und1_ring);
             *q++ = ' '; *q++ = 'N'; q = ui_dec(q, pcm_under_n);
             *q = 0;
-            uint16_t ub = ui_grad_at((FB_H - 34u));
-            fb_rect(UI_MARGIN, FB_H - 34u, UI_INNER_W, FB_CELL(TS_1X), ub);
+            uint16_t ub = ui_grad_at((FB_H - 16u));
+            fb_rect(UI_MARGIN, FB_H - 16u, UI_INNER_W, FB_CELL(TS_1X), ub);
             fb_set_color(UI_RED, ub);
-            fb_text_clipped(UI_MARGIN, FB_H - 34u, b, TS_1X, TS_1X, UI_INNER_W);
+            fb_text_clipped(UI_MARGIN, FB_H - 16u, b, TS_1X, TS_1X, UI_INNER_W);
         }
     }
 #endif
