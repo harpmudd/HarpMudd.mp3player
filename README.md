@@ -88,7 +88,7 @@ remembered.
 
 ### The playlist browser
 
-<img src="docs/screenshot2.png" width="280" align="right" alt="Playlist browser: a PLAYLIST 13 of 14 header above nine filename rows, with Gorillaz - Feel Good Inc. highlighted and marked by a cursor; the transport row, times and progress bar stay visible underneath">
+<img src="docs/screenshot2.png" width="280" align="right" alt="Playlist browser: a PLAYLIST 12 of 14 header above nine filename rows, with Gorillaz - Feel Good Inc. highlighted mid-list and marked by a cursor; the transport row, times and progress bar stay visible underneath">
 
 **Tap Select** to browse the playlist on screen. It opens on the track that's
 playing, so you always start from where you are. The transport row, the times
