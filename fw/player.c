@@ -1168,9 +1168,7 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
 #define UI_CARD_H  120u
-#define UI_SHOW_DIAG 1        /* 1 = show A/S/T/F reload diagnostics */
-/* TEMPORARILY 1 to attribute the 2-3 s hiccup. Back to 0 before shipping --
- * no diagnostic is ever shown to users. */
+#define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
 
 /* Speed-branch instrumentation. ON by default here and NOT behind a button
  * combo, deliberately: the last diagnostic on this project never appeared
@@ -6804,6 +6802,7 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
          * At 1152 pairs the flush interval is 26 ms, which is exactly MP3's
          * frame, so both formats now drive the meters at the same rate through
          * the same code. Ignoring frame boundaries keeps the interval even. */
+#if UI_SHOW_DIAG
         {
             int32_t xl = (int32_t)src[i * 2];
             int32_t d  = xl - clk_prev;
@@ -6815,6 +6814,7 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
             }
             clk_prev = xl;
         }
+#endif
         pcm[fl_meter_n * 2u]      = src[i * 2];
         pcm[fl_meter_n * 2u + 1u] = src[i * 2 + 1];
         if (++fl_meter_n == FL_METER_PAIRS) {
@@ -6871,27 +6871,45 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
  * computed once at load and slot_size is no longer known by then. Anything
  * else that waits on the size belongs here too rather than in another copy of
  * this. */
-/* TEST SWITCH -- 1 restores the normal behaviour.
- *
- * The probe binary-searches with reads at far random offsets ON THE SAME SLOT
- * the decoder is streaming from: 60 MB out for the clamp reference, then
- * doubling. Every measurement points here. There is no underrun at the moment
- * of the stutter, so the bytes keep arriving -- but if a far seek disturbs the
- * slot's sequential position, the refills that follow return the WRONG bytes,
- * the decoder resyncs at the next frame, and that is heard as a light stutter
- * with the FIFO still full. It starts at fl_first_frame + 256 KB, which on a
- * ~1000 kbps FLAC is about two seconds in.
- *
- * Turning it off is the A/B that convicts or clears it in one sitting. With
- * this at 0 the progress bar and the seek bracket lose their early size --
- * seek falls back to the blocking probe on first press, which is the old
- * behaviour, and the bitrate row is unaffected because it no longer derives
- * from slot_size. */
-#define SZP_DURING_PLAY 0
-
 static int size_probe_pump(void)
 {
-    if (!SZP_DURING_PLAY) return 0;
+    /* ONLY for files whose duration cannot be known any other way.
+     *
+     * This search binary-searches with reads at far random offsets ON THE SAME
+     * SLOT the decoder is streaming from -- 60 MB out for the clamp reference,
+     * then doubling -- and that corrupts the stream it is measuring. Confirmed
+     * by A/B on hardware: with this disabled the stutter is gone.
+     *
+     * The mechanism is the fragment cache, and this codebase already knew
+     * about it. The periodic slot-3 identity check a few thousand lines down
+     * is deliberately a 0190 metadata query rather than a read, and says so:
+     * "does not drag the MP3 slot's fragment cache down with it the way a
+     * periodic poll of slot 3 would." A far read on the STREAMING slot does
+     * exactly that, the refills that follow return the wrong bytes, and the
+     * decoder resyncs at the next frame. It is heard as a light stutter and
+     * leaves the FIFO full, which is why no underrun was ever recorded and why
+     * three fixes aimed at starvation all missed.
+     *
+     * It fired at fl_first_frame + 256 KB -- about two seconds into a
+     * ~1000 kbps FLAC, which is exactly where it was audible.
+     *
+     * Almost nothing needs it now:
+     *   duration -- ui_total_secs() returns track_secs first, from STREAMINFO
+     *               for FLAC and Xing/VBRI for MP3.
+     *   bitrate  -- derived from playback, not from the size.
+     *   seek     -- runs these same steps SYNCHRONOUSLY at the press, where a
+     *               flush follows anyway and corruption cannot be heard.
+     *   EOF      -- refill_pump discovers the true size for free when a read
+     *               past the end fails.
+     *
+     * What is left is the headerless file with no duration at all, where the
+     * choice is a rare tic against no progress bar and no total time. Those
+     * are the tracks this was built for in the first place, and a load-time
+     * probe is not an option for them: a file opened by name with 0192 has
+     * only just been opened, and a far read still fails then -- which is how a
+     * 30 MB track once measured 5 MB. So they keep the old behaviour, and
+     * everything else stops paying for it. */
+    if (track_secs) return 0;
     if (!szp_phase || szp_phase >= 4u) return 0;
     if (!size_probe_step()) return 0;
 
@@ -6902,6 +6920,7 @@ static int size_probe_pump(void)
     return 1;
 }
 
+#if UI_SHOW_DIAG
 /* Sample the underrun line and record edges. Called from both decode loops,
  * beside the existing check but independent of it. */
 static void und_sample(void)
@@ -6919,6 +6938,7 @@ static void und_sample(void)
     }
     und_prev = now;
 }
+#endif
 
 static void refill_pump(void)
 {
@@ -9342,7 +9362,9 @@ int main(void)
             /* The MP3 loop has this net a few lines further down; the FLAC
              * loop needs its own, and the count is what tells the diag row a
              * hiccup actually happened rather than was imagined. */
+#if UI_SHOW_DIAG
             und_sample();
+#endif
             if (!under_shadow && pcm_underrun()) {
                 under_shadow = 1u;
                 pcm_under_n++;
@@ -9461,7 +9483,9 @@ int main(void)
          * is sticky until the next flush, so this catches the FIRST underrun
          * of an epoch -- the net under the causes removed elsewhere, not a
          * licence to underrun. */
+#if UI_SHOW_DIAG
         und_sample();
+#endif
         if (!under_shadow && pcm_underrun()) {
             under_shadow = 1u;
             pcm_under_n++;
