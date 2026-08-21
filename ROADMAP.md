@@ -314,6 +314,62 @@ Restore the README line if anyone reports a wrong duration — the symptom is
 otherwise baffling, and the cause is a property of their file rather than
 anything they can see.
 
+## ID3v1-only tags never display from a playlist — BACKLOGGED, currently unreachable
+
+A file carrying **only** an ID3v1 tag, loaded from a playlist, shows no title,
+artist or album. Found 2026-08-21 while tagging the Aesop's Fables audiobook,
+23 of whose 26 chapters were in exactly that state.
+
+### Cause
+
+`id3v1_read()` is called from `read_track_head()`, which runs BEFORE
+`load_track()` establishes `slot_size`. Its first line is
+`if (slot_size < 128u) return;`, so on a playlist load — where `pl_arm_load()`
+zeroes `slot_size` and sets `force_size_probe`, because a file opened by name
+with 0192 raises no reload edge — it gives up immediately. On a menu load
+`R_SLOT_SZ` is valid and it works, which is why this looks intermittent.
+
+### The trap, and the reason a naive fix fails
+
+The obvious repair is to call it later, once a size exists. That does not work,
+and the reason is worth writing down because it costs an hour to rediscover.
+
+The only cheap size available on a playlist load is
+`slot_size = audio_start + track_bytes`, derived from the Xing/Info header. That
+is the end of the **audio**, not the end of the **file** — and the ID3v1 block
+sits after it. So `slot_size - 128` lands inside the last audio frame, the
+`TAG` check fails, and the result is identical to the bug by a longer route.
+
+### The fix, when it is worth doing
+
+Two parts, and the second is what makes the first useful:
+
+1. Retry the v1 read from `load_track()`, after a size exists, rather than from
+   `read_track_head()`, which runs before one does.
+2. Scan a ~512-byte window near the estimated end for the `TAG` magic instead of
+   demanding an exact offset. The Xing-derived size underestimates by precisely
+   the tag length, so a window absorbs the error.
+
+~40 lines and one helper. Touches only the load path, so it does not reopen the
+fragment-cache hazard — far reads at load are already routine there (album art
+does them). Estimate ~1 hour plus one hardware test.
+
+Coverage: Xing/Info + v1-only is fixed by the window; menu-loaded files already
+work; headerless + v1-only falls out for free, since those still probe during
+playback and a retry when `slot_size` lands would catch them.
+
+### Why it is parked
+
+**Measured, not assumed: 0 of the 14 MP3s on the card are affected.** Thirteen
+carry both a v2 title and a v1 block, so the v2 path resolves first and
+`id3v1_read()` is never reached; the fourteenth is the deliberate
+`_no_tag` test file, which has neither and would show nothing regardless.
+
+The audiobook that surfaced this was fixed at the source instead, with real
+ID3v2.3 tags written from the LibriVox metadata. Nothing on the card can now
+trigger the defect, and changing the load path for a reason that is not present
+is the exact mistake that cost three fixes in the stutter hunt above.
+
 # Enhancements
 
 ## Progressive JPEG covers are silently skipped — user report 2026-08-13
