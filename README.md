@@ -133,13 +133,10 @@ Goose - Shenanigans Nite Club.m3u
 Live/Phish - Hampton 1997.m3u
 ```
 
-The core searches it by name at boot, so a playlist can be called anything you
-like. Order doesn't matter and you can add or remove lines freely — entries are
-matched by name, not by position. Generate it with:
-
-```text
-python tools/make_playlist_index.py "D:/Assets/mp3player/common"
-```
+Write it in any text editor and save it beside your playlists, in
+`/Assets/mp3player/common/`. The core searches it by name at boot, so a
+playlist can be called anything you like. Order doesn't matter and you can add
+or remove lines freely — entries are matched by name, not by position.
 
 Without the file nothing changes: names of twelve characters or fewer are still
 remembered on their own, so an existing card keeps working exactly as it did.
