@@ -4,80 +4,66 @@ What changed in each release, newest first.
 
 ## v1.4.0 — unreleased
 
-- **Tap Select for the playlist browser.** Browse the list on screen, **Up**/**Down** to move,
-  **Left**/**Right** to page, **A** to play, **Select** or **B** to close.
-  Opens on the track that's playing, and **Y** jumps back to it. Holding
-  **Select** still shows and hides the album art.
-- **1.2x speed is harder to trigger by accident, and says when it's on.** It's
-  still a hold on **A**, but a noticeably longer one — the old timing was shared
-  with the seek scrub and was short enough to reach just by lingering on the
-  play button. While the mode is on, a small **1.2x** sits under the track
-  counter; at normal speed nothing is shown.
+### New
+
+- **Playlist browser.** Tap **Select** to browse the list on screen: **Up** /
+  **Down** to move, **Left** / **Right** to page, **Y** to jump back to the
+  playing track, **A** to play, **Select** or **B** to close. It opens on
+  what's playing. Holding **Select** still shows and hides the album art.
+- **A 16-band spectrum meter**, bass on the left through treble on the right,
+  green through amber to red as the columns climb. Eleven meters now.
+- **A volume icon** beside the repeat and shuffle indicators — muted, low,
+  medium or high. The level used to appear only as a message that had gone by
+  the time you wondered why the music was quiet.
+- **MPEG-2 files play** — the 16, 22.05 and 24 kHz rates common in audiobooks
+  and spoken word, previously listed as unsupported.
+- **Playlists can have long names again.** Only twelve characters of a
+  playlist's filename could be remembered, so an album-length name played fine
+  but was never the list that came back next launch. List your playlists in a
+  `playlists.m3u` and the limit is gone; cards without one behave as before.
+
+### Improved
+
+- **FLAC tracks load faster.** Measuring the file's length no longer blocks the
+  load, and opening a FLAC now steps over the embedded cover art instead of
+  reading through it — a quarter of a megabyte on a typical album.
+- **The meters have more headroom, and the spectrum reads in decibels.** Loud
+  material used to flatten against the top of the range. A linear scale spends
+  nearly all of itself on the loudest few decibels; the spectrum now shows
+  about 19 dB, so quiet detail is visible and different albums look alike.
+- **1.2x is harder to hit by accident, and says when it's on.** Still a hold on
+  **A**, but a longer one — the old timing was shared with the seek scrub. A
+  small **1.2x** sits under the track counter while the mode is active.
+- **A cover that can't be shown says so**, instead of looking exactly like a
+  track with no artwork. The art panel shows **PROG. JPEG** for a progressive
+  JPEG, or **COVER ERROR** for anything else that won't decode. Re-saving as a
+  baseline JPEG fixes it.
 - Small visual tidying: the format line shows the full codec (**FLAC 16-bit**
-  was appearing as *FLAC 16-*), the selected row in the playlist has rounded
-  corners to match the panel it sits in, and the progress bar has softened ends
-  and a lit top edge.
-- **A new meter: SPECTRUM.** Sixteen columns of lit blocks, bass on the left
-  through treble on the right, each moving on its own with the music. Coloured
-  green through amber to red as they climb. Eleven meters now.
-- **A speaker icon shows the volume**, beside the repeat and shuffle icons —
-  muted, low, medium or high. The level used to appear only as a message that
-  had gone by the time you wondered why the music was quiet.
-- **A cover that can't be shown now says so.** Progressive JPEG artwork isn't
-  supported, and a track carrying one used to look exactly like a track with no
-  artwork at all — no panel, no explanation. The panel now appears with the
-  reason in it. Re-saving the cover as a baseline JPEG fixes it properly.
-- Fixed: **volume had no effect on FLAC.** Turning it to zero still played at
-  full level.
-- Fixed: **seeking a FLAC put the clock in the wrong place**, and the error was
-  permanent — seek near the end of a track and the counter reached the total
-  while the music kept playing. Seeking now measures where it lands instead of
-  assuming, so the time shown is the time you are at. Present since 1.3.0.
-- Fixed: **a FLAC played from a playlist would barely seek at all**, while the
-  same file opened with Load MP3 seeked normally. The core was measuring the
-  file's size too early and reading it far too small — a 30 MB track came out
-  as 5 MB — which also showed as a nonsense bitrate in the header. Both are
-  right now.
-- Fixed: **resume started tracks from the beginning.** It knew the right place
-  the whole time — it was waiting on the file's length, which had moved to
-  being measured during playback rather than at load, and gave up before the
-  answer arrived.
-- Fixed: **resume returned to the wrong track in playlists over 128 entries.**
-  Track 200 of 240 came back as track 72.
-- **Playlists can have long names again.** The core could only remember twelve
-  characters of a playlist's filename, so an album-length name played fine but
-  was never the list that came back next launch — and nothing on screen said
-  so. List your playlists in a `playlists.m3u` and the limit is gone.
-  Cards without one behave exactly as before.
-- **The meters have more headroom,** and the spectrum reads in decibels rather
-  than linearly. On loud material the meters were running close to the top of
-  their range and flattening out there. A linear scale spends nearly all of its
-  range on the loudest few decibels, so a track mastered louder than another
-  simply pinned; the spectrum now shows about 19 dB, which is why quiet detail
-  is visible and different albums look like each other.
-- **FLAC tracks load faster.** Two things were slowing them down. Measuring the
-  file's length used to block the load for about half a second; it now happens
-  quietly during playback, and the first seek of a track no longer pays for it
-  either. And opening a FLAC used to read straight through the embedded cover
-  art — a quarter of a megabyte on a typical album — just to reach the audio
-  behind it; it now steps over it.
-- Fixed: **a light stutter about two seconds into every FLAC.** The core
-  measures a file's length by reading at far-apart offsets, and it was doing
-  that on the same file it was streaming — which disturbed the stream and made
-  the decoder resynchronise. It now measures only the files that have no other
-  way to report their length, and everything else is left alone. Tracks with no
-  duration header may still tic; there is no other way to time them.
-- Fixed: **the encoding line on the info screen often stayed blank for FLAC.**
-  It was waiting on the file's measured length, which does not always arrive.
-  It is now worked out from playback itself and appears a few seconds in.
-- **MPEG-2 files play.** The lower sample rates used by spoken-word recordings
-  and audiobooks — 16, 22.05 and 24 kHz — were previously listed as unsupported.
-  They decode and play at the right speed.
-- Fixed: **the elapsed time ran at double speed on MPEG-2 files.** Affects
-  spoken-word and low-bitrate recordings, where MPEG-2 is common; music is
-  almost always MPEG-1 and was never affected. Playback speed itself was always
-  correct — this was the clock and the progress bar.
+  was appearing as *FLAC 16-*), the selected playlist row has rounded corners,
+  and the progress bar has softened ends and a lit top edge.
 - The playlist limits are now written down in the README.
+
+### Fixed
+
+- **A light stutter about two seconds into every FLAC.** Measuring a file's
+  length meant reading at far-apart offsets on the file being streamed, which
+  disturbed the stream and made the decoder resynchronise. Only files with no
+  other way to report their length are measured this way now.
+- **Volume had no effect on FLAC.** Turning it to zero still played at full
+  level.
+- **Seeking a FLAC put the clock in the wrong place,** permanently — seek near
+  the end and the counter reached the total while the music kept playing. It
+  now measures where it lands rather than assuming. Present since 1.3.0.
+- **A FLAC played from a playlist would barely seek at all,** while the same
+  file opened with Load MP3 seeked normally. Its size was being read far too
+  small — a 30 MB track came out as 5 MB — which also showed as a nonsense
+  bitrate in the header.
+- **Resume started tracks from the beginning,** and **returned to the wrong
+  track in playlists over 128 entries** — track 200 of 240 came back as 72.
+- **The encoding line often stayed blank for FLAC.** It's now worked out from
+  playback itself and appears a few seconds in.
+- **Elapsed time ran at double speed on MPEG-2 files.** Playback speed was
+  always correct; this was the clock and the progress bar.
 
 ## v1.3.0 — 15 August 2026
 
