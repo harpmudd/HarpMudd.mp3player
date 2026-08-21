@@ -604,6 +604,26 @@ static uint32_t paused, volume = 65u;    /* overridden by the saved setting     
 static uint32_t fade_left;
 static uint8_t  under_shadow;   /* underrun already faded this flush epoch */
 static uint32_t pcm_under_n;    /* underrun EDGES since boot, for the diag  */
+
+/* FIRST underrun of the current track, latched with its circumstances.
+ *
+ * The hiccup two to three seconds in has now survived one fix aimed at the
+ * size probe, and reading the code has eliminated the other two candidates:
+ * probe_file_size() only runs on a seek press, and art_decode() runs inside
+ * load_track() before a sample is played. Guessing a fourth time is not a
+ * plan.
+ *
+ * The first question is not WHICH cause -- it is whether the glitch is a
+ * starved decoder at all. If no underrun edge is recorded while it is plainly
+ * audible, then no amount of buffer or I/O work can fix it and the fault is
+ * downstream, in the fade, the glide or the decoder itself. That is a
+ * different repair entirely, and this tells the two apart in one sitting.
+ *
+ * DEBUG BUILD ONLY -- displayed under UI_SHOW_DIAG, which ships at 0. */
+static uint32_t und1_sec = 0xFFFFFFFFu;  /* second it happened, FFFF = never */
+static uint8_t  und1_idle, und1_io;      /* CPU split at that instant       */
+static uint8_t  und1_szp;                /* size-probe phase; 0 = not running */
+static uint16_t und1_ring;               /* ring bytes ahead, in 64B units  */
 /* Where the CPU's second actually goes, so the hiccup can be ATTRIBUTED
  * instead of guessed at. Three outcomes, three different fixes:
  *
@@ -1112,7 +1132,9 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
 #define UI_CARD_H  120u
-#define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
+#define UI_SHOW_DIAG 1        /* 1 = show A/S/T/F reload diagnostics */
+/* TEMPORARILY 1 to attribute the 2-3 s hiccup. Back to 0 before shipping --
+ * no diagnostic is ever shown to users. */
 
 /* Speed-branch instrumentation. ON by default here and NOT behind a button
  * combo, deliberately: the last diagnostic on this project never appeared
@@ -2484,6 +2506,7 @@ static void ui_draw_chrome(void)
 
     ui_info_y    = y;
     ui_last_info = 0xFFFFFFFFu;
+    und1_sec     = 0xFFFFFFFFu;   /* the latch is per TRACK, not per boot */
 
     /* Wave bed. Bars grow upward from the baseline, so clear the whole band
      * once here and let ui_draw_dynamic() repaint only the bars. */
@@ -4961,6 +4984,38 @@ ui_tail:
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), dbg);
         fb_set_color(UI_RED, dbg);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+
+    /* The first underrun of this track, and what the CPU was doing when it
+     * happened. Reads as:  U<sec> I<idle%> O<io%> P<szp> R<ring/64>
+     *
+     * U--  means NO underrun was recorded. If the hiccup is audible anyway,
+     *      the decoder was never starved and the fault is downstream -- fade,
+     *      glide or decode -- so buffers and SD reads are the wrong tree.
+     * O    high says the decoder sat waiting on bytes: ring or card too slow.
+     * I    high says the CPU had time to spare, so a stall took it away.
+     * P    non-zero says the size probe was mid-search at that instant, which
+     *      would convict the thing already suspected once.
+     * R    ring bytes ahead / 64. Under 40 (2.5 KB) is genuinely empty. */
+    {
+        static uint32_t last_u = 0xFFFFFFFEu;
+        if (und1_sec != last_u) {
+            last_u = und1_sec;
+            char b[48], *q = b;
+            *q++ = 'U';
+            if (und1_sec == 0xFFFFFFFFu) { *q++ = '-'; *q++ = '-'; }
+            else q = ui_dec(q, und1_sec);
+            *q++ = ' '; *q++ = 'I'; q = ui_dec(q, und1_idle);
+            *q++ = ' '; *q++ = 'O'; q = ui_dec(q, und1_io);
+            *q++ = ' '; *q++ = 'P'; q = ui_dec(q, und1_szp);
+            *q++ = ' '; *q++ = 'R'; q = ui_dec(q, und1_ring);
+            *q++ = ' '; *q++ = 'N'; q = ui_dec(q, pcm_under_n);
+            *q = 0;
+            uint16_t ub = ui_grad_at((FB_H - 34u));
+            fb_rect(UI_MARGIN, FB_H - 34u, UI_INNER_W, FB_CELL(TS_1X), ub);
+            fb_set_color(UI_RED, ub);
+            fb_text_clipped(UI_MARGIN, FB_H - 34u, b, TS_1X, TS_1X, UI_INNER_W);
+        }
     }
 #endif
 
@@ -9180,6 +9235,15 @@ int main(void)
                 under_shadow = 1u;
                 pcm_under_n++;
                 fade_left    = FADE_SAMPLES;
+                /* Latch the circumstances of the FIRST one only -- the later
+                 * ones are consequences and would overwrite the evidence. */
+                if (und1_sec == 0xFFFFFFFFu) {
+                    und1_sec  = ui_sec;
+                    und1_idle = fl_idle_pct;
+                    und1_io   = fl_io_pct;
+                    und1_szp  = (uint8_t)szp_phase;
+                    und1_ring = (uint16_t)((ring_fill - ring_rd) >> 6);
+                }
             }
             flac_err fe = flac_decode_frame(&fl, flac_emit, 0);
             /* Meters are fed from flac_emit on a fixed 1152-pair interval,
