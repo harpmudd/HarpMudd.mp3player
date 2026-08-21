@@ -45,7 +45,7 @@ The controls:
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (ten styles) |
 | **Y** | Cycle the EQ preset (eight) |
-| **Select** | *Tap* — playlist; *Hold* — show / hide the album art panel |
+| **Select** | *Tap* — playlist browser; *Hold* — show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
@@ -86,6 +86,24 @@ Any other filename is picked with **Load Playlist**, and becomes the one that
 loads at launch from then on — provided its name is short enough to be
 remembered.
 
+### The playlist browser
+
+**Tap Select** to browse the playlist on screen. It opens on the track that's
+playing, so you always start from where you are.
+
+| Pocket | Action |
+|---|---|
+| **Up** / **Down** | Move the cursor — hold to run through a long list |
+| **Left** / **Right** | Page up / down a screenful at a time |
+| **Y** | Jump back to the track that's playing |
+| **A** | Play whatever's under the cursor |
+| **Select** or **B** | Close without changing anything |
+
+Rows show filenames rather than tags — a tag lives inside its file, so naming
+every row would mean opening all 256 of them. With shuffle on, the list is the
+play queue, so scrolling down shows what's actually coming rather than the file
+order.
+
 ### Limits
 
 | | Limit | What happens past it |
@@ -124,13 +142,6 @@ stopped on, but it finds them through the playlist it reopens — so if the
 playlist can't be reopened, resume comes back at the start of `playlist.m3u`
 instead. Resume covers the whole playlist, all 256 tracks.
 
-**Tap Select** for the playlist: the list opens on the track that's playing,
-**Up** / **Down** moves the cursor, **A** plays what's under it, and **Select**
-or **B** closes without changing anything. Rows show filenames rather than tags
-— a tag lives inside its file, so naming every row would mean opening every
-file. With shuffle on the list is the play queue, so scrolling down shows
-what's actually coming.
-
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
 repeats a track until the rest have played; with **Repeat all**, each pass round
@@ -156,6 +167,9 @@ and says how many it skipped.
   **EQ preset name**, and the position in the playlist.
 - **Bitrate and sample rate**, with the encoder that made the file where it
   says so — `128 kbps - 44.1 kHz - LAME3.100`.
+
+Tapping **Select** replaces this screen with the
+[playlist browser](#the-playlist-browser) until you close it.
 
 CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
 rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower

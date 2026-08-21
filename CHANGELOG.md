@@ -4,7 +4,7 @@ What changed in each release, newest first.
 
 ## v1.4.0 — unreleased
 
-- **Tap Select for the playlist.** Browse it on screen, **Up**/**Down** to move,
+- **Tap Select for the playlist browser.** Browse the list on screen, **Up**/**Down** to move,
   **Left**/**Right** to page, **A** to play, **Select** or **B** to close.
   Opens on the track that's playing, and **Y** jumps back to it. Holding
   **Select** still shows and hides the album art.
