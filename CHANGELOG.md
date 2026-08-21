@@ -71,6 +71,9 @@ What changed in each release, newest first.
 - Fixed: **the encoding line on the info screen often stayed blank for FLAC.**
   It was waiting on the file's measured length, which does not always arrive.
   It is now worked out from playback itself and appears a few seconds in.
+- **MPEG-2 files play.** The lower sample rates used by spoken-word recordings
+  and audiobooks — 16, 22.05 and 24 kHz — were previously listed as unsupported.
+  They decode and play at the right speed.
 - Fixed: **the elapsed time ran at double speed on MPEG-2 files.** Affects
   spoken-word and low-bitrate recordings, where MPEG-2 is common; music is
   almost always MPEG-1 and was never affected. Playback speed itself was always

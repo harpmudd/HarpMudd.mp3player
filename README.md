@@ -181,8 +181,10 @@ and says how many it skipped.
 - **Bitrate and sample rate**, with the encoder that made the file where it
   says so — `128 kbps - 44.1 kHz - LAME3.100`.
 
-CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
-stereo, plus FLAC — see [below](#flac).<br clear="right">
+CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
+rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower
+sample rates common in spoken-word recordings. Layer I and II — `.mp1` and
+`.mp2` — are a different format and are not handled.<br clear="right">
 
 ## Equalizer
 
@@ -251,7 +253,6 @@ framework bugs that had to be found first — is in
 
 ## Known limitations
 
-- **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
 - **FLAC up to 48 kHz.** Hi-res files are turned away with the reason on
   screen; see [FLAC](#flac) for why, and what to convert them to.
 - **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
