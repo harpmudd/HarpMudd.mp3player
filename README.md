@@ -89,8 +89,7 @@ Tapping **Select** replaces this screen with the
 
 CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
 rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower
-sample rates common in spoken-word recordings. Layer I and II — `.mp1` and
-`.mp2` — are a different format and are not handled.<br clear="right">
+sample rates common in spoken-word recordings.<br clear="right">
 
 ## Playlists
 
