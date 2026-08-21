@@ -365,6 +365,53 @@ Restore the README line if anyone reports a wrong duration — the symptom is
 otherwise baffling, and the cause is a property of their file rather than
 anything they can see.
 
+## Picking a track in the playlist browser can start it at 1.2x — BACKLOGGED for 1.4.x
+
+User report, 2026-08-21: rare, and only when picking a track from the browser.
+Deliberately NOT listed as a README limitation and not fixed in 1.4.0.
+
+### Strong hypothesis, from reading — NOT verified
+
+The speed gesture keeps its own press state:
+
+    static uint32_t a_t0;
+    static uint8_t  a_fired;
+    if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
+    if ((keys & KEY_A) && !a_fired && cycles() - a_t0 >= a_hold_cy) { toggle }
+
+`a_t0` is refreshed only on an A *edge*. The browser consumes that edge — it
+sets `pl_ui_play_req`, closes itself, then masks A out of `edge` AND `keys` for
+that pass — so the speed logic never sees the press and `a_t0` is never
+restarted.
+
+On the next pass the overlay is closed, so nothing masks anything. If A is
+still held, `keys & KEY_A` is true, `a_fired` is still 0 from whatever the
+previous A press was, and `a_t0` is a timestamp from minutes ago. The hold
+comparison is therefore satisfied immediately, and 1.2x toggles on the first
+pass after the browser closes.
+
+That explains "rare" exactly: it needs A to still be down for at least one poll
+pass after the browser closes. A quick tap releases inside the same frame and
+nothing happens; a slightly longer press falls straight into it. It also
+explains why it only happens from the browser — that is the one place an A
+press is consumed without the speed logic seeing the edge.
+
+### Likely fix
+
+Reset the gesture's state wherever the browser consumes the press — set `a_t0`
+to now and `a_fired` to 1, so the residual hold cannot satisfy the comparison.
+Better still, make the hold require an edge the speed logic itself observed,
+rather than trusting a timestamp that another consumer may have skipped.
+
+The same shape should be checked anywhere else an A edge is swallowed.
+
+### Before fixing, reproduce it
+
+Open the browser, press A on a track and hold for about half a second. If the
+hypothesis is right that reproduces it every time, which would also mean it is
+not rare — only rarely *noticed*, because 1.2x on a track just starting sounds
+like a fast rip rather than a mode.
+
 ## ID3v1-only tags never display from a playlist — BACKLOGGED, currently unreachable
 
 A file carrying **only** an ID3v1 tag, loaded from a playlist, shows no title,
