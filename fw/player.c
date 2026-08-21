@@ -9469,10 +9469,26 @@ int main(void)
             track_kbps = fi.bitrate / 1000u;
             /* Exact when the file declares its frame count; otherwise the
              * size/bitrate fallback, which is only right for CBR. */
-            if (track_frames && fi.nChans && fi.samprate) {
+            if (fi.nChans && fi.outputSamps) {
                 uint32_t spf = (uint32_t)fi.outputSamps / (uint32_t)fi.nChans;
-                track_secs = (uint32_t)(((uint64_t)track_frames * spf) / fi.samprate);
-
+                /* Set samp_per_frame HERE too, not only on the load-time path.
+                 *
+                 * This is the fallback that runs when the warm-up decode in
+                 * load_track() did not establish the rate, and it computed spf
+                 * for track_secs while leaving samp_per_frame at its reset
+                 * default of 1152. That default is an MPEG-1 assumption:
+                 * MPEG-2 and MPEG-2.5 carry 576 samples a frame, so on those
+                 * files the elapsed clock -- which advances by samp_per_frame
+                 * per frame -- ran at DOUBLE speed, and the progress bar with
+                 * it. The two paths now derive it identically.
+                 *
+                 * Latent until now because MPEG-2 is rare in music; a 64 kbps
+                 * spoken-word rip is full of it. On an MPEG-1 file spf is 1152
+                 * and this changes nothing. */
+                samp_per_frame = spf;
+                if (track_frames && fi.samprate)
+                    track_secs = (uint32_t)(((uint64_t)track_frames * spf)
+                                            / fi.samprate);
             }
             rate_set = 1;
             st0 |= (1u << 2); REG(R_STAT0) = st0;
