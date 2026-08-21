@@ -5901,7 +5901,21 @@ static void size_probe_arm(void)
 /* One step. Returns 1 when a size has just been established. */
 static int size_probe_step(void)
 {
-    if (szp_phase == 1u && file_pos < SZP_START_AFTER && !eof_hit) return 0;
+    /* Measured from the first AUDIO byte, not from the start of the file.
+     *
+     * It was `file_pos < SZP_START_AFTER`, which stopped working the moment
+     * flac_open learned to skip metadata: on these files the cover art is
+     * 642 KB, so the skip lands file_pos past a 256 KB gate during the LOAD --
+     * before a single audio byte has been read. The probe then ran immediately,
+     * which is exactly the too-early case the gate exists to prevent, and a
+     * short answer followed. Below fl_first_frame it makes the bitrate
+     * uncomputable and the format row stays blank; above it, the row shows a
+     * wrong number. That is the "works on some FLACs" report.
+     *
+     * Against fl_first_frame the gate means what it always meant: a quarter of
+     * a megabyte of AUDIO has been streamed, so the slot has settled. */
+    if (szp_phase == 1u && !eof_hit &&
+        file_pos < fl_first_frame + SZP_START_AFTER) return 0;
 
     switch (szp_phase) {
     case 1:
