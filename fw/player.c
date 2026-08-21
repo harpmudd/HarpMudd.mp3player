@@ -8571,8 +8571,27 @@ int main(void)
          * them, so from here the whole thing is over in a fraction of a
          * second. Nothing new is asked of the card -- the same reads, sooner.
          * The gate inside still holds it off until 256 KB has been read, which
-         * is what stops it measuring a file the slot has not settled into. */
-        if (!reload_armed && !reload_pending) size_probe_pump();
+         * is what stops it measuring a file the slot has not settled into.
+         *
+         * ONLY WITH THE RING WELL AHEAD, though, and that qualifier is the
+         * whole point of this line rather than a precaution.
+         *
+         * A probe step is a BLOCKING read. refill_pump has always spent its
+         * steps from the "ring at least half full" branch for exactly that
+         * reason; driving them from here as well, ungated, put a burst of
+         * sixteen blocking reads wherever the main loop happened to be -- and
+         * the gate above says WHERE: 256 KB of audio in, which on a ~1000 kbps
+         * FLAC is about two seconds. The ring holds 24 KB, roughly 0.19 s at
+         * that rate, so the burst outran it and the decoder went hungry once,
+         * two seconds into the track, and was fine afterwards because the
+         * search had finished. That is the single hiccup that settles in.
+         *
+         * Three quarters rather than the half refill_pump uses: this loop
+         * spins far faster, so it wants the wider margin to avoid nibbling the
+         * ring down at the boundary. */
+        if (!reload_armed && !reload_pending &&
+            ring_fill - ring_rd >= (RING_SIZE / 4u) * 3u)
+            size_probe_pump();
 
 
         if (art_toggle) {
