@@ -1617,6 +1617,25 @@ static unsigned char spec_drawn[SPEC_BANDS];
  * uint16_t, not unsigned char: the top band needs 749 and the old type
  * silently caps at 255, which would have quietly flattened the treble end
  * while looking like a working table. */
+/* Level to a logarithmic scale: 16 units per octave, so one unit is about
+ * 0.4 dB. A loop rather than a clz builtin -- it runs sixteen times per meter
+ * update, not per sample, so the cost is nothing and it cannot surprise the
+ * linker. */
+static uint32_t spec_log(uint32_t v)
+{
+    if (!v) return 0;
+    uint32_t e = 0u, t = v;
+    while (t > 1u) { t >>= 1; e++; }
+    uint32_t m = (e >= 4u) ? ((v >> (e - 4u)) & 0xFu) : ((v << (4u - e)) & 0xFu);
+    return (e << 4) | m;
+}
+
+/* The display window, in spec_log units. Set from measurement: the two tracks
+ * the gains were taken from span 202..238, so this starts below the quietest
+ * band and leaves 12 dB above the loudest. */
+#define SPEC_FLOOR 190u
+#define SPEC_SPAN   80u
+
 static const uint16_t spec_gain[SPEC_BANDS] = {
     /* MEASURED for the HALF-OCTAVE cascade, low band first. Re-measured rather
      * than carried over: splitting each octave in two changes every level, and
@@ -3519,7 +3538,27 @@ static void ui_draw_dynamic(void)
                 uint32_t cnt  = spec_n >> (b / 2u);
                 uint32_t mean = cnt ? (spec_acc[b] / cnt) : 0u;
                 uint32_t v    = (mean * spec_gain[SPEC_BANDS - 1u - b]) >> 4;
-                v = (v * 255u) / 32768u;
+
+                /* LOGARITHMIC, because loudness is.
+                 *
+                 * A linear meter spends nearly all its range on the top 6 dB
+                 * and almost none on everything below, so anything mastered
+                 * louder than the two tracks these gains were measured on
+                 * simply pegs -- which is what "the spectrum maxes out" was.
+                 * It was not clipping; it was the scale.
+                 *
+                 * spec_log gives 16 units per octave, so the window below is
+                 * 80 units = 30 dB of display range. Measured across both
+                 * tracks the bands span 202..238, so the floor sits below the
+                 * quietest and there are 32 units -- 12 dB -- of headroom
+                 * above the loudest before anything reaches the top. On a
+                 * linear scale that headroom was about 1.5 dB.
+                 *
+                 * Nothing about the per-band calibration changes: the gains
+                 * still multiply first, and the log is taken of the result. */
+                uint32_t lg = spec_log(v);
+                v = (lg > SPEC_FLOOR)
+                  ? ((lg - SPEC_FLOOR) * 255u) / SPEC_SPAN : 0u;
                 if (v > 255u) v = 255u;
                 /* Same ballistics the level ladder used: catch the transient,
                  * fall back smoothly. */
@@ -4547,12 +4586,34 @@ ui_tail:
      * exists, whichever path produced it.
      *
      * Cheap: one compare while it is unknown, nothing at all afterwards. */
-    if (!track_kbps && track_fmt == FMT_FLAC && track_secs &&
-        slot_size > fl_first_frame) {
-        uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
-        track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
-        info = track_kbps * 1000u + track_hz / 100u
-             + (track_encoder[0] ? (uint32_t)track_encoder[0] << 24 : 0u);
+    if (!track_kbps && track_fmt == FMT_FLAC) {
+        uint32_t kb = 0;
+        if (track_secs && slot_size > fl_first_frame) {
+            /* Best answer: the whole file over its whole duration. */
+            uint64_t bits = (uint64_t)(slot_size - fl_first_frame) * 8u;
+            kb = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
+        } else if (ui_sec >= 3u && file_pos > fl_first_frame) {
+            /* Otherwise ask the DECODER, which has been counting all along:
+             * bytes consumed over seconds played is the average bitrate of
+             * what has been heard, and it converges on the file's own.
+             *
+             * This exists because waiting for slot_size kept failing in ways
+             * that were invisible -- the row simply did not appear. The size
+             * arrives from a probe that has been moved twice, gated twice and
+             * broken twice; file_pos and ui_sec are both already true by the
+             * time anyone can read this row. Deriving from what is known beats
+             * waiting for what might arrive.
+             *
+             * Survives a seek: both jump together, so the ratio still measures
+             * from the start of the file. */
+            uint64_t bits = (uint64_t)(file_pos - fl_first_frame) * 8u;
+            kb = (uint32_t)(bits / (uint64_t)ui_sec / 1000u);
+        }
+        if (kb) {
+            track_kbps = kb;
+            info = track_kbps * 1000u + track_hz / 100u
+                 + (track_encoder[0] ? (uint32_t)track_encoder[0] << 24 : 0u);
+        }
     }
 
     if (track_kbps && info != ui_last_info && !size_suspect && !pl_ui_open) {
