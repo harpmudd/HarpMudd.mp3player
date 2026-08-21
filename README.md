@@ -88,8 +88,12 @@ remembered.
 
 ### The playlist browser
 
+<img src="docs/screenshot2.png" width="280" align="right" alt="Playlist browser: a PLAYLIST 13 of 14 header above nine filename rows, with Gorillaz - Feel Good Inc. highlighted and marked by a cursor; the transport row, times and progress bar stay visible underneath">
+
 **Tap Select** to browse the playlist on screen. It opens on the track that's
-playing, so you always start from where you are.
+playing, so you always start from where you are. The transport row, the times
+and the progress bar stay put underneath, so nothing about what's playing is
+hidden while you look.
 
 | Pocket | Action |
 |---|---|
@@ -102,7 +106,7 @@ playing, so you always start from where you are.
 Rows show filenames rather than tags — a tag lives inside its file, so naming
 every row would mean opening all 256 of them. With shuffle on, the list is the
 play queue, so scrolling down shows what's actually coming rather than the file
-order.
+order.<br clear="right">
 
 ### Limits
 
@@ -152,7 +156,7 @@ and says how many it skipped.
 
 ## What it shows
 
-<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
+<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat, shuffle and volume indicators and the EQ preset ROCK, track 5 of 14, 02:31 of 03:41, and a progress bar">
 
 - **Title and artist** from the file's tag. One with no readable tag shows its
   filename, which is usually the song name anyway.
