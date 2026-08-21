@@ -642,6 +642,24 @@ static uint32_t und_edges;
 static uint32_t und2_sec = 0xFFFFFFFFu;
 static uint8_t  und2_idle, und2_io, und2_szp;
 static uint16_t und2_ring;
+
+/* CLICK detector -- measures the waveform instead of the plumbing.
+ *
+ * The readings rule out starvation: no underrun at two to three seconds on any
+ * track, and any CPU stall long enough to hear would have emptied the FIFO and
+ * shown up as one. So the samples ARE arriving on time and the fault is in
+ * their VALUES: a discontinuity, which is heard as a click or a pop rather
+ * than as a stutter.
+ *
+ * Sample-to-sample jump on the left channel. Real music at 44.1 kHz rarely
+ * steps more than a few thousand between adjacent samples -- a jump of half
+ * full scale is not music, it is a splice. clk_max is reported alongside so
+ * the threshold can be judged against the material rather than trusted. */
+#define CLK_THRESH 12000
+static int32_t  clk_prev;
+static uint32_t clk_n;
+static uint32_t clk_sec = 0xFFFFFFFFu;   /* second of the FIRST one */
+static uint32_t clk_max;                 /* largest jump seen, any time */
 /* Where the CPU's second actually goes, so the hiccup can be ATTRIBUTED
  * instead of guessed at. Three outcomes, three different fixes:
  *
@@ -2528,6 +2546,10 @@ static void ui_draw_chrome(void)
     und2_sec     = 0xFFFFFFFFu;
     und_edges    = 0;
     und_prev     = 0;
+    clk_n        = 0;
+    clk_sec      = 0xFFFFFFFFu;
+    clk_max      = 0;
+    clk_prev     = 0;
 
     /* Wave bed. Bars grow upward from the baseline, so clear the whole band
      * once here and let ui_draw_dynamic() repaint only the bars. */
@@ -5046,6 +5068,11 @@ ui_tail:
             *q++ = ' '; *q++ = 'P'; q = ui_dec(q, und2_szp);
             *q++ = ' '; *q++ = 'R'; q = ui_dec(q, und2_ring);
             *q++ = ' '; *q++ = 'E'; q = ui_dec(q, und_edges);
+            *q++ = ' '; *q++ = 'C'; q = ui_dec(q, clk_n);
+            *q++ = ' '; *q++ = 'S';
+            if (clk_sec == 0xFFFFFFFFu) { *q++ = '-'; *q++ = '-'; }
+            else q = ui_dec(q, clk_sec);
+            *q++ = ' '; *q++ = 'D'; q = ui_dec(q, clk_max >> 8);
             *q = 0;
             uint16_t ub = ui_grad_at((FB_H - 16u));
             fb_rect(UI_MARGIN, FB_H - 16u, UI_INNER_W, FB_CELL(TS_1X), ub);
@@ -6777,6 +6804,17 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
          * At 1152 pairs the flush interval is 26 ms, which is exactly MP3's
          * frame, so both formats now drive the meters at the same rate through
          * the same code. Ignoring frame boundaries keeps the interval even. */
+        {
+            int32_t xl = (int32_t)src[i * 2];
+            int32_t d  = xl - clk_prev;
+            if (d < 0) d = -d;
+            if ((uint32_t)d > clk_max) clk_max = (uint32_t)d;
+            if (d > CLK_THRESH) {
+                clk_n++;
+                if (clk_sec == 0xFFFFFFFFu) clk_sec = ui_sec;
+            }
+            clk_prev = xl;
+        }
         pcm[fl_meter_n * 2u]      = src[i * 2];
         pcm[fl_meter_n * 2u + 1u] = src[i * 2 + 1];
         if (++fl_meter_n == FL_METER_PAIRS) {
