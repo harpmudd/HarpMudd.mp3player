@@ -66,6 +66,32 @@ The album art panel and screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
 
+## What it shows
+
+<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat, shuffle and volume indicators and the EQ preset ROCK, track 5 of 14, 02:31 of 03:41, and a progress bar">
+
+- **Title and artist** from the file's tag. One with no readable tag shows its
+  filename, which is usually the song name anyway.
+- **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
+  cover show no panel; a cover that can't be decoded shows the panel with the
+  reason in it.
+- **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
+  scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
+  bars, peak dots, a magic eye and a 16-band spectrum analyser.
+- **Elapsed and total time**, with a progress bar.
+- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
+  **EQ preset name**, and the position in the playlist.
+- **Bitrate and sample rate**, with the encoder that made the file where it
+  says so — `128 kbps - 44.1 kHz - LAME3.100`.
+
+Tapping **Select** replaces this screen with the
+[playlist browser](#the-playlist-browser) until you close it.
+
+CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
+rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower
+sample rates common in spoken-word recordings. Layer I and II — `.mp1` and
+`.mp2` — are a different format and are not handled.<br clear="right">
+
 ## Playlists
 
 A plain text file with one track per line, saved as `playlist.m3u` in
@@ -152,32 +178,6 @@ the list is freshly shuffled.
 
 A misspelled or missing filename costs that one track — the core steps over it
 and says how many it skipped.
-
-## What it shows
-
-<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat, shuffle and volume indicators and the EQ preset ROCK, track 5 of 14, 02:31 of 03:41, and a progress bar">
-
-- **Title and artist** from the file's tag. One with no readable tag shows its
-  filename, which is usually the song name anyway.
-- **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
-  cover show no panel; a cover that can't be decoded shows the panel with the
-  reason in it.
-- **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
-  scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
-  bars, peak dots, a magic eye and a 16-band spectrum analyser.
-- **Elapsed and total time**, with a progress bar.
-- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
-  **EQ preset name**, and the position in the playlist.
-- **Bitrate and sample rate**, with the encoder that made the file where it
-  says so — `128 kbps - 44.1 kHz - LAME3.100`.
-
-Tapping **Select** replaces this screen with the
-[playlist browser](#the-playlist-browser) until you close it.
-
-CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
-rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower
-sample rates common in spoken-word recordings. Layer I and II — `.mp1` and
-`.mp2` — are a different format and are not handled.<br clear="right">
 
 ## Equalizer
 
