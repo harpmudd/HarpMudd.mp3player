@@ -17,7 +17,7 @@ What changed in each release, newest first.
   was appearing as *FLAC 16-*), the selected row in the playlist has rounded
   corners to match the panel it sits in, and the progress bar has softened ends
   and a lit top edge.
-- **A new meter: SPECTRUM.** Eight columns of lit blocks, bass on the left
+- **A new meter: SPECTRUM.** Sixteen columns of lit blocks, bass on the left
   through treble on the right, each moving on its own with the music. Coloured
   green through amber to red as they climb. Eleven meters now.
 - **A speaker icon shows the volume**, beside the repeat and shuffle icons —
@@ -50,15 +50,31 @@ What changed in each release, newest first.
   so. Add a `playlists.m3u` listing your playlists and the limit is gone;
   `tools/make_playlist_index.py` writes it for you. Cards without one behave
   exactly as before.
-- **The meters have more headroom.** On loud material they were running close
-  to the top of their range and flattening out there. They behave exactly as
-  before, just lower.
+- **The meters have more headroom,** and the spectrum reads in decibels rather
+  than linearly. On loud material the meters were running close to the top of
+  their range and flattening out there. A linear scale spends nearly all of its
+  range on the loudest few decibels, so a track mastered louder than another
+  simply pinned; the spectrum now shows about 19 dB, which is why quiet detail
+  is visible and different albums look like each other.
 - **FLAC tracks load faster.** Two things were slowing them down. Measuring the
   file's length used to block the load for about half a second; it now happens
   quietly during playback, and the first seek of a track no longer pays for it
   either. And opening a FLAC used to read straight through the embedded cover
   art — a quarter of a megabyte on a typical album — just to reach the audio
   behind it; it now steps over it.
+- Fixed: **a light stutter about two seconds into every FLAC.** The core
+  measures a file's length by reading at far-apart offsets, and it was doing
+  that on the same file it was streaming — which disturbed the stream and made
+  the decoder resynchronise. It now measures only the files that have no other
+  way to report their length, and everything else is left alone. Tracks with no
+  duration header may still tic; there is no other way to time them.
+- Fixed: **the encoding line on the info screen often stayed blank for FLAC.**
+  It was waiting on the file's measured length, which does not always arrive.
+  It is now worked out from playback itself and appears a few seconds in.
+- Fixed: **the elapsed time ran at double speed on MPEG-2 files.** Affects
+  spoken-word and low-bitrate recordings, where MPEG-2 is common; music is
+  almost always MPEG-1 and was never affected. Playback speed itself was always
+  correct — this was the clock and the progress bar.
 - The playlist limits are now written down in the README.
 
 ## v1.3.0 — 15 August 2026

@@ -1,14 +1,33 @@
 # MP3 Player — Analogue Pocket
 
-A music player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, tags, ten
-switchable meters, an eight-preset equalizer, a progress bar, settings
-persistence and optional resume — it can pick up where you left off in a
-playlist.
+A music player for the Analogue Pocket. It plays MP3 and FLAC straight off the
+SD card, with album art, tags and meters.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
+
+## Quick start
+
+1. Copy the `Cores`, `Platforms` and `Assets` folders to the root of your SD
+   card, merging with what's there.
+2. Put some `.mp3` or `.flac` files in `/Assets/mp3player/common/`. Subfolders
+   are fine.
+3. Open the core, press **Analogue**, and choose **Load MP3**. It starts
+   playing.
+
+Four controls cover everything you need:
+
+| Pocket | Action |
+|---|---|
+| **A** | Play / pause |
+| **Left** / **Right** | Previous / next track — *hold* to seek within one |
+| **Up** / **Down** | Volume |
+| **Analogue** | Load a different track or playlist |
+
+That's the whole player. Everything below is optional: meters on **X**, the
+equalizer on **Y**, playlists, resume, and the settings in the Analogue menu.
+Come back for them when you want them — none of it needs setting up first.
 
 ## Installing
 
@@ -153,9 +172,9 @@ and says how many it skipped.
   filename, which is usually the song name anyway.
 - **Album art** from the tag's embedded image — baseline JPEG only; tracks
   without it don't show the panel.
-- **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
-  oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
-  peak dots and a magic eye.
+- **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
+  scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
+  bars, peak dots, a magic eye and a 16-band spectrum analyser.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
@@ -248,6 +267,11 @@ framework bugs that had to be found first — is in
 - **Sometimes a playlist or track pick doesn't register straight away.** It
   loads on its own a few seconds later; if it doesn't, pick it again. Seen when
   switching from one playlist to another.
+- **A track with no duration header may tic once, a couple of seconds in.**
+  Files carrying no Xing/Info/VBRI header have no other source for their
+  total time, so the core measures the file during playback and the reads
+  can disturb the stream briefly. Everything else — FLAC, and any MP3 with
+  a header, which is nearly all of them — is unaffected.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
