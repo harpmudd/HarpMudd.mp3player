@@ -1630,11 +1630,23 @@ static uint32_t spec_log(uint32_t v)
     return (e << 4) | m;
 }
 
-/* The display window, in spec_log units. Set from measurement: the two tracks
- * the gains were taken from span 202..238, so this starts below the quietest
- * band and leaves 12 dB above the loudest. */
-#define SPEC_FLOOR 190u
-#define SPEC_SPAN   80u
+/* The display window, in spec_log units.
+ *
+ * 30 dB of range killed the pegging but spent too much of the meter doing it:
+ * at 80 units a 6 dB swing moved the bars two rows, so everything sat mid-scale
+ * and the meter stopped reacting to the music. 56 units is 21 dB, which is
+ * three rows per 6 dB -- half again as much movement.
+ *
+ * What that costs is headroom, and the number is worth writing down: measured
+ * across both tracks the loudest band reaches 238, so the top of this window
+ * sits 14 units -- about 5 dB -- above it. A master 5 dB hotter than these will
+ * touch the top again. On the linear scale it was 1.5 dB, so the pegging that
+ * started this is still fixed; there is just no free lunch between the two.
+ *
+ * Narrow the span for more movement, widen it for more headroom. Those are the
+ * only two things this trades. */
+#define SPEC_FLOOR 196u
+#define SPEC_SPAN   56u
 
 static const uint16_t spec_gain[SPEC_BANDS] = {
     /* MEASURED for the HALF-OCTAVE cascade, low band first. Re-measured rather
