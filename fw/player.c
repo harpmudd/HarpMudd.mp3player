@@ -624,6 +624,24 @@ static uint32_t und1_sec = 0xFFFFFFFFu;  /* second it happened, FFFF = never */
 static uint8_t  und1_idle, und1_io;      /* CPU split at that instant       */
 static uint8_t  und1_szp;                /* size-probe phase; 0 = not running */
 static uint16_t und1_ring;               /* ring bytes ahead, in 64B units  */
+
+/* A SECOND detector, because the first one could not see the fault.
+ *
+ * under_shadow is cleared only by a flush, so exactly one underrun is ever
+ * counted per track -- which is why N rose by exactly one per track and why
+ * songs 2 and 3 reported second ZERO. That first edge is the start-of-track
+ * transient: the FIFO is empty before the first decode fills it. It is
+ * expected, it is faded, and it MASKS everything after it, including the
+ * audible one.
+ *
+ * This counts edges itself and does not consume the shadow, so the fade
+ * behaviour is untouched. It ignores anything in the first second, which is
+ * the transient, and latches the first REAL one after it. */
+static uint8_t  und_prev;
+static uint32_t und_edges;
+static uint32_t und2_sec = 0xFFFFFFFFu;
+static uint8_t  und2_idle, und2_io, und2_szp;
+static uint16_t und2_ring;
 /* Where the CPU's second actually goes, so the hiccup can be ATTRIBUTED
  * instead of guessed at. Three outcomes, three different fixes:
  *
@@ -2507,6 +2525,9 @@ static void ui_draw_chrome(void)
     ui_info_y    = y;
     ui_last_info = 0xFFFFFFFFu;
     und1_sec     = 0xFFFFFFFFu;   /* the latch is per TRACK, not per boot */
+    und2_sec     = 0xFFFFFFFFu;
+    und_edges    = 0;
+    und_prev     = 0;
 
     /* Wave bed. Bars grow upward from the baseline, so clear the whole band
      * once here and let ui_draw_dynamic() repaint only the bars. */
@@ -5017,11 +5038,14 @@ ui_tail:
             *q++ = 'U';
             if (und1_sec == 0xFFFFFFFFu) { *q++ = '-'; *q++ = '-'; }
             else q = ui_dec(q, und1_sec);
-            *q++ = ' '; *q++ = 'I'; q = ui_dec(q, und1_idle);
-            *q++ = ' '; *q++ = 'O'; q = ui_dec(q, und1_io);
-            *q++ = ' '; *q++ = 'P'; q = ui_dec(q, und1_szp);
-            *q++ = ' '; *q++ = 'R'; q = ui_dec(q, und1_ring);
-            *q++ = ' '; *q++ = 'N'; q = ui_dec(q, pcm_under_n);
+            *q++ = ' '; *q++ = 'V';
+            if (und2_sec == 0xFFFFFFFFu) { *q++ = '-'; *q++ = '-'; }
+            else q = ui_dec(q, und2_sec);
+            *q++ = ' '; *q++ = 'I'; q = ui_dec(q, und2_idle);
+            *q++ = ' '; *q++ = 'O'; q = ui_dec(q, und2_io);
+            *q++ = ' '; *q++ = 'P'; q = ui_dec(q, und2_szp);
+            *q++ = ' '; *q++ = 'R'; q = ui_dec(q, und2_ring);
+            *q++ = ' '; *q++ = 'E'; q = ui_dec(q, und_edges);
             *q = 0;
             uint16_t ub = ui_grad_at((FB_H - 16u));
             fb_rect(UI_MARGIN, FB_H - 16u, UI_INNER_W, FB_CELL(TS_1X), ub);
@@ -6819,6 +6843,24 @@ static int size_probe_pump(void)
         track_kbps = (uint32_t)(bits / (uint64_t)track_secs / 1000u);
     }
     return 1;
+}
+
+/* Sample the underrun line and record edges. Called from both decode loops,
+ * beside the existing check but independent of it. */
+static void und_sample(void)
+{
+    uint8_t now = pcm_underrun() ? 1u : 0u;
+    if (now && !und_prev) {
+        und_edges++;
+        if (und2_sec == 0xFFFFFFFFu && ui_sec >= 1u) {
+            und2_sec  = ui_sec;
+            und2_idle = fl_idle_pct;
+            und2_io   = fl_io_pct;
+            und2_szp  = (uint8_t)szp_phase;
+            und2_ring = (uint16_t)((ring_fill - ring_rd) >> 6);
+        }
+    }
+    und_prev = now;
 }
 
 static void refill_pump(void)
@@ -9243,6 +9285,7 @@ int main(void)
             /* The MP3 loop has this net a few lines further down; the FLAC
              * loop needs its own, and the count is what tells the diag row a
              * hiccup actually happened rather than was imagined. */
+            und_sample();
             if (!under_shadow && pcm_underrun()) {
                 under_shadow = 1u;
                 pcm_under_n++;
@@ -9361,6 +9404,7 @@ int main(void)
          * is sticky until the next flush, so this catches the FIRST underrun
          * of an epoch -- the net under the causes removed elsewhere, not a
          * licence to underrun. */
+        und_sample();
         if (!under_shadow && pcm_underrun()) {
             under_shadow = 1u;
             pcm_under_n++;
