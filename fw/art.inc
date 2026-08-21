@@ -76,6 +76,13 @@ static uint16_t art_line[ART_IMG];      /* the row currently being emitted   */
 static uint8_t art_xmap[ART_FULL_MAX];  /* sx -> accumulator column   */
 static uint8_t art_yslot[ART_FULL_MAX]; /* sy -> accumulator row slot */
 static uint32_t art_jpg_pos, art_jpg_end;   /* file offsets of the image data */
+
+/* Why the last art_decode() gave up, as picojpeg reported it. 0 means either
+ * success or no picture to decode at all -- the two cases nobody needs telling
+ * about. Kept because the answer was already known and thrown away: a
+ * progressive cover comes back as PJPG_UNSUPPORTED_MODE and the user saw an
+ * empty frame with no reason for it. */
+static uint8_t art_fail_code;
 static uint32_t art_win_len, art_win_pos;   /* window currently held in tagbuf */
 
 /* picojpeg asks for at most 255 bytes at a time. Serving each of those with its
@@ -316,17 +323,74 @@ static int art_find_flac_picture(void)
     return 1;
 }
 
-static int art_decode(uint32_t tag_len)
+/* A cheap fingerprint of the embedded image, without decoding it.
+ *
+ * MEASURED, which is the only reason this exists: album art is 2801 ms of a
+ * 3731 ms FLAC load -- 75% of it -- and every track of an album pays it again.
+ * On the test album all twelve tracks carry a byte-identical 259318-byte JPEG,
+ * so eleven of those decodes produce a picture the stash already holds.
+ *
+ * The cost is Huffman decoding 259 KB of entropy data, not scaling: the image
+ * is 1200x1200 and already takes picojpeg's 1/8 path, so a smaller panel would
+ * save nothing. Not decoding it is the only thing that helps.
+ *
+ * Length, the HEAD of the image and the TAIL of it.
+ *
+ * The head alone is not enough, and the reason is worth stating because it is
+ * the one way this could show the WRONG cover rather than merely miss. The
+ * first kilobyte of a JPEG is nearly all encoder boilerplate -- SOI, the JFIF
+ * header, the quantisation tables, the Huffman tables. Two different covers
+ * exported by the same tool at the same size and quality have IDENTICAL first
+ * kilobytes, and then only the length separates them. Two unrelated photographs
+ * compressing to exactly the same byte count is unlikely but it is the kind of
+ * unlikely that eventually happens to somebody, and the failure is silent: the
+ * previous album's cover, sitting next to the right title.
+ *
+ * The last 512 bytes are entropy-coded image data, which differs between any
+ * two pictures. Sampling both ends costs one extra small read against a 2801 ms
+ * decode.
+ *
+ * Returns 0 when there is no image, which never matches a cached signature. */
+static uint32_t art_sig_of(uint32_t tag_len)
 {
-    /* Same decoder, different finder. */
     int found = (track_fmt == FMT_FLAC)
               ? art_find_flac_picture()
               : (tag_len && art_find_apic(tag_len));
-    if (!found) return 0;
+    if (!found || art_jpg_end <= art_jpg_pos) return 0;
+
+    uint32_t len = art_jpg_end - art_jpg_pos;
+    uint32_t h   = 2166136261u;
+
+    uint32_t win = len < 512u ? len : 512u;
+    if (!target_read_slot(MP3_SLOT_ID, art_jpg_pos, TAG_OFF, win)) return 0;
+    for (uint32_t i = 0; i < win; i++) { h ^= tagbuf[i]; h *= 16777619u; }
+
+    if (len > win) {
+        uint32_t tail = (len - win) < 512u ? (len - win) : 512u;
+        if (!target_read_slot(MP3_SLOT_ID, art_jpg_end - tail, TAG_OFF, tail))
+            return 0;
+        for (uint32_t i = 0; i < tail; i++) { h ^= tagbuf[i]; h *= 16777619u; }
+    }
+
+    h ^= len; h *= 16777619u;
+    return h ? h : 1u;
+}
+
+static int art_decode(uint32_t tag_len)
+{
+    /* Same decoder, different finder. */
+    art_fail_code = 0;
+    int found = (track_fmt == FMT_FLAC)
+              ? art_find_flac_picture()
+              : (tag_len && art_find_apic(tag_len));
+    if (!found) return 0;                    /* no picture: nothing to explain */
     uint32_t jpg_start = art_jpg_pos;        /* to rewind for a second init */
 
     pjpeg_image_info_t info;
-    if (pjpeg_decode_init(&info, art_need_bytes, 0, 1 /* reduce */)) return 0;
+    {
+        unsigned char st = pjpeg_decode_init(&info, art_need_bytes, 0, 1 /* reduce */);
+        if (st) { art_fail_code = st; return 0; }
+    }
 
     uint32_t iw = (uint32_t)info.m_width, ih = (uint32_t)info.m_height;
     if (!iw || !ih) return 0;
@@ -343,7 +407,8 @@ static int art_decode(uint32_t tag_len)
         art_jpg_pos = jpg_start;
         art_win_len = 0;
         art_win_pos = 0;
-        if (pjpeg_decode_init(&info, art_need_bytes, 0, 0 /* full */)) return 0;
+        unsigned char st = pjpeg_decode_init(&info, art_need_bytes, 0, 0 /* full */);
+        if (st) { art_fail_code = st; return 0; }
     }
 
     uint32_t bxn = (uint32_t)info.m_MCUWidth / 8u;
@@ -397,7 +462,10 @@ static int art_decode(uint32_t tag_len)
     uint32_t next_ay = 0;
     for (uint32_t my = 0; my < (uint32_t)info.m_MCUSPerCol; my++) {
         for (uint32_t mx = 0; mx < (uint32_t)info.m_MCUSPerRow; mx++) {
-            if (pjpeg_decode_mcu()) return 0;
+            {
+                unsigned char st = pjpeg_decode_mcu();
+                if (st) { art_fail_code = st; return 0; }
+            }
             for (uint32_t by = 0; by < byn; by++) {
                 for (uint32_t bx = 0; bx < bxn; bx++) {
                     /* Blocks sit in a fixed 2x2 grid of 64-byte slots, so a

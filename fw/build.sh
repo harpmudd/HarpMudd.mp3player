@@ -26,7 +26,7 @@ mkdir -p "$OUT"
 # relaxation would emit stores through an uninitialised gp.
 # EXTRA_CFLAGS lets a build turn on things that are off by default without
 # editing source, e.g.:  EXTRA_CFLAGS=-DDEBUG_DIAG=1 bash fw/build.sh
-CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles ${EXTRA_CFLAGS:-}"
+CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Wl,--gc-sections ${EXTRA_CFLAGS:-}"
 ROM="mp3player.rom"
 
 case "$TARGET" in
@@ -41,7 +41,7 @@ player)
       $HELIX/real/hufftabs.c $HELIX/real/imdct.c $HELIX/real/polyphase.c \
       $HELIX/real/scalfact.c $HELIX/real/stproc.c $HELIX/real/subband.c \
       $HELIX/real/trigtabs.c \
-      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $ROOT/third_party/picojpeg/picojpeg.c $FW/flac.o"
+      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $FW/picojpeg.o $FW/flac.o"
     INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
     ;;
 *)
@@ -66,6 +66,17 @@ rm -f "$FW/flac.o"
 if ! "$GCC" -march=rv32im -mabi=ilp32 -mno-relax -Os -ffreestanding -c         -o "$FW/flac.o" "$FW/flac.c" > "$FW/build.log" 2>&1; then
     cat "$FW/build.log" >&2
     echo "*** flac.c FAILED TO COMPILE ***" >&2
+    exit 1
+fi
+
+# picojpeg gets -Os for the same reason, and with less to lose than flac.c: it
+# decodes album art ONCE per track load, inside the silent gap where the FIFO
+# has already been flushed. Nothing it does is on the audio path, so trading
+# its speed for size costs a few ms of a load that is already hundreds.
+rm -f "$FW/picojpeg.o"
+if ! "$GCC" -march=rv32im -mabi=ilp32 -mno-relax -Os -ffreestanding         -I "$ROOT/third_party/picojpeg" -c         -o "$FW/picojpeg.o" "$ROOT/third_party/picojpeg/picojpeg.c"         > "$FW/build.log" 2>&1; then
+    cat "$FW/build.log" >&2
+    echo "*** picojpeg.c FAILED TO COMPILE ***" >&2
     exit 1
 fi
 
@@ -111,6 +122,23 @@ if [ "$APP_VER" != "$JSON_VER" ]; then
   echo "    both must match before release; core.json also carries date_release" >&2
   exit 1
 fi
+# The README states it too, in its opening paragraph, so a visitor learns the
+# version without clicking through. That makes THREE copies, and an unchecked
+# third copy is just a slower way to be wrong -- the README is the first thing
+# read, so a stale line there is the most visible of the three. Checked here
+# with the other two rather than trusted to a checklist.
+README="$ROOT/README.md"
+DOC_VER=$(grep -m1 -o 'Current version \*\*v[0-9.]*\*\*' "$README" | grep -o '[0-9][0-9.]*')
+
+if [ -z "$DOC_VER" ]; then
+  echo "*** VERSION CHECK BROKE: no 'Current version **vX.Y.Z**' in README.md ***" >&2
+  exit 1
+fi
+if [ "$APP_VER" != "$DOC_VER" ]; then
+  echo "*** VERSION MISMATCH: player.c says $APP_VER, README says $DOC_VER ***" >&2
+  exit 1
+fi
+
 echo "version $APP_VER (core.json date_release $JSON_DATE)"
 
 echo "built [$TARGET] -> $OUT/$ROM"

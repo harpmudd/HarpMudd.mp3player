@@ -2,6 +2,33 @@
 
 What changed in each release, newest first.
 
+## v1.4.0 — 21 August 2026
+
+- **Playlist browser** — tap **Select**. **Up**/**Down** moves,
+  **Left**/**Right** pages, **Y** jumps to the playing track, **A** plays.
+- New meter: a **16-band spectrum**, bass to treble. Eleven meters now.
+- **A volume icon** beside the repeat and shuffle indicators.
+- **MPEG-2 files play** — the low sample rates common in spoken word.
+- **Playlists can have long names again.** List them in a `playlists.m3u`; only
+  twelve characters were remembered before, so a long name never came back.
+- **FLAC tracks load faster** — measuring the length no longer blocks the load,
+  and opening one steps over the embedded cover art instead of reading it.
+- **The meters have more headroom**, and the spectrum reads in decibels, so
+  loud albums no longer flatten against the top.
+- **1.2x needs a longer hold on A**, and shows a marker while it's on.
+- **A cover that can't be shown says so** — **PROG. JPEG** or **COVER ERROR**.
+- Fixed: a light **stutter two seconds into every FLAC**.
+- Fixed: **volume had no effect on FLAC**.
+- Fixed: **seeking a FLAC left the clock permanently wrong**. Since 1.3.0.
+- Fixed: **a FLAC from a playlist barely seeked**, and showed a wrong bitrate.
+- Fixed: **resume started at the beginning**, or on the wrong track past 128
+  entries.
+- Fixed: **the encoding line often stayed blank for FLAC**.
+- Fixed: **elapsed time ran at double speed on MPEG-2 files**.
+- Small tidying: the full codec name shows (**FLAC 16-bit** was appearing as
+  *FLAC 16-*), rounded corners on the selected playlist row, softened ends on
+  the progress bar, and the playlist limits are written down in the README.
+
 ## v1.3.0 — 15 August 2026
 
 - **FLAC playback** — up to 48 kHz, 16 or 24-bit, with tags, album art, meters

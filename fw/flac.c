@@ -191,11 +191,13 @@ flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
     char *t_ti = f->tag_title,  *t_ar = f->tag_artist, *t_al = f->tag_album;
     char *t_yr = f->tag_year,   *t_tk = f->tag_trk;
     uint32_t t_cap = f->tag_cap;
+    flac_skip_fn t_skip = f->skip;      /* set by the caller, same as above */
 
     for (uint32_t i = 0; i < sizeof(*f); i++) ((uint8_t *)f)[i] = 0;
     f->read = read; f->ctx = ctx; f->ch0 = ch0; f->ch0_cap = ch0_cap;
     f->tag_title = t_ti; f->tag_artist = t_ar; f->tag_album = t_al;
     f->tag_year  = t_yr; f->tag_trk    = t_tk; f->tag_cap   = t_cap;
+    f->skip      = t_skip;
 
     if (bits(f, 32) != 0x664C6143u) return FLAC_ERR_MAGIC;   /* "fLaC" */
 
@@ -228,7 +230,31 @@ flac_err flac_open(flac_t *f, flac_read_fn read, void *ctx,
         } else if (type == 4u) {                             /* VORBIS_COMMENT */
             vorbis_comments(f, length);
         } else {
-            for (uint32_t i = 0; i < length; i++) (void)bits(f, 8);
+            /* A block we do not want -- PICTURE and PADDING, overwhelmingly.
+             * Ask the caller to move the stream instead of reading it.
+             *
+             * The accounting is the whole risk here: at this point the reader
+             * is holding bytes in `buf` AND bits in the reservoir, all of them
+             * stream content already fetched. Only what lies BEYOND that can
+             * be skipped remotely, and the held part is dropped afterwards.
+             *
+             * Ordered so a refusal is harmless: nothing is discarded until
+             * skip() has reported success, so a caller that declines leaves
+             * the reader exactly as it was and the byte loop below still runs.
+             * Byte alignment is required rather than assumed -- every read up
+             * to here is a whole number of bytes, and if that ever stops being
+             * true this quietly does the safe thing instead of losing a
+             * fraction of a byte. */
+            uint32_t left = length;
+            if (f->skip && (f->bitcnt & 7u) == 0u) {
+                uint32_t held = (f->bitcnt >> 3) + (f->have - f->pos);
+                if (length > held && f->skip(f->ctx, length - held)) {
+                    f->bitacc = 0; f->bitcnt = 0;
+                    f->pos = f->have = 0;
+                    left = 0;
+                }
+            }
+            for (uint32_t i = 0; i < left; i++) (void)bits(f, 8);
         }
         if (f->eof) return FLAC_ERR_SHORT;
     }
@@ -289,7 +315,26 @@ static flac_err parse_frame_header(flac_t *f)
     else if ((c & 0xFEu) == 0xFCu) extra = 5;
     else if ((c & 0xFFu) == 0xFEu) extra = 6;
     else return FLAC_ERR_DATA;                   /* 0xFF is not a valid lead */
+    uint32_t num_at = n - 1u;                    /* where the coded number began */
     for (uint32_t i = 0; i < extra; i++) HBYTE();
+
+    /* Decode it. This field was parsed for its LENGTH and the value thrown
+     * away, which cost us the one thing FLAC offers that MP3 does not: every
+     * frame states where it is. Without it, position after a seek is whatever
+     * the seek THOUGHT it landed on, and any error there is permanent -- the
+     * clock runs on from a wrong start and sails past the end of the track.
+     *
+     * Fixed blocking strategy (the common case, and what every file on the
+     * test card uses) codes the FRAME number; variable codes the first SAMPLE
+     * number. blocking_strategy is the low bit of h[1]. */
+    {
+        uint64_t v = (extra == 0u) ? h[num_at]
+                                   : (uint64_t)(h[num_at] & (0x3Fu >> extra));
+        for (uint32_t i = 1u; i <= extra; i++)
+            v = (v << 6) | (h[num_at + i] & 0x3Fu);
+        f->frame_number  = v;
+        f->number_is_sample = (uint8_t)(h[1] & 1u);
+    }
 
     uint32_t bsi = n;
     if      (bs_code == 6u) { HBYTE(); }
@@ -645,6 +690,27 @@ void flac_flush_input(flac_t *f)
     f->have = 0; f->pos = 0;
     f->bitacc = 0; f->bitcnt = 0;
     f->eof = 0;
+}
+
+/* Finds the next frame header and stops, leaving its position in
+ * f->frame_number. No subframe is decoded.
+ *
+ * This is what makes an accurate seek possible. Interpolating a byte offset
+ * from a time is a guess -- badly so on material whose bitrate varies, where
+ * the byte midpoint of a file can sit nowhere near its time midpoint -- and
+ * a guess is all the player had. Probing costs a header parse instead of a
+ * whole frame, so the offset can be refined until it lands where it was
+ * asked, rather than the clock being bent afterwards to match wherever it
+ * happened to land. Bending the clock was tried: it makes the display honest
+ * and the transport unusable, because the next seek target is computed FROM
+ * the clock.
+ *
+ * The caller repositions the stream and calls flac_flush_input() between
+ * probes, so leaving the reader mid-frame here is deliberate and harmless. */
+flac_err flac_probe_frame(flac_t *f)
+{
+    if (f->eof && f->pos >= f->have) return FLAC_END;
+    return frame_header(f);
 }
 
 flac_err flac_decode_frame(flac_t *f, flac_sink_fn sink, void *sink_ctx)

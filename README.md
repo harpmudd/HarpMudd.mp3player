@@ -1,14 +1,11 @@
 # MP3 Player — Analogue Pocket
 
-A music player for the Analogue Pocket. Pick a track or a playlist and the core
-decodes and plays it straight off the SD card, with album art, tags, ten
-switchable meters, an eight-preset equalizer, a progress bar, settings
-persistence and optional resume — it can pick up where you left off in a
-playlist.
+A music player for the Analogue Pocket. It plays MP3 and FLAC straight off the
+SD card, with album art, tags and meters.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
-Release history: [CHANGELOG.md](CHANGELOG.md).
+Current version **v1.4.0**. Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Installing
 
@@ -48,7 +45,7 @@ The controls:
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (ten styles) |
 | **Y** | Cycle the EQ preset (eight) |
-| **Select** | Show / hide the album art panel |
+| **Select** | *Tap* — playlist browser; *Hold* — show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
@@ -69,6 +66,31 @@ The album art panel and screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
 
+## What it shows
+
+<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat, shuffle and volume indicators and the EQ preset ROCK, track 5 of 14, 02:31 of 03:41, and a progress bar">
+
+- **Title and artist** from the file's tag. One with no readable tag shows its
+  filename, which is usually the song name anyway.
+- **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
+  cover show no panel; a cover that can't be decoded shows the panel with the
+  reason in it.
+- **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
+  scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
+  bars, peak dots, a magic eye and a 16-band spectrum analyser.
+- **Elapsed and total time**, with a progress bar.
+- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
+  **EQ preset name**, and the position in the playlist.
+- **Bitrate and sample rate**, with the encoder that made the file where it
+  says so — `128 kbps - 44.1 kHz - LAME3.100`.
+
+Tapping **Select** replaces this screen with the
+[playlist browser](#the-playlist-browser) until you close it.
+
+CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
+rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower
+sample rates common in spoken-word recordings.<br clear="right">
+
 ## Playlists
 
 A plain text file with one track per line, saved as `playlist.m3u` in
@@ -85,8 +107,68 @@ beside its tracks in an album folder or in `common/` naming tracks below it.
 Either works, so an `Artist/Album` library needs no rearranging. Lines starting
 with `#` are ignored, so exported playlists work as-is.
 
-Any other filename is picked with **Load Playlist** and becomes the one that
-loads at launch from then on.
+Any other filename is picked with **Load Playlist**, and becomes the one that
+loads at launch from then on — provided its name is short enough to be
+remembered.
+
+### The playlist browser
+
+<img src="docs/playlist_browser.png" width="280" align="right" alt="Playlist browser: a PLAYLIST 12 of 14 header above nine filename rows, with Gorillaz - Feel Good Inc. highlighted mid-list and marked by a cursor; the transport row, times and progress bar stay visible underneath">
+
+**Tap Select** to browse the playlist on screen. It opens on the track that's
+playing, so you always start from where you are. The transport row, the times
+and the progress bar stay put underneath, so nothing about what's playing is
+hidden while you look.
+
+| Pocket | Action |
+|---|---|
+| **Up** / **Down** | Move the cursor — hold to run through a long list |
+| **Left** / **Right** | Page up / down a screenful at a time |
+| **Y** | Jump back to the track that's playing |
+| **A** | Play whatever's under the cursor |
+| **Select** or **B** | Close without changing anything |
+
+Rows show filenames rather than tags — a tag lives inside its file, so naming
+every row would mean opening all 256 of them. With shuffle on, the list is the
+play queue, so scrolling down shows what's actually coming rather than the file
+order.<br clear="right">
+
+### Limits
+
+| | Limit | What happens past it |
+| --- | --- | --- |
+| Tracks per playlist | 256 | Says how many were dropped |
+| `.m3u` file size | 12 KB | Same — about 48 characters per line at 256 tracks |
+| Remembered playlist name | any length, if listed in `playlists.m3u` — otherwise 12 characters | Falls back to `playlist.m3u` next launch |
+
+### Remembering which playlist you were using
+
+The core reopens the list you last used at the next launch. It has one
+settings word to remember it in, which holds twelve characters — so on its
+own, `Shenanigans.m3u` comes back and `Goose - Shenanigans Nite Club.m3u`
+does not.
+
+**List a playlist in `playlists.m3u` and the limit goes away.** It's a plain
+list of the playlists on the card, and only the ones listed are remembered:
+
+```text
+Crash Test Dummies - God Shuffled His Feet.m3u
+Goose - Shenanigans Nite Club.m3u
+Live/Phish - Hampton 1997.m3u
+```
+
+Write it in any text editor and save it beside your playlists, in
+`/Assets/mp3player/common/`. The core searches it by name at boot, so a
+playlist can be called anything you like. Order doesn't matter and you can add
+or remove lines freely — entries are matched by name, not by position.
+
+Without the file nothing changes: names of twelve characters or fewer are still
+remembered on their own, so an existing card keeps working exactly as it did.
+
+Resume follows the same path. The core remembers the track and the second you
+stopped on, but it finds them through the playlist it reopens — so if the
+playlist can't be reopened, resume comes back at the start of `playlist.m3u`
+instead. Resume covers the whole playlist, all 256 tracks.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
@@ -95,26 +177,6 @@ the list is freshly shuffled.
 
 A misspelled or missing filename costs that one track — the core steps over it
 and says how many it skipped.
-
-## What it shows
-
-<img src="docs/screenshot.png" width="280" align="right" alt="Player screen: Feel Good Inc. by Gorillaz, track 6 of Demon Days 2005, encoded 128 kbps 44.1 kHz by LAME3.90, above a bar meter with the album cover at the right; below, a PLAYING label with repeat and shuffle indicators and the EQ preset ROCK, track 3 of 10, 02:31 of 03:41, and a progress bar">
-
-- **Title and artist** from the file's tag. One with no readable tag shows its
-  filename, which is usually the song name anyway.
-- **Album art** from the tag's embedded image — baseline JPEG only; tracks
-  without it don't show the panel.
-- **Ten meters**, cycled with **X**: bars, waterfall, L/R levels, phase scope,
-  oscilloscope, twin analogue VU needles, scrolling waveform, mirrored bars,
-  peak dots and a magic eye.
-- **Elapsed and total time**, with a progress bar.
-- **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
-  **EQ preset name**, and the position in the playlist.
-- **Bitrate and sample rate**, with the encoder that made the file where it
-  says so — `128 kbps - 44.1 kHz - LAME3.100`.
-
-CBR and VBR MPEG-1 Layer III at every standard bitrate and sample rate, mono or
-stereo, plus FLAC — see [below](#flac).<br clear="right">
 
 ## Equalizer
 
@@ -183,18 +245,22 @@ framework bugs that had to be found first — is in
 
 ## Known limitations
 
-- **MPEG-1 Layer III only.** MPEG-2/2.5 and Layer I/II are not handled.
 - **FLAC up to 48 kHz.** Hi-res files are turned away with the reason on
   screen; see [FLAC](#flac) for why, and what to convert them to.
-- **Baseline JPEG album art only.** PNG and *progressive* JPEG covers are
-  skipped rather than shown wrong — re-save as baseline if a cover doesn't
-  appear. See [ROADMAP.md](ROADMAP.md).
-- **Playlists are capped at 256 tracks**, or 20 KB of `.m3u` text — whichever
-  comes first, which allows about 80 characters per line. A playlist that runs
+- **Baseline JPEG album art only,** and a cover that can't be shown says so
+  rather than silently going missing. A progressive JPEG shows **PROG. JPEG**
+  in the art panel; anything else that won't decode — a PNG cover, a damaged
+  image — shows **COVER ERROR**. Re-saving the cover as a baseline JPEG fixes
+  it. A track with no embedded cover at all shows no panel, which is different
+  and intended. See [ROADMAP.md](ROADMAP.md).
+- **Playlists are capped at 256 tracks**, or 12 KB of `.m3u` text — whichever
+  comes first, which allows about 48 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **Sometimes a playlist or track pick doesn't register straight away.** It
-  loads on its own a few seconds later; if it doesn't, pick it again. Seen when
-  switching from one playlist to another.
+- **A playlist with a name longer than 12 characters needs a `playlists.m3u`
+  entry to be remembered.** Without one it plays fine but won't be the list
+  that loads next launch, and resume won't follow it. A `playlists.m3u` that
+  exists but doesn't list that playlist has the same effect as none at all. See
+  [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.

@@ -752,6 +752,16 @@ static void pl_name_read(void)
          * getting mangled by the tooling that generated this file. */
         if (buf[i] == '/' || buf[i] == 0x5Cu) start = i + 1u;
 
+    /* The whole name, before the display copy truncates it. This is what the
+     * remembered hash is taken over, so a forty-character album name is as
+     * rememberable as a short one. */
+    {
+        uint32_t m = 0;
+        for (uint32_t i = start; i < at + len && m < PL_FULL_MAX; i++)
+            pl_name_full[m++] = (char)buf[i];
+        pl_name_full[m] = 0;
+    }
+
     uint32_t n = 0;
     for (uint32_t i = start; i < at + len && n < sizeof(pl_name) - 1u; i++) {
         char c = (char)buf[i];
@@ -787,7 +797,15 @@ static void pl_stem_of(const char *name, char *out)
         if (name[i] == '.') break;                 /* stop at the extension */
         out[n++] = name[i];                        /* CASE PRESERVED */
     }
-    out[n] = 0;
+    /* Clear the REST, not just terminate. The caller's array is uninitialised
+     * stack and the whole of it is copied into pl_saved_stem and then written
+     * to the persist file on the card, so whatever was left in those bytes
+     * ends up in a file. Nothing reads past the terminator, so this never
+     * misbehaved -- but the persisted stem read back as "playlist\0t D", the
+     * tail being the remains of "Crash Test D" from a longer name stored
+     * earlier, which is stack residue in a user's settings and is misleading
+     * to anyone debugging from that file. */
+    while (n <= PL_STEM_MAX) out[n++] = 0;
 }
 
 static char pl_upper(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
@@ -803,15 +821,107 @@ static int pl_stem_eq(const char *a, const char *b)
     return 1;
 }
 
+/* The list of playlists. Optional: without it everything below is skipped and
+ * the twelve-character stem behaves exactly as it always has. */
+#define PL_INDEX_NAME "playlists.m3u"
+
+/* FNV-1a over the name, case-folded because the two sides come from different
+ * places -- one from APF's datatable, one from a text file the user wrote --
+ * and only the card's own spelling is authoritative.
+ *
+ * Folded to 31 bits: APF stores settings words SIGNED, and a word that looks
+ * negative is clamped to the range and comes back wrong. Zero is reserved for
+ * "nothing remembered", so a hash that lands there is nudged. */
+static uint32_t pl_name_hash(const char *name)
+{
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; name[i]; i++) {
+        h ^= (uint32_t)(uint8_t)pl_upper(name[i]);
+        h *= 16777619u;
+    }
+    h &= 0x7FFFFFFFu;
+    return h ? h : 1u;
+}
+
+/* Finds the remembered name in playlists.m3u and opens it.
+ *
+ * Reads the list into pl_text, which is safe HERE and nowhere else: this runs
+ * during the boot restore, before the real playlist has been read into that
+ * same buffer. Doing the lookup when the user PICKS a list would destroy the
+ * list they just picked, which is the reason the remembered key is a hash --
+ * a hash can be taken from the name alone, with no file access at all.
+ *
+ * Returns 1 if a matching entry was opened. */
+static int pl_open_by_hash(uint32_t want)
+{
+    if (!want) return 0;
+    if (!pl_open_into(PL_SLOT_ID, PL_INDEX_NAME)) return 0;
+
+    uint32_t len = pl_read_raw();
+    if (!len) return 0;
+
+    uint32_t i = 0;
+    while (i < len) {
+        while (i < len && (pl_text[i] == '\n' || pl_text[i] == '\r')) i++;
+        uint32_t a = i;
+        while (i < len && pl_text[i] != '\n' && pl_text[i] != '\r') i++;
+        uint32_t b = i;
+        while (b > a && pl_text[b - 1u] == ' ') b--;
+        if (b <= a || pl_text[a] == '#') continue;
+
+        /* Match on the last path component, so an entry may name a playlist
+         * inside its album folder and still be found. */
+        uint32_t base = a;
+        for (uint32_t k = a; k < b; k++)
+            if (pl_text[k] == '/' || pl_text[k] == 0x5Cu) base = k + 1u;
+
+        char nm[PL_FULL_MAX + 1u];
+        uint32_t n = 0;
+        for (uint32_t k = base; k < b && n < PL_FULL_MAX; k++) nm[n++] = pl_text[k];
+        nm[n] = 0;
+        if (pl_name_hash(nm) != want) continue;
+
+        /* Open the entry as WRITTEN, not the basename: the path is how a
+         * playlist in a subfolder is reached. */
+        char full[PL_FULL_MAX + 1u];
+        n = 0;
+        for (uint32_t k = a; k < b && n < PL_FULL_MAX; k++) full[n++] = pl_text[k];
+        full[n] = 0;
+        if (pl_open_into(PL_SLOT_ID, full)) return 1;
+        break;
+    }
+
+    /* No match, or the entry named a file that would not open. The slot is
+     * still holding playlists.m3u at this point, and pl_load() reads whatever
+     * the slot holds -- so leaving it there would parse the LIST OF PLAYLISTS
+     * as a list of tracks, and the user would be looking at a playlist whose
+     * every entry is an .m3u file. Put the default back and report failure;
+     * the caller still has the stem to try. */
+    pl_open_into(PL_SLOT_ID, PL_DEFAULT_NAME);
+    return 0;
+}
+
 /* Remember whichever list is loaded, so the next boot can reopen it. Called
  * once a playlist has actually parsed -- an unreadable file must not overwrite
  * a good remembered name. */
 static void pl_remember(void)
 {
+    /* The hash is taken over the FULL name and is what makes a long one
+     * rememberable; the stem still goes alongside it, because it is what
+     * works on a card with no playlists.m3u. Either may change without the
+     * other: a card can gain a list of playlists between sessions. */
+    uint32_t h = pl_name_full[0] ? pl_name_hash(pl_name_full) : 0u;
+
     char stem[PL_STEM_MAX + 1u];
     pl_stem_of(pl_name_raw, stem);
-    if (!stem[0] || pl_stem_eq(stem, pl_saved_stem)) return;
-    for (uint32_t i = 0; i <= PL_STEM_MAX; i++) pl_saved_stem[i] = stem[i];
+
+    int stem_new = stem[0] && !pl_stem_eq(stem, pl_saved_stem);
+    int hash_new = h && h != pl_saved_hash;
+    if (!stem_new && !hash_new) return;
+
+    if (stem_new)
+        for (uint32_t i = 0; i <= PL_STEM_MAX; i++) pl_saved_stem[i] = stem[i];
+    if (hash_new) pl_saved_hash = h;
     settings_mark_dirty();
 }
 
@@ -857,16 +967,33 @@ static void pl_load(void)
      * made this see a name differing from the remembered one and helpfully
      * "restore" the remembered one over the top. It fought the user's pick
      * every single time, which is exactly how it was reported. */
-    if (pl_restore_pending && pl_saved_stem[0]) {
+    if (pl_restore_pending && (pl_saved_stem[0] || pl_saved_hash)) {
         char cur[PL_STEM_MAX + 1u];
         pl_stem_of(pl_name_raw, cur);
-        if (!pl_stem_eq(cur, pl_saved_stem)) {
-            char want[PL_STEM_MAX + 5u];
-            uint32_t n = 0;
-            while (pl_saved_stem[n] && n < PL_STEM_MAX) { want[n] = pl_saved_stem[n]; n++; }
-            want[n++] = '.'; want[n++] = 'm'; want[n++] = '3'; want[n++] = 'u';
-            want[n] = 0;
-            if (pl_open_into(PL_SLOT_ID, want)) pl_name_read();
+        uint32_t cur_h = pl_name_full[0] ? pl_name_hash(pl_name_full) : 0u;
+
+        /* Already the right list? Then leave it alone. The hash decides when
+         * there is one, because two albums by the same artist share their
+         * first twelve characters and the stem cannot tell them apart. */
+        int same = pl_saved_hash ? (cur_h == pl_saved_hash)
+                                 : pl_stem_eq(cur, pl_saved_stem);
+        if (!same) {
+            /* By hash through playlists.m3u first: that is the only route
+             * that can reopen a name longer than twelve characters. Falls
+             * through to the stem when there is no such file, or the name is
+             * not listed in it -- so a card that never had one is unaffected
+             * and a name short enough to store still works on its own. */
+            int opened = pl_open_by_hash(pl_saved_hash);
+
+            if (!opened && pl_saved_stem[0]) {
+                char want[PL_STEM_MAX + 5u];
+                uint32_t n = 0;
+                while (pl_saved_stem[n] && n < PL_STEM_MAX) { want[n] = pl_saved_stem[n]; n++; }
+                want[n++] = '.'; want[n++] = 'm'; want[n++] = '3'; want[n++] = 'u';
+                want[n] = 0;
+                opened = pl_open_into(PL_SLOT_ID, want);
+            }
+            if (opened) pl_name_read();
         }
     }
 

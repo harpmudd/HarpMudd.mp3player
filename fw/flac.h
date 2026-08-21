@@ -34,6 +34,18 @@
  * file. */
 typedef int (*flac_read_fn)(void *ctx, uint8_t *dst, int n);
 
+/* OPTIONAL. Moves the underlying stream forward by n bytes without delivering
+ * them, returning non-zero on success. Leave null and the decoder reads and
+ * discards instead, which is correct but pays for every byte.
+ *
+ * It exists for metadata. flac_open() wants STREAMINFO and VORBIS_COMMENT and
+ * has to walk past everything else to reach the audio -- and "everything else"
+ * is usually the cover art. Measured on this hardware: 259318 bytes of PICTURE
+ * and 75214 of PADDING read through the bit reader one byte at a time, 628 ms
+ * of a 930 ms FLAC load, for data the caller then reads AGAIN by itself to
+ * decode the artwork. */
+typedef int (*flac_skip_fn)(void *ctx, uint32_t n);
+
 typedef enum {
     FLAC_OK = 0,
     FLAC_END,                 /* clean end of stream                        */
@@ -48,6 +60,7 @@ typedef enum {
 typedef struct {
     /* ---- input ---- */
     flac_read_fn  read;
+    flac_skip_fn  skip;           /* optional; see flac_skip_fn             */
     void         *ctx;
     uint8_t       buf[512];
     uint32_t      have, pos;      /* bytes in buf, and read cursor          */
@@ -71,6 +84,11 @@ typedef struct {
     /* ---- per frame ---- */
     uint32_t      blocksize;
     uint8_t       ch_mode;        /* 0 independent, 8 L/S, 9 R/S, 10 M/S    */
+    /* Where this frame sits in the stream, straight from its header. With a
+     * FIXED blocking strategy this is the frame number; with VARIABLE it is
+     * the first sample number. number_is_sample says which. */
+    uint64_t      frame_number;
+    uint8_t       number_is_sample;
 
     /* ---- the one buffered channel ---- */
     int32_t      *ch0;            /* max_blocksize entries, caller-provided */
@@ -105,6 +123,11 @@ extern uint8_t  flac_order, flac_type;   /* type: 1 FIXED, 2 LPC    */
 /* Drops buffered input and bit state after the caller has repositioned the
  * stream. Keeps STREAMINFO and the block buffer. */
 void flac_flush_input(flac_t *f);
+
+/* Parses the next frame header and stops, without decoding audio. Leaves the
+ * frame's position in f->frame_number, which lets a seek measure where a byte
+ * offset actually landed and refine it. */
+flac_err flac_probe_frame(flac_t *f);
 
 
 #endif

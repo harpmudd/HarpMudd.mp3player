@@ -34,14 +34,15 @@ core updaters poll constantly, so that zeroes the asset's download count and
 briefly removes the file they are fetching. Delete only when the attached zip
 itself has to change.
 
-**Version lives in TWO files and both must move:**
+**Version lives in THREE files and all must move:**
 
 - `fw/player.c` — `APP_VER`, which is the version on the splash screen
 - `dist/Cores/HarpMudd.Mp3Player/core.json` — `version`, which is what the
   Pocket shows in its core list, plus `date_release`
+- `README.md` — the `Current version **vX.Y.Z**` line in the opener
 
-`fw/build.sh` now compares the two and FAILS the build if they disagree, so the
-splash and the core list cannot drift again — they did through the whole of
+`fw/build.sh` now compares all three and FAILS the build if any disagree, so the
+splash, the core list and the README cannot drift again — they did through the whole of
 v1.3.0's development, with a card in hand announcing 1.2.0. It cannot check
 `date_release`, since only a human knows the release date; it prints it on
 every build instead so it cannot be forgotten quietly.
@@ -120,6 +121,111 @@ that the gate "has behaved since".
 
 Shipped as **v1.2.0**, not the v1.1.1 first estimated -- the fix needed new
 RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
+
+## Light stutter ~2 s into every FLAC — FIXED in v1.4.0, hardware-confirmed
+
+The in-playback size search was corrupting the stream it was measuring.
+`size_probe_pump()` binary-searched with reads at far random offsets — 60 MB
+out for the clamp reference, then doubling — **on the same slot the decoder was
+streaming from**. That drags the APF fragment cache, the refills that follow
+return wrong bytes, and the decoder resyncs at the next frame. It fired at
+`fl_first_frame + 256 KB`, about two seconds into a ~1000 kbps FLAC, and
+reproduced ~99% of the time.
+
+### Why three fixes missed it
+
+A resync leaves the FIFO **full**, so no underrun is ever recorded. An audio
+glitch reads as starvation, and three consecutive fixes went there — gate the
+probe on ring occupancy, deepen the ring, remove CPU contention. None of them
+touched the mechanism. Worse, the first instrument could not see the fault
+either: it latched on `under_shadow`, which is cleared only by a flush, so
+exactly **one** underrun per track could ever be counted. `N` rising by exactly
+1 per track was a ceiling, not a measurement.
+
+What broke it open was asking whether the glitch was an underrun **at all**,
+rather than which underrun it was. `V--` at 2–3 s eliminated starvation and
+every CPU-stall theory in one round trip — a stall long enough to hear would
+necessarily have emptied the FIFO. Two more candidates were eliminated by
+reading rather than shipping: `probe_file_size()` runs only on a seek press,
+`art_decode()` runs inside `load_track()` before playback starts.
+
+### The rule this establishes
+
+**Never read the streaming slot anywhere but the sequential read head during
+playback.** `0190` metadata queries are safe; slot reads are not. The codebase
+already knew — the periodic slot-3 identity check is deliberately a `0190`, and
+its comment says so: *"does not drag the MP3 slot's fragment cache down with it
+the way a periodic poll of slot 3 would."* One caller honoured it, one did not.
+
+### What shipped
+
+The probe now runs only when `track_secs == 0`. Everything else was already
+covered: duration from STREAMINFO/Xing via `ui_total_secs()`, bitrate from
+bytes-played ÷ seconds-played, the seek bracket from the same steps run
+synchronously at the press (a flush follows, so corruption is inaudible), and
+the true size for free from `refill_pump` when a read past EOF fails.
+
+Verified on hardware: stutter gone, FLAC seek unchanged, format row still
+populates.
+
+### WITHDRAWN from the README 2026-08-21 -- never actually observed
+
+The limitation below was written from INFERENCE, not observation: the probe
+still runs on headerless files, therefore they must still tic. The user could
+not reproduce it, and checking the arithmetic showed why -- the published
+timing was wrong.
+
+The gate is 256 KB of AUDIO, not a fixed time. At FLAC rates (~125 KB/s) that
+is the ~2 s where it was measured. At MP3 rates it is far later:
+
+    Stone Temple Pilots  128 kbps   16.4 s
+    Widespread Panic     160 kbps   13.1 s
+    Stockholm Syndrome   256 kbps    8.2 s
+    LCD Soundsystem      320 kbps    6.6 s
+
+So "a couple of seconds in" sent the listener to the wrong part of the track.
+Worse, a bug found in the same pass (below) pushed it later still.
+
+Two reasons it may not be audible on MP3 at all: an MP3 frame is 26 ms against
+a FLAC frame's ~100 ms, so a resync costs a quarter as much audio; and at
+16-40 KB/s the 24 KB ring holds 0.6-1.5 s rather than 0.19 s.
+
+Documenting an unobserved symptom is worse than documenting nothing -- it
+invites users to hear something that may not be there. To test it properly,
+listen at the times above, on a fresh boot with no FLAC played first.
+
+### The bug that made it later still -- FIXED
+
+`fl_first_frame` is FLAC-only and nothing cleared it on an MP3 load, so an MP3
+played after a FLAC inherited that FLAC's first-frame offset -- 642 KB on an
+album with large embedded art. The probe gate is measured from it, which pushed
+a 128 kbps track's probe from 16 seconds out to 56: on a short track, never.
+That also delays `slot_size`, and with it the total time and progress bar on
+exactly the headerless files that depend on the probe for them.
+
+Now cleared per track, and the gate measures from `audio_start` on an MP3 and
+`fl_first_frame` on a FLAC -- the first audio byte either way.
+
+### KNOWN, ACCEPTED: headerless MP3 may still tic
+
+Files with no Xing/VBRI header have no other duration source, so they still
+probe during playback and may still tic. The trade is a rare tic against no
+progress bar and no total time at all. A load-time probe is **not** available
+to them — a file opened by name with `0192` has only just been opened and a far
+read still fails, which is how a 30 MB track once measured 5 MB. One line
+(`if (track_secs) return 0;`) flips the trade if the tic ever matters more.
+
+## Playlist pick occasionally does nothing — WITHDRAWN from the README 2026-08-21
+
+**Removed from user-facing Known limitations on user report: not seen any more.**
+The three-second identity poll heals a lost pick automatically, so the visible
+symptom is at most a short delay rather than a pick that does nothing.
+
+This is NOT a claim the underlying fault is gone -- the entry below is explicit
+that the poll recovers a pick rather than preventing one from being lost, and
+that remains true. What changed is that the mitigation is doing its job well
+enough that the user no longer notices. If reports return, restore the README
+line rather than re-investigating from scratch; everything below still applies.
 
 ## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
 
@@ -258,6 +364,109 @@ carry one, if evidence is ever wanted.
 Restore the README line if anyone reports a wrong duration — the symptom is
 otherwise baffling, and the cause is a property of their file rather than
 anything they can see.
+
+## Picking a track in the playlist browser can start it at 1.2x — BACKLOGGED for 1.4.x
+
+User report, 2026-08-21: rare, and only when picking a track from the browser.
+Deliberately NOT listed as a README limitation and not fixed in 1.4.0.
+
+### Strong hypothesis, from reading — NOT verified
+
+The speed gesture keeps its own press state:
+
+    static uint32_t a_t0;
+    static uint8_t  a_fired;
+    if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
+    if ((keys & KEY_A) && !a_fired && cycles() - a_t0 >= a_hold_cy) { toggle }
+
+`a_t0` is refreshed only on an A *edge*. The browser consumes that edge — it
+sets `pl_ui_play_req`, closes itself, then masks A out of `edge` AND `keys` for
+that pass — so the speed logic never sees the press and `a_t0` is never
+restarted.
+
+On the next pass the overlay is closed, so nothing masks anything. If A is
+still held, `keys & KEY_A` is true, `a_fired` is still 0 from whatever the
+previous A press was, and `a_t0` is a timestamp from minutes ago. The hold
+comparison is therefore satisfied immediately, and 1.2x toggles on the first
+pass after the browser closes.
+
+That explains "rare" exactly: it needs A to still be down for at least one poll
+pass after the browser closes. A quick tap releases inside the same frame and
+nothing happens; a slightly longer press falls straight into it. It also
+explains why it only happens from the browser — that is the one place an A
+press is consumed without the speed logic seeing the edge.
+
+### Likely fix
+
+Reset the gesture's state wherever the browser consumes the press — set `a_t0`
+to now and `a_fired` to 1, so the residual hold cannot satisfy the comparison.
+Better still, make the hold require an edge the speed logic itself observed,
+rather than trusting a timestamp that another consumer may have skipped.
+
+The same shape should be checked anywhere else an A edge is swallowed.
+
+### Before fixing, reproduce it
+
+Open the browser, press A on a track and hold for about half a second. If the
+hypothesis is right that reproduces it every time, which would also mean it is
+not rare — only rarely *noticed*, because 1.2x on a track just starting sounds
+like a fast rip rather than a mode.
+
+## ID3v1-only tags never display from a playlist — BACKLOGGED, currently unreachable
+
+A file carrying **only** an ID3v1 tag, loaded from a playlist, shows no title,
+artist or album. Found 2026-08-21 while tagging the Aesop's Fables audiobook,
+23 of whose 26 chapters were in exactly that state.
+
+### Cause
+
+`id3v1_read()` is called from `read_track_head()`, which runs BEFORE
+`load_track()` establishes `slot_size`. Its first line is
+`if (slot_size < 128u) return;`, so on a playlist load — where `pl_arm_load()`
+zeroes `slot_size` and sets `force_size_probe`, because a file opened by name
+with 0192 raises no reload edge — it gives up immediately. On a menu load
+`R_SLOT_SZ` is valid and it works, which is why this looks intermittent.
+
+### The trap, and the reason a naive fix fails
+
+The obvious repair is to call it later, once a size exists. That does not work,
+and the reason is worth writing down because it costs an hour to rediscover.
+
+The only cheap size available on a playlist load is
+`slot_size = audio_start + track_bytes`, derived from the Xing/Info header. That
+is the end of the **audio**, not the end of the **file** — and the ID3v1 block
+sits after it. So `slot_size - 128` lands inside the last audio frame, the
+`TAG` check fails, and the result is identical to the bug by a longer route.
+
+### The fix, when it is worth doing
+
+Two parts, and the second is what makes the first useful:
+
+1. Retry the v1 read from `load_track()`, after a size exists, rather than from
+   `read_track_head()`, which runs before one does.
+2. Scan a ~512-byte window near the estimated end for the `TAG` magic instead of
+   demanding an exact offset. The Xing-derived size underestimates by precisely
+   the tag length, so a window absorbs the error.
+
+~40 lines and one helper. Touches only the load path, so it does not reopen the
+fragment-cache hazard — far reads at load are already routine there (album art
+does them). Estimate ~1 hour plus one hardware test.
+
+Coverage: Xing/Info + v1-only is fixed by the window; menu-loaded files already
+work; headerless + v1-only falls out for free, since those still probe during
+playback and a retry when `slot_size` lands would catch them.
+
+### Why it is parked
+
+**Measured, not assumed: 0 of the 14 MP3s on the card are affected.** Thirteen
+carry both a v2 title and a v1 block, so the v2 path resolves first and
+`id3v1_read()` is never reached; the fourteenth is the deliberate
+`_no_tag` test file, which has neither and would show nothing regardless.
+
+The audiobook that surfaced this was fixed at the source instead, with real
+ID3v2.3 tags written from the LibriVox metadata. Nothing on the card can now
+trigger the defect, and changing the load path for a reason that is not present
+is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
 
@@ -651,6 +860,153 @@ works the claim can come back for relative-to-root paths; if the outside case
 works too, the "music can live anywhere on the card" line can come back with
 it. Until then the README claims only what has been played: names relative to
 the playlist's own folder, including subfolders under it.
+
+## Memory and speed — measured 2026-08-16, for v1.4.0
+
+Slack at the v1.3.0 merge was **1216 bytes**, the floor `link.ld`'s heap assert
+allows. Anything added failed the link. This is where the room came from and
+where the rest is.
+
+### Where the RAM actually goes
+
+`nm --size-sort -S` on the v1.4.0 build:
+
+| | bytes | kind | |
+|---|---|---|---|
+| `arena` | 24576 | BSS | sized by Helix's MEASURED 23824 peak; 752 spare |
+| `ui_draw_dynamic` | 19212 | text | the ten meters |
+| `pl_text` | 16384 | BSS | the .m3u text, sized for 256 tracks |
+| `main` | 13724 | text | |
+| `load_track` | 11892 | text | |
+| `art_acc` | 11040 | BSS | artwork scaling accumulator |
+| `xmp3_huffTable` | 8484 | rodata | Helix |
+| `pcm` | 4608 | BSS | Helix output, reused as the FLAC meter window |
+
+### Done
+
+**picojpeg at -Os: 3208 bytes.** It decodes art once per load, inside the
+silent gap where the FIFO is already flushed, so nothing it does is on the
+audio path. Slack 1216 -> 4424, which is what made the overlay possible.
+
+The ceiling for this approach is known: **the whole build at -Os saves 25744
+bytes.** Most of that is Helix and the meter drawing, both hot, so it is not
+available -- but it bounds the argument.
+
+### Ruled out, with the reason
+
+**`art_acc` overlapping the `arena` -- 11 KB, and it does NOT work.** The
+earlier entry proposed it on the assumption their lifetimes are disjoint. They
+are not: `load_track` allocates the decoder at the top (line ~6085) and decodes
+artwork at ~6299, so both are live together. It would need art decoded BEFORE
+the decoder is allocated, which means reordering the function that carries the
+"one FLAC attempt broke every load after it" history. Possible, not cheap, and
+not to be attempted on a hunch.
+
+### Still available, ranked
+
+1. **Split the cold half of player.c into its own -Os translation unit.**
+   `load_track` + `main` are 25.6 KB of text and neither is hot -- one runs per
+   track change, the other once. At the -Os ratio measured elsewhere that is
+   roughly 6-8 KB. The obstacle is mechanical, not conceptual: both reach dozens
+   of file-scope statics, so splitting means exporting them.
+2. **Drop a meter.** `ui_draw_dynamic` is the single largest text symbol at 19
+   KB for ten meters. Cheap in effort, unpopular, last resort.
+3. **`pl_text` 16 KB -> SDRAM.** Only if the CPU can address SDRAM directly,
+   which is UNVERIFIED -- the framebuffer and art stash are reached through the
+   drawing engine, not by load/store. Settle that question before planning
+   around it.
+
+### Speed: MEASURED 2026-08-19, and it was not what anyone guessed
+
+`UI_SHOW_LOAD_TIMES=1` was finally run. Three loads, milliseconds:
+
+| | H head | S size | A **art** | P prefill | T total |
+|---|---|---|---|---|---|
+| MP3 320 kbps | 526 | 0 | **1655** | 26 | 2209 |
+| FLAC, album track 1 | 299 | 625 | **2801** | 6 | 3731 |
+| FLAC, album track 2 | 296 | 628 | **2796** | 6 | 3726 |
+
+**Album art is 75% of a load.** Everything else is noise beside it.
+
+Two guesses in this codebase died here. The size probe -- "the single largest
+load-time win available" -- is the S column, and it reads **0 ms on MP3**. It
+had already been moved off the load path by then, and the user could not tell
+any difference, correctly. It was never what made a load slow.
+
+And the cost is not scaling. The test cover is 1200x1200, which already takes
+picojpeg's 1/8 reduce path, so the 2801 ms is Huffman decoding 259 KB of
+entropy data. A smaller panel would save nothing. Only NOT decoding helps.
+
+DONE, from that: the art stash is now keyed on a fingerprint of the IMAGE
+(length plus a hash of its first and last 512 bytes) rather than on the 0190
+file identity. All twelve tracks of the test album embed a byte-identical
+259276-byte JPEG, so eleven of those decodes were reproducing a picture the
+stash already held. Costs two small reads against 2801 ms.
+
+P is gone from the diagnostic row: 6..26 ms earned nothing, and the width it
+took clipped T -- "T3731" printed as "T373", a total smaller than one of its
+own parts.
+
+### Still available
+
+1. **Skip the PICTURE block in `flac_open`** -- 628 ms off every FLAC load, and
+   the only item here with no UX consequence at all. `flac_open` walks the
+   metadata through the ring to reach STREAMINFO and the comments, which means
+   streaming past 259 KB of artwork it does not want. It needs a small addition
+   to `fw/flac.h`: an optional skip callback the caller backs with a
+   reposition, since the decoder has no concept of seeking. Cheapest remaining
+   win.
+2. **Incremental art decode** -- see below. Backlogged, not abandoned.
+3. `H` at 299..526 ms is unexamined. Nobody has looked at what the head read
+   actually does.
+
+## Incremental album-art decode (BACKLOGGED 2026-08-19)
+
+Decode the cover in slices from the idle path instead of blocking the load,
+the way the file-size probe already does. Would remove 2801 ms from the load,
+let art be skipped entirely while hidden, and fix the one case the image cache
+cannot: the FIRST track of every album, and mixed playlists where every cover
+differs.
+
+**Backlogged after the trade was quantified, not for lack of appetite.**
+
+The 2801 ms is CPU-bound. Spread across idle time it stretches by however much
+idle exists, and this build has measured that elsewhere: **MP3 runs ~27% idle,
+24-bit FLAC ~0%**. So the honest description is not "art appears a beat later"
+-- it is:
+
+- music starts ~2.8 s sooner, on every track
+- art fills in **roughly 10 seconds** into an MP3
+- on a dense FLAC it may not progress at all while playing
+
+That is a genuine trade rather than a free win, and it is the user's call which
+half they want. The image cache already took the common case (playing an album
+straight through), which narrows what is left to justify the work.
+
+### If it is picked up
+
+`art_decode()` in `fw/art.inc` is already MCU-at-a-time -- `pjpeg_decode_mcu()`
+inside a `my`/`mx` loop -- so the shape is a state machine over that loop with
+the locals hoisted to statics. Drive it from `refill_pump()`'s "ring is at
+least half ahead" early return, which is exactly where `size_probe_step()` now
+runs and is proven not to starve audio.
+
+Three things to get right, each already load-bearing in that function:
+
+- `has_art` decides the LAYOUT (panel versus full-width waveform) and must be
+  known at load time. The FINDER establishes it without decoding, so this is
+  available -- do not infer it from decode completion.
+- `ui_art_mount()` fills the stash with the panel colour, so it must run before
+  the first slice, and `ui_art_round()` only after the last.
+- The accumulator work between MCU rows (`art_flush_row`, `next_ay`) carries
+  the H1V2 block-offset history and the row-overrun bound described in its own
+  comments. Hoisting it is where a subtle corruption would come from; it is
+  caught by `tools/art_scale_model.py`, which should be re-run against any
+  restructuring.
+
+Un-hiding mid-track needs a decision either way: today art is always decoded at
+load, so toggling it on is instant. Any scheme that skips the decode has to
+answer what appears at that moment.
 
 ## Playlist overlay — hold a button, browse the list, pick a track (v1.4.0)
 

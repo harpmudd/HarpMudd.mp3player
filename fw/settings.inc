@@ -122,6 +122,12 @@ enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_RESUME, SW_VIZ, SW_EQ,
         * were never available before. Three words carry twelve characters of
         * the playlist's stem. */
        SW_PLN0, SW_PLN1, SW_PLN2,
+       /* A hash of the playlist's FULL name, resolved at boot against
+        * playlists.m3u. The three words above hold twelve characters, which
+        * is not enough for an ordinary album name and cannot be made enough:
+        * five free slots buy thirty-two characters and the name that prompted
+        * this is forty-two. See pl_saved_hash. */
+       SW_PLHASH,
        SW_N };
 
 /* What we last published. Initialised to a value APF can never write for
@@ -131,7 +137,8 @@ enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_RESUME, SW_VIZ, SW_EQ,
 static uint32_t set_pub[SW_N] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu,
-                                  0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+                                  0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                  0xFFFFFFFFu };
 
 static uint32_t set_rd(uint32_t w) { REG(R_SET_IDX) = w; return REG(R_SET_DAT); }
 static void     set_wr(uint32_t w, uint32_t v)
@@ -163,6 +170,7 @@ static int settings_store(void)
         }
         set_wr(SW_PLN0 + k, w);
     }
+    set_wr(SW_PLHASH, pl_saved_hash & 0x7FFFFFFFu);
     return 1;
 }
 
@@ -204,6 +212,9 @@ static int settings_load(void)
         }
     }
     pl_saved_stem[PL_STEM_MAX] = 0;
+    /* No range to check: any value is a legal hash. A wrong one simply fails
+     * to match anything in playlists.m3u and the stem takes over. */
+    pl_saved_hash = set_rd(SW_PLHASH) & 0x7FFFFFFFu;
     settings_adopted = 1u;
     return 1;
 }
