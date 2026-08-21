@@ -121,6 +121,61 @@ that the gate "has behaved since".
 Shipped as **v1.2.0**, not the v1.1.1 first estimated -- the fix needed new
 RTL, a wider register file and a CORE_VERSION bump, which is not a patch.
 
+## Light stutter ~2 s into every FLAC — FIXED in v1.4.0, hardware-confirmed
+
+The in-playback size search was corrupting the stream it was measuring.
+`size_probe_pump()` binary-searched with reads at far random offsets — 60 MB
+out for the clamp reference, then doubling — **on the same slot the decoder was
+streaming from**. That drags the APF fragment cache, the refills that follow
+return wrong bytes, and the decoder resyncs at the next frame. It fired at
+`fl_first_frame + 256 KB`, about two seconds into a ~1000 kbps FLAC, and
+reproduced ~99% of the time.
+
+### Why three fixes missed it
+
+A resync leaves the FIFO **full**, so no underrun is ever recorded. An audio
+glitch reads as starvation, and three consecutive fixes went there — gate the
+probe on ring occupancy, deepen the ring, remove CPU contention. None of them
+touched the mechanism. Worse, the first instrument could not see the fault
+either: it latched on `under_shadow`, which is cleared only by a flush, so
+exactly **one** underrun per track could ever be counted. `N` rising by exactly
+1 per track was a ceiling, not a measurement.
+
+What broke it open was asking whether the glitch was an underrun **at all**,
+rather than which underrun it was. `V--` at 2–3 s eliminated starvation and
+every CPU-stall theory in one round trip — a stall long enough to hear would
+necessarily have emptied the FIFO. Two more candidates were eliminated by
+reading rather than shipping: `probe_file_size()` runs only on a seek press,
+`art_decode()` runs inside `load_track()` before playback starts.
+
+### The rule this establishes
+
+**Never read the streaming slot anywhere but the sequential read head during
+playback.** `0190` metadata queries are safe; slot reads are not. The codebase
+already knew — the periodic slot-3 identity check is deliberately a `0190`, and
+its comment says so: *"does not drag the MP3 slot's fragment cache down with it
+the way a periodic poll of slot 3 would."* One caller honoured it, one did not.
+
+### What shipped
+
+The probe now runs only when `track_secs == 0`. Everything else was already
+covered: duration from STREAMINFO/Xing via `ui_total_secs()`, bitrate from
+bytes-played ÷ seconds-played, the seek bracket from the same steps run
+synchronously at the press (a flush follows, so corruption is inaudible), and
+the true size for free from `refill_pump` when a read past EOF fails.
+
+Verified on hardware: stutter gone, FLAC seek unchanged, format row still
+populates.
+
+### KNOWN, ACCEPTED: headerless MP3 may still tic
+
+Files with no Xing/VBRI header have no other duration source, so they still
+probe during playback and may still tic. The trade is a rare tic against no
+progress bar and no total time at all. A load-time probe is **not** available
+to them — a file opened by name with `0192` has only just been opened and a far
+read still fails, which is how a 30 MB track once measured 5 MB. One line
+(`if (track_secs) return 0;`) flips the trade if the tic ever matters more.
+
 ## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
 
 Intermittent. The user corrected an earlier "rare" framing on 2026-08-13,
