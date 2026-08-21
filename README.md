@@ -115,7 +115,6 @@ order.<br clear="right">
 | Tracks per playlist | 256 | Says how many were dropped |
 | `.m3u` file size | 12 KB | Same — about 48 characters per line at 256 tracks |
 | Remembered playlist name | any length, if listed in `playlists.m3u` — otherwise 12 characters | Falls back to `playlist.m3u` next launch |
-| Line length | 12 KB ÷ number of tracks | — |
 
 ### Remembering which playlist you were using
 
