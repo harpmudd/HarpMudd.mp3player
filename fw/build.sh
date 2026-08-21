@@ -122,6 +122,23 @@ if [ "$APP_VER" != "$JSON_VER" ]; then
   echo "    both must match before release; core.json also carries date_release" >&2
   exit 1
 fi
+# The README states it too, in its opening paragraph, so a visitor learns the
+# version without clicking through. That makes THREE copies, and an unchecked
+# third copy is just a slower way to be wrong -- the README is the first thing
+# read, so a stale line there is the most visible of the three. Checked here
+# with the other two rather than trusted to a checklist.
+README="$ROOT/README.md"
+DOC_VER=$(grep -m1 -o 'Current version \*\*v[0-9.]*\*\*' "$README" | grep -o '[0-9][0-9.]*')
+
+if [ -z "$DOC_VER" ]; then
+  echo "*** VERSION CHECK BROKE: no 'Current version **vX.Y.Z**' in README.md ***" >&2
+  exit 1
+fi
+if [ "$APP_VER" != "$DOC_VER" ]; then
+  echo "*** VERSION MISMATCH: player.c says $APP_VER, README says $DOC_VER ***" >&2
+  exit 1
+fi
+
 echo "version $APP_VER (core.json date_release $JSON_DATE)"
 
 echo "built [$TARGET] -> $OUT/$ROM"
