@@ -114,7 +114,7 @@ remembered.
 | --- | --- | --- |
 | Tracks per playlist | 256 | Says how many were dropped |
 | `.m3u` file size | 12 KB | Same — about 48 characters per line at 256 tracks |
-| Remembered playlist name | any length, with `playlists.m3u` — otherwise 12 characters | Falls back to `playlist.m3u` next launch |
+| Remembered playlist name | any length, if listed in `playlists.m3u` — otherwise 12 characters | Falls back to `playlist.m3u` next launch |
 | Line length | 12 KB ÷ number of tracks | — |
 
 ### Remembering which playlist you were using
@@ -124,8 +124,8 @@ settings word to remember it in, which holds twelve characters — so on its
 own, `Shenanigans.m3u` comes back and `Goose - Shenanigans Nite Club.m3u`
 does not.
 
-**Add a `playlists.m3u` and the limit goes away.** It's a plain list of the
-playlists on the card:
+**List a playlist in `playlists.m3u` and the limit goes away.** It's a plain
+list of the playlists on the card, and only the ones listed are remembered:
 
 ```text
 Crash Test Dummies - God Shuffled His Feet.m3u
@@ -262,8 +262,9 @@ framework bugs that had to be found first — is in
   comes first, which allows about 48 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
 - **A playlist with a name longer than 12 characters needs a `playlists.m3u`
-  to be remembered.** Without one it plays fine but won't be the list that
-  loads next launch, and resume won't follow it. See
+  entry to be remembered.** Without one it plays fine but won't be the list
+  that loads next launch, and resume won't follow it. A `playlists.m3u` that
+  exists but doesn't list that playlist has the same effect as none at all. See
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is

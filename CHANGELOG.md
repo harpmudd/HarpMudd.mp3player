@@ -47,7 +47,7 @@ What changed in each release, newest first.
 - **Playlists can have long names again.** The core could only remember twelve
   characters of a playlist's filename, so an album-length name played fine but
   was never the list that came back next launch — and nothing on screen said
-  so. Add a `playlists.m3u` listing your playlists and the limit is gone;
+  so. List your playlists in a `playlists.m3u` and the limit is gone;
   `tools/make_playlist_index.py` writes it for you. Cards without one behave
   exactly as before.
 - **The meters have more headroom,** and the spectrum reads in decibels rather
