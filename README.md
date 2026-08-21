@@ -7,28 +7,6 @@ Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
 
-## Quick start
-
-1. Copy the `Cores`, `Platforms` and `Assets` folders to the root of your SD
-   card, merging with what's there.
-2. Put some `.mp3` or `.flac` files in `/Assets/mp3player/common/`. Subfolders
-   are fine.
-3. Open the core, press **Analogue**, and choose **Load MP3**. It starts
-   playing.
-
-Four controls cover everything you need:
-
-| Pocket | Action |
-|---|---|
-| **A** | Play / pause |
-| **Left** / **Right** | Previous / next track — *hold* to seek within one |
-| **Up** / **Down** | Volume |
-| **Analogue** | Load a different track or playlist |
-
-That's the whole player. Everything below is optional: meters on **X**, the
-equalizer on **Y**, playlists, resume, and the settings in the Analogue menu.
-Come back for them when you want them — none of it needs setting up first.
-
 ## Installing
 
 Copy the `Cores`, `Platforms` and `Assets` folders onto the root of your
