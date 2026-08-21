@@ -265,14 +265,6 @@ framework bugs that had to be found first — is in
   to be remembered.** Without one it plays fine but won't be the list that
   loads next launch, and resume won't follow it. See
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
-- **Sometimes a playlist or track pick doesn't register straight away.** It
-  loads on its own a few seconds later; if it doesn't, pick it again. Seen when
-  switching from one playlist to another.
-- **A track with no duration header may tic once, a couple of seconds in.**
-  Files carrying no Xing/Info/VBRI header have no other source for their
-  total time, so the core measures the file during playback and the reads
-  can disturb the stream briefly. Everything else — FLAC, and any MP3 with
-  a header, which is nearly all of them — is unaffected.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.

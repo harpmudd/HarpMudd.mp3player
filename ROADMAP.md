@@ -167,6 +167,44 @@ the true size for free from `refill_pump` when a read past EOF fails.
 Verified on hardware: stutter gone, FLAC seek unchanged, format row still
 populates.
 
+### WITHDRAWN from the README 2026-08-21 -- never actually observed
+
+The limitation below was written from INFERENCE, not observation: the probe
+still runs on headerless files, therefore they must still tic. The user could
+not reproduce it, and checking the arithmetic showed why -- the published
+timing was wrong.
+
+The gate is 256 KB of AUDIO, not a fixed time. At FLAC rates (~125 KB/s) that
+is the ~2 s where it was measured. At MP3 rates it is far later:
+
+    Stone Temple Pilots  128 kbps   16.4 s
+    Widespread Panic     160 kbps   13.1 s
+    Stockholm Syndrome   256 kbps    8.2 s
+    LCD Soundsystem      320 kbps    6.6 s
+
+So "a couple of seconds in" sent the listener to the wrong part of the track.
+Worse, a bug found in the same pass (below) pushed it later still.
+
+Two reasons it may not be audible on MP3 at all: an MP3 frame is 26 ms against
+a FLAC frame's ~100 ms, so a resync costs a quarter as much audio; and at
+16-40 KB/s the 24 KB ring holds 0.6-1.5 s rather than 0.19 s.
+
+Documenting an unobserved symptom is worse than documenting nothing -- it
+invites users to hear something that may not be there. To test it properly,
+listen at the times above, on a fresh boot with no FLAC played first.
+
+### The bug that made it later still -- FIXED
+
+`fl_first_frame` is FLAC-only and nothing cleared it on an MP3 load, so an MP3
+played after a FLAC inherited that FLAC's first-frame offset -- 642 KB on an
+album with large embedded art. The probe gate is measured from it, which pushed
+a 128 kbps track's probe from 16 seconds out to 56: on a short track, never.
+That also delays `slot_size`, and with it the total time and progress bar on
+exactly the headerless files that depend on the probe for them.
+
+Now cleared per track, and the gate measures from `audio_start` on an MP3 and
+`fl_first_frame` on a FLAC -- the first audio byte either way.
+
 ### KNOWN, ACCEPTED: headerless MP3 may still tic
 
 Files with no Xing/VBRI header have no other duration source, so they still
@@ -175,6 +213,18 @@ progress bar and no total time at all. A load-time probe is **not** available
 to them — a file opened by name with `0192` has only just been opened and a far
 read still fails, which is how a 30 MB track once measured 5 MB. One line
 (`if (track_secs) return 0;`) flips the trade if the tic ever matters more.
+
+## Playlist pick occasionally does nothing — WITHDRAWN from the README 2026-08-21
+
+**Removed from user-facing Known limitations on user report: not seen any more.**
+The three-second identity poll heals a lost pick automatically, so the visible
+symptom is at most a short delay rather than a pick that does nothing.
+
+This is NOT a claim the underlying fault is gone -- the entry below is explicit
+that the poll recovers a pick rather than preventing one from being lost, and
+that remains true. What changed is that the mitigation is doing its job well
+enough that the user no longer notices. If reports return, restore the README
+line rather than re-investigating from scratch; everything below still applies.
 
 ## Playlist pick occasionally does nothing — ACCEPTED, likely Analogue-side
 

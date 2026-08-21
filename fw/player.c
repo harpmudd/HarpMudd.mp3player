@@ -6105,8 +6105,13 @@ static int size_probe_step(void)
      *
      * Against fl_first_frame the gate means what it always meant: a quarter of
      * a megabyte of AUDIO has been streamed, so the slot has settled. */
+    /* Measured from the first AUDIO byte -- which is fl_first_frame on a FLAC
+     * and audio_start on an MP3. It used fl_first_frame unconditionally, a
+     * field only the FLAC path ever sets, so on an MP3 the gate was measured
+     * from either zero or whatever the last FLAC left behind. */
+    uint32_t first_audio = (track_fmt == FMT_FLAC) ? fl_first_frame : audio_start;
     if (szp_phase == 1u && !eof_hit &&
-        file_pos < fl_first_frame + SZP_START_AFTER) return 0;
+        file_pos < first_audio + SZP_START_AFTER) return 0;
 
     switch (szp_phase) {
     case 1:
@@ -7657,6 +7662,12 @@ static int load_track(void)
      * started. ui_draw_chrome used to do it, which caught every repaint too. */
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
     track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
+    /* FLAC-only, and it LEAKED. Nothing cleared it on an MP3 load, so an
+     * MP3 played after a FLAC inherited that FLAC's first-frame offset --
+     * 642 KB on an album with large embedded art -- and the size probe's
+     * gate is measured from it. On a 128 kbps track that pushed the probe
+     * from 16 seconds out to 56, which on a short track means never. */
+    fl_first_frame = 0;
     bytes_per_sec = 16000u;
     paused = 0;
     /* Arm the free-running-counter deadlines from NOW.
