@@ -680,6 +680,106 @@ could use.
 Reasonable order if all three are wanted: EQ (self-contained, RTL, no format
 risk), then FLAC (one measurement decides it), then AAC.
 
+### BACKLOGGED 2026-08-27 — measured, and the ceiling is BLOCK RAM
+
+Revisited with real numbers. The section above ranks the container as the main
+cost; that is still true of the *coding* work, but it is not what blocks the
+feature. **Space is.**
+
+#### What is actually full
+
+From the fitter report (`src/fpga/output_files/ap_core.fit.summary`):
+
+    Total block memory bits : 2,380,928 / 3,153,920 ( 75 % )
+    Total RAM Blocks        :       300 /       308 ( 97 % )
+
+**97% of M10K blocks.** The "75% of bits" figure is the misleading one — blocks
+are allocated whole, so eight spare blocks is not 770 Kbit of usable space.
+
+And inside the CPU's 256 KB map, from `nm` on `fw.elf`:
+
+    _heap_start 0x033C70   _tag_start 0x035000   ->  5,008 bytes free
+
+Helix AAC is comparable in size to the MP3 decoder already carried (~6,000 LOC
+each). It does not fit in 5 KB, and there are not enough free M10K blocks to
+grow the CPU's RAM to make room.
+
+#### Correction to the record: SDRAM is ALREADY in use
+
+An earlier reading of `core_top.v` concluded both external memories were tied
+off. That is wrong for SDRAM and the mistake is worth recording, because it is
+easy to repeat: the `dram_*` tie-offs sit inside `` `ifndef USE_SDRAM ``, and
+`USE_SDRAM=1` is set in the .qsf, so they compile OUT. The real instantiation is
+in `core_game.vh` — which is exactly where the frozen-shell pattern puts core
+logic. Reading the shell and skipping the core gives the wrong answer.
+
+`sdram_fb` runs at 100 MHz on its own PLL output and backs `mp3_fb.sv`, the
+framebuffer and 2D draw engine for the whole UI: 400x360 RGB565, 512-word
+stride, ~360 KB. Its own comment says why — *"the core is already at 90% BRAM
+utilisation"*. The framebuffer lives in SDRAM BECAUSE block RAM ran out.
+
+So agg23's credit in the README is correct and must stay: the SDRAM controller
+and `sound_i2s.v` are both his, both in the build.
+
+**PSRAM is genuinely unused** — the `cram0`/`cram1` tie-offs are unconditional.
+32 MB, two chips, dual die, `bank_sel` picks the die. Untouched.
+
+#### The first work item is not a buffer, it is a PORT
+
+The CPU cannot address SDRAM. Its only path is a write-only draw-command FIFO
+(`RUN` / `RECT` / `CHAR`). Moving any buffer there needs a **general CPU read/
+write port on `sdram_fb`, with arbitration** — and that is where the risk is:
+scanout `FILL` has a hard deadline (one scanline, ~4167 cycles at 100 MHz) and
+always wins arbitration. Audio would be a SECOND real-time client on the
+controller that currently drives every pixel.
+
+#### What to move, ranked
+
+| buffer | size | verdict |
+|---|---|---|
+| `pl_text` | 12,288 B | move first — parsed at load, not real-time, sequential |
+| `art_acc` | 11,040 B | move second — load-time only, never touched during playback |
+| `ring` | 24,576 B | biggest win, most care; needs a BRAM staging FIFO so the decoder is not hitting SDRAM per byte. Would also let the ring grow to SECONDS, retiring the "buffering runs the wrong way as bitrate rises" warning above |
+| `arena` | 24,576 B | do not — Helix hot working RAM, random access |
+| `tag` buffer | 4,096 B | cannot — DMA landing zone, the bridge writes into it |
+| stack | 16,384 B | never |
+
+Low-risk tier frees **~23 KB**; adding the ring makes it **~47 KB**.
+
+#### The insight that makes the arithmetic close
+
+**MP3 and AAC never decode simultaneously**, so they can SHARE the existing
+24 KB arena — whichever format is playing owns it. Only the *code* has to
+coexist in the map, not the working buffers. The requirement is therefore Helix
+AAC's text+rodata (~40-60 KB), not text plus working RAM.
+
+#### Honest verdict
+
+47 KB against a 40-60 KB need is **marginal** — it might fit, or miss by 10 KB
+after a week of work. Everything in the section above still applies on top:
+MP4 sample tables (a 5-minute track's `stsz` is ~50 KB, and streaming it means a
+second read cursor into the file being streamed — the exact fragment-cache
+pattern that caused the v1.4.0 stutter), ALAC inside `.m4a` that Helix will not
+decode, and a third tag parser for `moov/udta/meta/ilst` + `covr`.
+
+Against that: **11 `.m4a` files out of 7,180 in the library.** `ffmpeg` converts
+them in about a minute.
+
+#### If it is done anyway, this order
+
+1. Build the CPU↔SDRAM window and move `pl_text` only. One cold buffer, no
+   real-time exposure, proves the port on hardware.
+2. Move `art_acc`.
+3. Move the `ring` with a BRAM staging FIFO — valuable on its own merits.
+4. Only then AAC, with the space measured rather than hoped for.
+
+Do not attempt the port and the decoder in the same change. The RAM ceiling
+would turn into a week of mysterious failures.
+
+Unsettled detail found on the way: `mp3_fb.sv` says *"~360 KB of 32 MB SDRAM"*
+while `_mister_pocket_lib/core/mem/README.md` says the Pocket's part is
+512 Mbit x16 = **64 MB**, hardware-validated 2026-06-02. One is stale.
+
 ## Raise the 128-track playlist cap — requested 2026-08-13
 
 ### The budget, measured
