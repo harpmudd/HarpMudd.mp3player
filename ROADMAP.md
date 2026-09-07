@@ -1266,6 +1266,80 @@ screen, so the feature can be proven end to end — timestamps, track identity,
 the listened/skipped rule — with nothing written to the card at all. Only the
 final step needs 0184.
 
+### QR EXPORT — the version that needs no write at all. BACKLOGGED 2026-09-07
+
+The section above treats the write as the blocker. It is only the blocker for
+*seamless* scrobbling. A limited version can ship with **no card write of any
+kind**, and it is worth doing first because it proves every part of the feature
+except the transport.
+
+#### Why the settings channel cannot carry it
+
+`interact.json` persist IS a safe SD write -- APF performs it, into its own file,
+and has done since v1.2.0. It is simply too small: four free slots at 31 usable
+bits is **124 bits**, three or four scrobbles. Persist is a settings channel,
+not a log. Ruled out on capacity, not on risk.
+
+#### Log full TEXT, not identifiers
+
+The compact encoding is `{playlist hash, track index, time delta}` at ~8 bytes an
+entry. Rejected deliberately: those identifiers can only be resolved by
+something holding the user's `.m3u` files, which means shipping a script and
+asking users to run it. Full text -- artist, title, timestamp -- is ~40-60 bytes
+and is **self-contained**, and the capacity works out anyway because of the next
+point.
+
+#### Scrobble a SESSION, not a library
+
+The batch never needs to be a thousand plays. A listening session is 20-40
+tracks, which fits one code:
+
+| QR version | modules | on the 400x360 screen | payload | tracks @ 50 B |
+|---|---|---|---|---|
+| v20 | 97x97   | 3 px/module = 291 px | ~850 B   | ~17 |
+| v27 | 125x125 | 3 px/module = 375 px | ~1,500 B | ~30 |
+| v40 | 177x177 | 2 px/module = 354 px | ~2,950 B | ~59 |
+
+**Target v27 at 3 px per module.** 375 px fits inside 400, and 3 px modules scan
+reliably off an LCD where 2 px frequently do not. Page with Left/Right if a
+session overran one code.
+
+#### The payload is a URL, and the data never leaves the phone
+
+Encode `https://<pages-site>/scrobble/#<encoded log>`. Scanning opens a STATIC
+page, hosted on GitHub Pages, which decodes the fragment in the browser and
+offers a `.scrobbler.log` download (or a direct Last.fm submission).
+
+Everything after the `#` is a fragment: it is never sent to the server, never
+appears in a log. The page needs no backend, and it can be built and tested
+against hand-made sample data long before any firmware exists.
+
+No install, no Python, no PC. Scan and tap.
+
+#### Rendering is cheap; the ENCODER is the cost
+
+Do not emit one `RECT` per module. Walk each row and emit one `RUN` per
+horizontal span of same-coloured modules -- a QR row has ~20-30 spans, so v27 is
+~3,000 commands for a screen drawn once. Nothing.
+
+The real cost is the QR encoder itself, **~3-6 KB, mostly Reed-Solomon**. That
+does not fit in the 5,008 bytes currently free, so this waits behind the SDRAM
+buffer work in the AAC entry above -- the same space problem, and the same fix.
+
+#### Staged so nothing is wasted
+
+1. Route the RTC to the SoC. Needed by every route; ride it along with the
+   settings-register widen rather than paying for its own compile.
+2. Log in RAM, render it as PLAIN TEXT on an Export screen. No new code beyond
+   the log -- font rendering already exists. This proves timestamps, track
+   identity and the listened/skipped rule, which is all of the risky logic.
+3. Add the QR encoder once there is code space. Same log, better transport.
+4. The web page is independent of the core entirely and can be built first.
+
+Step 2 is useful on its own, and steps 3-4 do not invalidate it. Only if
+seamless export is wanted after all does `0184` come back into the picture,
+with the safeguards listed above.
+
 ## Gapless playback
 
 Track changes currently have a short silence — the new file has to be opened,
