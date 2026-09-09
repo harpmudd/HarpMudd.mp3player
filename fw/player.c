@@ -218,6 +218,20 @@ static uint32_t fb_adv(char ch, uint32_t sx)
  * in one colour costs ONE colour write plus two writes per character. */
 static uint32_t fb_color_shadow = 0xFFFFFFFFu;
 
+/* UNBOUNDED, deliberately. Bounding it overflowed the image once already: it
+ * is called from every draw primitive, so even out-of-lined the extra work did
+ * not fit.
+ *
+ * This comment used to say the read spin was "the one with evidence" for the
+ * end-of-song freeze. That was wrong, and worth recording so nobody re-derives
+ * it. The freeze was the cassette meter computing a pack radius of 16,843,009
+ * from an unclamped progress ratio and then drawing eight million discs -- a
+ * draw-path hang, but one this handshake would have sat through happily,
+ * because the FIFO was being fed correctly the whole time. Bounding fb_wait()
+ * would not have caught it and a bound here still would not.
+ *
+ * So: no evidence has ever pointed at this spin. Leave it until something
+ * does. */
 static inline void fb_wait(void) { while (REG(R_FB_GO) & 1u) { } }
 
 static void fb_set_color(uint16_t fg, uint16_t bg)
@@ -1748,9 +1762,6 @@ static uint32_t spec_log(uint32_t v)
  * art panel is up -- ui_wave_w() is only 252 then -- and read as cut off. It
  * was also 3.5:1 against a real cassette's 1.56:1, which is what "too long"
  * was. 160 leaves 46px of margin with art and 100 without, and is 2.3:1. */
-/* TEMPORARY: 1 draws pr/packs/packt over the cassette's bottom panel.
- * Back to 0 before this ships -- no diagnostic reaches a user. */
-#define TAPE_DEBUG 0
 #define TAPE_SHELL_W  150u
 #define TAPE_SHELL_H   96u   /* 150x96 is 1.56:1 -- a real cassette */
 
@@ -1759,6 +1770,20 @@ static uint32_t spec_log(uint32_t v)
  * one tooth pitch -- a six-slot hub repeats every 60 degrees, so that is all
  * the unique rotation there is. 156 bytes against per-pixel atan2. */
 #define TAPE_HUB_R   9u
+/* Fixed wind on both reels.
+ *
+ * This used to track playback progress -- the supply pack thinning as the
+ * take-up grew -- and it is gone for two reasons.
+ *
+ * It never read as progress: packs + packt was 1+x and 1+(7-x), invariant, so
+ * the reels only traded thickness while the gap between them stayed put.
+ *
+ * And the arithmetic behind it CRASHED THE PLAYER. ui_sec == tot makes the
+ * progress fraction exactly 256, not 255 -- the ratio was the one in this file
+ * that did not clamp -- so 255u - pr underflowed and the band loop went on to
+ * draw eight million discs of radius sixteen million. An unrecoverable hang in
+ * the draw loop, at the last second of a track, on this meter alone. */
+#define TAPE_PACK    5u
 #define TAPE_HUB_N   19u
 #define TAPE_HUB_PH  6u
 static const uint32_t tape_hub[TAPE_HUB_PH][TAPE_HUB_N] = {
@@ -1774,7 +1799,6 @@ static uint8_t  tape_face;          /* shell/label frame/window/openings drawn *
 static uint16_t tape_face_w;
 static uint32_t tape_ph_s;          /* hub rotation, 1/256 of a phase step */
 static uint8_t  tape_rim  = 0xFFu;  /* level bucket the shell rim was at   */
-static uint8_t  tape_pk[2] = { 0xFFu, 0xFFu };  /* pack radii last drawn   */
 static uint8_t  tape_glow  = 0xFFu;            /* bass bucket last drawn  */
 static uint32_t tape_name_h;        /* playlist name the label carries     */
 
@@ -2953,9 +2977,15 @@ static void ui_splash_anim(void)
 
     /* Minimum time on screen, then the wave carries on from the read spin for
      * as long as loading takes. Fixed length here rather than "until loaded"
-     * so a fast card still gets a boot animation instead of a flicker. */
+     * so a fast card still gets a boot animation instead of a flicker.
+     *
+     * 350, down from 1600. This is a FLOOR, not the animation's length -- the
+     * meter keeps running through the playlist read, the track open and the
+     * artwork decode, all of which follow. So 1600 was not buying animation,
+     * it was 1.25 seconds of delay in front of work that animates itself. The
+     * floor only has to outlast a flicker. */
     ui_wave_anim_start();
-    const uint32_t INTRO_MS = 1600u;
+    const uint32_t INTRO_MS = 350u;
     uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
     /* Redraw the card only when the fade STEP changes -- 33 times, not once per
      * spin of an unpaced loop. Repainting the title thousands of times a second
@@ -3964,7 +3994,11 @@ static void ui_draw_dynamic(void)
             uint32_t cx0 = sx + shw / 2u;
             uint32_t bw  = (shw * 62u) / 100u;           /* window bezel width */
             uint32_t hdx = (bw * 28u) / 100u;            /* hub offset         */
-            uint32_t lx  = sx + 5u, lw = (shw > 10u) ? shw - 10u : 2u;
+            /* 3px inset, not 5. A real cassette label very nearly spans
+             * the shell, and the two reclaimed pixels each side are what let
+             * one more character onto it -- "Aesop's Fables" was losing its
+             * final s. */
+            uint32_t lx  = sx + 3u, lw = (shw > 6u) ? shw - 6u : 2u;
             uint32_t hcy = y0 + 48u;
 
             {   /* A new playlist means a new label. Cheap identity: the
@@ -4025,8 +4059,16 @@ static void ui_draw_dynamic(void)
                      * ts_half bottoms out at TS_1X = 16px. Lightened instead, so it
                      * reads as writing on a label rather than a heading. */
                     fb_set_color(FB_RGB(0x6E, 0x74, 0x7C), c_label);
-                    fb_text_clipped(lx + 5u, y0 + 14u, nm,
-                                    TS_1X, TS_1X, (lw > 10u) ? lw - 10u : 2u);
+                    /* BOXED, because fb_char paints a whole 16px cell while
+                     * max_w only budgets ADVANCES -- so a glyph that advances
+                     * 11px still paints 5px further, and the last one on a
+                     * full label put a label-coloured block out on the shell.
+                     * With the art panel up the shell is narrower still and
+                     * that already happened. Bounding the painted cell at the
+                     * label's own right edge is the fix, and it is what lets
+                     * the budget be widened safely. */
+                    fb_text_boxed(lx + 3u, y0 + 14u, nm, TS_1X, TS_1X,
+                                  (lw > 6u) ? lw - 6u : 2u, lx + lw);
                 }
 
                 for (uint32_t i = 0; i < 3u; i++)
@@ -4034,6 +4076,19 @@ static void ui_draw_dynamic(void)
                             ui_mix(c_label, ui_accent, (i == 1u) ? 3u : 2u, 4u));
 
                 fb_round_rect(cx0 - bw / 2u, y0 + 30u, bw, 36u, 9u, c_bezel);
+
+                /* The wound tape on both reels. Concentric 2px bands rather
+                 * than a flat disc, because one flat tone cannot show that it
+                 * is wound at all. Static, so it draws with the face and no
+                 * longer needs the erase-and-repaint dance that a changing
+                 * radius forced on a single-buffered framebuffer. */
+                for (uint32_t side = 0; side < 2u; side++) {
+                    uint32_t cx = side ? cx0 + hdx : cx0 - hdx;
+                    uint32_t k  = 0;
+                    for (uint32_t rr = TAPE_HUB_R + TAPE_PACK;
+                         rr > TAPE_HUB_R; rr -= 2u, k++)
+                        tape_disc(cx, hcy, rr, (k & 1u) ? c_tape2 : c_tape);
+                }
 
                 fb_round_rect(sx + 16u, y0 + 72u, (shw > 32u) ? shw - 32u : 2u,
                               20u, 3u, c_panel);
@@ -4053,7 +4108,6 @@ static void ui_draw_dynamic(void)
                 tape_face   = 1u;
                 tape_face_w = (uint16_t)ww;
                 tape_rim  = 0xFFu;
-                tape_pk[0] = tape_pk[1] = 0xFFu;
                 tape_glow = 0xFFu;
             }
 
@@ -4085,12 +4139,14 @@ static void ui_draw_dynamic(void)
                  * Speed is capped by aliasing, not taste. The UI redraws at
                  * 38 Hz and a six-slot hub repeats every 60 degrees, so above
                  * half a tooth pitch per frame it appears to turn BACKWARDS.
-                 * One pitch is 6*256 units, so 768/frame is the wall. 290 is
-                 * ~1.2 rev/s, easing to ~1.6 by the end of a track. A real
-                 * cassette hub turns 0.3-0.7 rev/s. */
-                uint32_t tot = ui_total_secs();
-                uint32_t pr  = (tot && ui_sec <= tot) ? (ui_sec * 256u) / tot : 0u;
-                if (!paused) tape_ph_s += 290u + (110u * pr) / 256u;
+                 * One pitch is 6*256 units, so 768/frame is the wall. 330 is
+                 * ~1.35 rev/s. A real cassette hub turns 0.3-0.7 rev/s.
+                 *
+                 * Constant, where it used to ease from 290 to 400 across a
+                 * track. That ease was the last consumer of the progress
+                 * fraction, and a 10% drift nobody can perceive is not worth
+                 * keeping the term alive for. */
+                if (!paused) tape_ph_s += 330u;
                 uint32_t ph = (tape_ph_s >> 8) % TAPE_HUB_PH;
 
                 /* The hubs take the MID band. They are redrawn every frame for
@@ -4101,85 +4157,13 @@ static void ui_draw_dynamic(void)
                 if (paused) mid = 0;
                 uint16_t hubc = ui_mix(c_hub, ui_accent, mid >> 5, 20u);
 
-                /* Progress as PACK THICKNESS: the supply reel's wind thins as
-                 * it empties and the take-up's grows. That is what a real
-                 * window shows, and it replaces the gap that did not belong. */
-                /* THE WHOLE WINDOW REPAINTS AS ONE, on a progress step.
-                 *
-                 * The packs and the tape mass overlap by 12px, and they used
-                 * to repaint on separate schedules -- so a pack erase wiped
-                 * part of the tape and nothing put it back until the tape's
-                 * own trigger fired. Overlapping regions with independent
-                 * redraw is the same fault that made the stripes glitch.
-                 *
-                 * Erasing is also mandatory rather than optional: the bezel is
-                 * face furniture drawn once, so without a clear a SHRINKING
-                 * pack just draws a smaller disc inside the larger one still
-                 * on screen. The supply reel stayed fat all track while the
-                 * take-up crept outward -- which reads as "the left one is
-                 * thick" early and "nothing is moving" later. Both reports
-                 * were this.
-                 *
-                 * Sixteen steps a track, not 38 a second: the framebuffer is
-                 * single-buffered, so a per-frame erase-then-draw gets caught
-                 * mid-way by scanout. */
-                uint32_t packs = 1u + (7u * (255u - pr)) / 255u;
-                uint32_t packt = 1u + (7u * pr) / 255u;
-                uint8_t  pstep = (uint8_t)(pr >> 4);
-
-                if (pstep != tape_pk[0]) {
-                    tape_pk[0] = pstep;
-                    /* The clear must cover the FULL pack extent, not less.
-                     * It was y0+32..63 while a pack reaches y0+31..65, so the
-                     * outermost arc of the previous, larger pack survived every
-                     * repaint -- and a SHRINKING reel therefore kept its widest
-                     * sliver forever. The supply side looked frozen at maximum
-                     * for the whole track, which is exactly what was reported
-                     * and what three rounds of reasoning failed to find. */
-                    fb_round_rect(cx0 - bw / 2u + 2u, y0 + 31u,
-                                  (bw > 4u) ? bw - 4u : 2u, 35u, 7u, c_bezel);
-                    /* Tape is DARK, as real tape is. Making it light enough to
-                     * read against the bezel turned the window into a tan
-                     * plastic block -- the contrast was fixed and the cassette
-                     * was lost. What makes the wind legible instead is a ONE
-                     * PIXEL rim at its outer edge, which is also what a real
-                     * pack does when light catches it. The rim moves with the
-                     * radius, so the progress cue is the moving edge rather
-                     * than the mass behind it. */
-                    /* BANDED, because a flat disc cannot show its own size.
-                     *
-                     * The gap between the packs is invariant -- packs + packt
-                     * is 1+x and 1+(7-x), so it always sums to 9 and the tape
-                     * between them only SHIFTS, never widens. That leaves the
-                     * pack outline as the sole cue, and a 7px outline moving
-                     * against a same-coloured neighbour reads as nothing.
-                     *
-                     * Concentric 2px bands make the wind COUNTABLE instead:
-                     * one band on a nearly empty reel, four on a full one. A
-                     * real pack shows its winding the same way. */
-                    for (uint32_t side = 0; side < 2u; side++) {
-                        uint32_t cx = side ? cx0 + hdx : cx0 - hdx;
-                        uint32_t pk = side ? packt : packs;
-                        uint32_t k  = 0;
-                        for (uint32_t rr = TAPE_HUB_R + pk;
-                             rr > TAPE_HUB_R; rr -= 2u, k++)
-                            tape_disc(cx, hcy, rr, (k & 1u) ? c_tape2 : c_tape);
-                    }
-                    /* The tape is contoured against these packs, so its shape
-                     * is stale the moment they move. Force it to redraw in the
-                     * same frame rather than waiting for the next bass step. */
-                    tape_glow = 0xFFu;
-                }
-
                 {   /* The exposed tape between the packs, and it GLOWS with
                      * bass again -- that was the only thing reading as beat
                      * and it should not have gone.
                      *
-                     * It lives strictly BETWEEN the two packs' maximum extent.
-                     * A pack reaches cx0 -/+ (hdx - HUB_R - 8), so a strip
-                     * inside that can never be touched by a pack repaint, and
-                     * the two can keep their own schedules without the
-                     * overlap that caused all of this. */
+                     * The packs are static now, so this is the only thing
+                     * inside the window that repaints, and nothing can be
+                     * caught half-drawn by another element's schedule. */
                     uint32_t bass = ((uint32_t)spec_lvl[SPEC_BANDS - 2u] +
                                      (uint32_t)spec_lvl[SPEC_BANDS - 1u]) / 2u;
                     if (paused) bass = 0;
@@ -4188,28 +4172,25 @@ static void ui_draw_dynamic(void)
                         tape_glow = glow;
                         uint16_t tc = ui_mix(c_ribbon, ui_accent, glow, 20u);
 
-                        /* Contoured against both packs, row by row, because
+                        /* Contoured against both reels, row by row, because
                          * that is what the gap between two reels looks like.
                          *
-                         * It does NOT carry progress and no longer pretends
-                         * to: packs + packt is 1+x and 1+(7-x), so the gap is
-                         * a constant 25-26px that only SHIFTS. Trying to read
-                         * a progress cue out of it produced a shape that moved
-                         * without meaning anything. Progress lives on the
-                         * banded reels, where it is countable.
-                         *
-                         * Height is bounded by the SMALLER pack so every row
-                         * has a defined span at both ends -- otherwise a nearly
-                         * empty reel leaves rows where its curve does not
-                         * reach, and the tape would spill to the bezel. */
-                        uint32_t rl = TAPE_HUB_R + packs;
-                        uint32_t rt = TAPE_HUB_R + packt;
-                        uint32_t hh = (rl < rt) ? rl : rt;
-                        if (hh > 14u) hh = 14u;
-                        if (hh) hh--;
+                         * One radius for both sides now that the wind is
+                         * fixed. Height stops one row short of it so every row
+                         * has a defined span at both ends -- at the very top
+                         * and bottom the curve reaches nothing, and the ribbon
+                         * would spill to the bezel. */
+                        uint32_t rl = TAPE_HUB_R + TAPE_PACK;
+                        uint32_t hh = rl - 1u;
                         for (int32_t dy = -(int32_t)hh; dy <= (int32_t)hh; dy++) {
-                            uint32_t xl = (cx0 - hdx) + tape_hw(rl, dy);
-                            uint32_t xr = (cx0 + hdx) - tape_hw(rt, dy);
+                            /* +1 on the LEFT only. fb_rect spans xl..xr-1, so
+                             * without it the ribbon's first pixel lands on the
+                             * left reel's outermost one and the right stays
+                             * clear -- an asymmetric notch. It self-healed
+                             * while the packs repainted with progress; they
+                             * are static now, so it would be permanent. */
+                            uint32_t xl = (cx0 - hdx) + tape_hw(rl, dy) + 1u;
+                            uint32_t xr = (cx0 + hdx) - tape_hw(rl, dy);
                             if (xr > xl)
                                 fb_rect(xl, (uint32_t)((int32_t)hcy + dy),
                                         xr - xl, 1u, tc);
@@ -4217,26 +4198,6 @@ static void ui_draw_dynamic(void)
                     }
                 }
 
-#if TAPE_DEBUG
-                {   /* TEMPORARY. Three attempts at this cue have failed on
-                     * reasoning, so measure it: pr is the progress fraction
-                     * 0..255, L and R are the pack radii actually being drawn.
-                     * If pr sits at 0 the time source is wrong; if pr moves and
-                     * L/R do not, the arithmetic is; if all three move and the
-                     * screen does not, the drawing is. */
-                    char db[24], *q = db;
-                    *q++ = 'P'; q = ui_dec(q, pr);
-                    *q++ = ' '; *q++ = 'L'; q = ui_dec(q, packs);
-                    *q++ = ' '; *q++ = 'R'; q = ui_dec(q, packt);
-                    *q = 0;
-                    fb_rect(sx + 18u, y0 + 76u, (shw > 40u) ? shw - 40u : 4u,
-                            10u, FB_RGB(0x10, 0x12, 0x14));
-                    fb_set_color(FB_RGB(0xE0, 0x40, 0x40),
-                                 FB_RGB(0x10, 0x12, 0x14));
-                    fb_text_clipped(sx + 20u, y0 + 75u, db, TS_1X, TS_1X,
-                                    (shw > 44u) ? shw - 44u : 4u);
-                }
-#endif
 
                 for (uint32_t side = 0; side < 2u; side++) {
                     uint32_t cx = side ? cx0 + hdx : cx0 - hdx;
@@ -6455,7 +6416,35 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
      * actually goes during a playlist read. ui_boot_tick() is a single compare
      * and return unless a note is armed, which it only is around pl_load(), so
      * every other caller of this function is unaffected. */
-    while (!target_read_poll()) { ui_boot_tick(); ui_wave_anim_tick(); }
+    /* BOUNDED. This was `while (!target_read_poll())` with no way out, and a
+     * read that never completes is then a permanent hang -- the CPU spins, the
+     * screen freezes on whatever was last drawn, and the core is dead until
+     * power-cycled. That is the worst failure mode in the firmware and it sat
+     * on the hottest path: an artwork decode issues 43 reads for a typical
+     * cover and 207 for the largest on the test card, all through here, all at
+     * a track boundary.
+     *
+     * NOT the end-of-song crash, which was the cassette meter's own arithmetic
+     * (see TAPE_PACK). This bound was deployed while that was still unknown
+     * and is kept purely as defence: an unbounded wait on external hardware is
+     * wrong regardless of whether it has been observed to hang.
+     *
+     * 500 ms is ~100x a 4 KB read's real cost, so this cannot fire on a slow
+     * card -- only on one that has genuinely stopped answering. Reporting
+     * failure hands the caller a path it already has: every target_read_slot()
+     * call site checks the return. A missing cover or a failed load is
+     * recoverable; a hang is not. */
+    uint32_t rd_t0 = cycles();
+    while (!target_read_poll()) {
+        ui_boot_tick();
+        ui_wave_anim_tick();
+        if ((int32_t)(cycles() - rd_t0) > (int32_t)(CLK_HZ / 2u)) {
+            REG(R_STAT3) = 0xDEAD0000u | (slot & 0xFFu);
+            rd_pending = 0;
+            rd_ok      = 0;
+            return 0;
+        }
+    }
     rd_pending = 0;
     return rd_ok;
 }

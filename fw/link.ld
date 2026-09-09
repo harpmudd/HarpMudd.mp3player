@@ -42,7 +42,14 @@ _ring_size  = 0x6000;    /* 24 KB -- ~0.6 s at 320 kbps */
  * overflowing it: 227 seek points become 113. A coarser seed for the seek
  * bracket costs a probe or two on files with big seektables; it cannot make a
  * seek wrong. Buys 2 KB of image space, which is what the cassette needed. */
-_tag_size   = 0x800;     /* 2 KB  -- ID3 re-probe landing zone */
+/* BACK TO 4 KB. Halving this to buy image space for the cassette meter was a
+ * bad trade that was not visible at the time: art_need_bytes() feeds picojpeg
+ * in TAG_SIZE chunks, so 2 KB DOUBLED the target reads for every cover -- 43
+ * to 86 on a typical 175 KB one, 207 to 414 on the 847 KB outlier. That is
+ * paid on every track load, boot included. The ROADMAP's own lever list has
+ * "raise _tag_size" as the cheapest artwork win; halving it was the same lever
+ * pulled backwards. */
+_tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
 
 SECTIONS {
 	.text : {

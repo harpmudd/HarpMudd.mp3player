@@ -237,6 +237,72 @@ to them — a file opened by name with `0192` has only just been opened and a fa
 read still fails, which is how a 30 MB track once measured 5 MB. One line
 (`if (track_secs) return 0;`) flips the trade if the tic ever matters more.
 
+## Crash to a grey screen at the end of a song — FIXED 2026-09-09
+
+The cassette meter's progress ratio was the one in the file that did not clamp:
+
+    pr = (tot && ui_sec <= tot) ? (ui_sec * 256u) / tot : 0u;
+
+At `ui_sec == tot` — the last second of the track — that is exactly **256**,
+not 255, because `<=` admits equality and the division is exact there. The pack
+radius below it is `1u + (7u * (255u - pr)) / 255u`, so `255u - 256u` wrapped to
+`0xFFFFFFFF` and the radius became **16,843,009**. The band loop then ran 8.4
+million iterations, each drawing a disc of radius 16.8 million, each of those
+looping that many rows issuing `fb_rect` with underflowed coordinates.
+
+An unbounded hang inside the draw loop, scribbling out of range into SDRAM.
+Unrecoverable — power cycle only.
+
+### Why it looked intermittent
+
+It needed a UI frame to land inside the one second where `ui_sec == tot`, so
+plenty of tracks ended without it. It also needed a known duration, which is
+why the headerless MP3s on the test card never triggered it, and it needed the
+cassette, the only meter with progress-driven geometry.
+
+### Why the first theory was wrong
+
+Reasoning said drawing was exonerated: heavy drawing causes **underruns** — an
+audible glitch with the music continuing — and this was a **freeze**, so it had
+to be the blocking SD-read path, where an artwork decode issues 43–207 reads at
+exactly a track boundary. A 500 ms bound went on that spin.
+
+That is the wrong shape of argument. "This subsystem's characteristic failure
+looks different" is not elimination. Drawing normally *steals time*; drawing can
+also *never return*. The bound was mitigation for a fault that was never there.
+
+What broke it open was one observation from the user: **it never happens on the
+other meters.** In a mode-switched UI that is a free bisection, and it was worth
+more than the twenty track-ends that did not reproduce. Ask which mode first.
+
+### The rule this establishes
+
+**Clamp every scaled ratio at the equality case.** An `x * N / total` guarded by
+`x <= total` reaches `N`, not `N - 1`. Audited afterwards: all six other ratio
+sites in `player.c` clamp on the very next line — `spec_lvl`, the wave, the
+scope column, the VU needles, the magic eye, and the progress bar
+(`if (done > UI_INNER_W) done = UI_INNER_W;`). The tape was the sole violator.
+**One clamped ratio sitting next to an unclamped one is the smell.**
+
+Corollary: any loop whose bound is unsigned arithmetic on UI state can hang
+forever, and a hang is worse than any wrong pixel.
+
+### What shipped
+
+Progress was **removed** from the meter rather than clamped, at the user's call
+— it never read as progress anyway, since `packs + packt` was invariant and the
+reels only traded thickness. Deleting the dependency removed the crash site
+outright and freed 608 bytes. The reels are now a fixed five-pixel wind drawn
+once with the cached face, which also retires the erase-and-repaint dance a
+changing radius forced on a single-buffered framebuffer. Hub rotation is a
+constant 330/frame where it used to ease with progress.
+
+The 500 ms read bound is **kept**, relabelled in the source as defence rather
+than as this fix: an unbounded wait on external hardware is wrong whether or not
+it has been seen to hang. `fb_wait()` stays unbounded, and its comment now
+records that no evidence has ever pointed at it — bounding it would not have
+caught this, because the FIFO was being fed correctly throughout.
+
 ## Playlist pick occasionally does nothing — WITHDRAWN from the README 2026-08-21
 
 **Removed from user-facing Known limitations on user report: not seen any more.**
