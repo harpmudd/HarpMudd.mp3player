@@ -1165,7 +1165,10 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
                               * rather than bare background, so the meter reads
                               * as one object at any level */
 #define UI_RED     0xF800u
-
+/* Pack an 8-8-8 colour into RGB565. Every colour before this was a hex
+ * literal, which is fine for a handful of UI tones and unreadable for a
+ * meter that names ten shades of grey. */
+#define FB_RGB(r, g, b) ((uint16_t)((((r) & 0xF8u) << 8) | (((g) & 0xFCu) << 3) | ((b) >> 3)))
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
 #define UI_CARD_H  120u
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
@@ -1339,6 +1342,9 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
         * that the setting stops persisting and the firmware looks correct
         * throughout while doing it. */
        VIZ_LED,
+       /* Same rule again: APPENDED. Adding this required the Meter slider's
+        * max in interact.json to go from 10 to 11. */
+       VIZ_TAPE,
        VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
@@ -1706,6 +1712,62 @@ static uint32_t spec_log(uint32_t v)
 #define SPEC_FLOOR 200u
 #define SPEC_SPAN   50u
 
+/* ============================================================== CASSETTE ==
+ * A cassette shell with two reels, drawn in the 360x72 meter box.
+ *
+ * Designed on the desk first -- tools/cassette_preview.py renders this exact
+ * geometry to a PNG, and five iterations there cost nothing. The magic eye took
+ * about eight HARDWARE rounds; that is what the preview tool exists to avoid.
+ *
+ * Three things carry it, in order of how much they matter:
+ *
+ *   1. The reels are DIFFERENT SIZES and the difference moves with the track.
+ *      That is the cassette cue; everything else is decoration.
+ *   2. Angular speed goes as 1/radius, so the supply reel visibly speeds up as
+ *      it empties. Physically what a real tape does, and nearly free.
+ *   3. The shell is NEUTRAL grey with white hubs, not accent-tinted. A grey
+ *      object on the accent-tinted background ramp reads as a physical thing;
+ *      an accent-tinted shell read as a green graphic. The accent is kept for
+ *      the label, which is also what flashes.
+ */
+#define TAPE_SHELL_W  240u
+#define TAPE_PACK_MIN   8u
+#define TAPE_PACK_MAX  16u
+
+/* Hub slot masks: bit x set = SLOT (dark), clear = hub face. Generated from
+ * the same geometry the preview uses, so the two cannot drift. Six phases span
+ * one tooth pitch -- a six-slot hub repeats every 60 degrees, so that is all
+ * the unique rotation there is. 156 bytes against per-pixel atan2. */
+#define TAPE_HUB_R   6u
+#define TAPE_HUB_N   13u
+#define TAPE_HUB_PH  6u
+static const uint16_t tape_hub[TAPE_HUB_PH][TAPE_HUB_N] = {
+    { 0x0000, 0x0230, 0x0630, 0x0300, 0x0042, 0x00E6, 0x1DF7, 0x0CE0, 0x0840, 0x0018, 0x018C, 0x0188, 0x0000 },
+    { 0x0000, 0x0318, 0x0318, 0x0110, 0x0040, 0x00E2, 0x1DF7, 0x08E0, 0x0040, 0x0110, 0x0318, 0x0318, 0x0000 },
+    { 0x0000, 0x0388, 0x018C, 0x0018, 0x0040, 0x0CE0, 0x1DF7, 0x00E6, 0x0040, 0x0300, 0x0630, 0x0238, 0x0000 },
+    { 0x0040, 0x01C0, 0x00C4, 0x000E, 0x0C48, 0x0CE0, 0x01F0, 0x00E6, 0x0246, 0x0E00, 0x0460, 0x0070, 0x0040 },
+    { 0x0040, 0x00C0, 0x0040, 0x0C06, 0x0E4E, 0x00E0, 0x01F0, 0x00E0, 0x0E4E, 0x0C06, 0x0040, 0x0060, 0x0040 },
+    { 0x0040, 0x0060, 0x0460, 0x0E02, 0x0246, 0x00E6, 0x01F0, 0x0CE0, 0x0C48, 0x080E, 0x00C4, 0x00C0, 0x0040 },
+};
+
+static uint8_t  tape_face;          /* shell/label frame/window/openings drawn */
+static uint16_t tape_face_w;
+static uint32_t tape_ph;            /* rotation accumulator, 1/256 of a pitch  */
+static uint8_t  tape_sup_r, tape_take_r;   /* pack radii last DRAWN           */
+static uint8_t  tape_flash_drawn = 0xFFu;
+
+/* Filled disc. w descends monotonically with the row, so this is O(r) rather
+ * than a square-root per row. */
+static void tape_disc(uint32_t cx, uint32_t cy, uint32_t r, uint16_t c)
+{
+    uint32_t rr = r * r, w = r;
+    for (uint32_t i = 0; i <= r; i++) {
+        while (w && w * w + i * i > rr) w--;
+        fb_rect(cx - w, cy - i, 2u * w + 1u, 1u, c);
+        if (i) fb_rect(cx - w, cy + i, 2u * w + 1u, 1u, c);
+    }
+}
+
 static const uint16_t spec_gain[SPEC_BANDS] = {
     /* MEASURED for the HALF-OCTAVE cascade, low band first. Re-measured rather
      * than carried over: splitting each octave in two changes every level, and
@@ -1970,8 +2032,9 @@ static void ui_art_bg_range(uint32_t x, uint32_t w)
  * invites that; a list with a name is at least the place to look. */
 static void ui_meter_faces_invalidate(void)
 {
-    vu_face  = 0;
-    eye_face = 0;
+    vu_face   = 0;
+    eye_face  = 0;
+    tape_face = 0;
 }
 
 /* Blit the stash to the current position, clipped at the right edge. The panel
@@ -3814,6 +3877,153 @@ static void ui_draw_dynamic(void)
             goto viz_done;
         }
 
+        /* ---- CASSETTE -------------------------------------------------
+         *
+         * Geometry mirrors tools/cassette_preview.py exactly. Change it THERE
+         * first and look at the PNG -- that is the whole point of the tool.
+         * The magic eye took about eight hardware rounds; this took five that
+         * cost nothing.
+         *
+         * Redraw discipline, because this meter has the most moving parts yet:
+         *   face  -- shell, screws, window, bottom openings. Once.
+         *   packs -- only when a radius changes, ~once a second.
+         *   hubs  -- every frame; 13 rows of masks.
+         *   label -- only when the flash bucket changes. Quantised to 16 steps
+         *            for the reason the spectrum meter was: comparing a raw
+         *            0..255 level repaints constantly and reads as flicker.
+         */
+        if (viz_mode == VIZ_TAPE) {
+            uint32_t shw = (ww > TAPE_SHELL_W + 8u) ? TAPE_SHELL_W : (ww - 8u);
+            uint32_t sx  = UI_MARGIN + (ww - shw) / 2u;
+            uint32_t sy  = UI_WAVE_Y + 1u;
+            uint32_t cx0 = sx + shw / 2u;
+            uint32_t hdx = (shw * 58u) / TAPE_SHELL_W;
+            uint32_t rcy = UI_WAVE_Y + 44u;
+            uint32_t winx = sx + 13u;
+            uint32_t winw = (shw > 26u) ? shw - 26u : 4u;
+            uint32_t winy = UI_WAVE_Y + 28u, winh = 34u;
+
+            const uint16_t c_shell = FB_RGB(0x24, 0x28, 0x2C);
+            const uint16_t c_edge  = FB_RGB(0x5E, 0x66, 0x6E);
+            const uint16_t c_lip   = FB_RGB(0x14, 0x16, 0x19);
+            const uint16_t c_scr   = FB_RGB(0x3C, 0x42, 0x48);
+            const uint16_t c_win   = FB_RGB(0x07, 0x08, 0x09);
+            const uint16_t c_pack  = FB_RGB(0x3A, 0x35, 0x30);
+            const uint16_t c_pack2 = FB_RGB(0x25, 0x22, 0x1F);
+            const uint16_t c_hubf  = FB_RGB(0xC6, 0xCB, 0xD0);
+            const uint16_t c_hubs  = FB_RGB(0x1A, 0x1D, 0x20);
+            const uint16_t c_tape  = FB_RGB(0x6A, 0x64, 0x5C);
+
+            if (wf || ww != tape_face_w) tape_face = 0;
+
+            if (!tape_face) {
+                /* The ramp, per ROW. This meter leaves ~60px of background
+                 * showing either side of the shell -- exactly the case that
+                 * caught the magic eye, where a flat slab on a per-row
+                 * gradient shows as a visible rectangle. */
+                ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+
+                fb_round_rect(sx, sy, shw, 69u, 5u, c_shell);
+                fb_rect(sx, sy, shw, 1u, c_edge);
+                fb_rect(sx, sy + 68u, shw, 1u, c_edge);
+
+                for (uint32_t k = 0; k < 4u; k++) {
+                    uint32_t px = (k & 1u) ? sx + shw - 8u : sx + 4u;
+                    uint32_t py = (k & 2u) ? sy + 63u : sy + 3u;
+                    fb_rect(px, py, 4u, 4u, c_scr);
+                    fb_rect(px + 1u, py + 1u, 2u, 2u, c_lip);
+                }
+
+                fb_round_rect(winx, winy, winw, winh, 4u, c_win);
+                fb_rect(winx, winy, winw, 1u, c_edge);
+                fb_rect(winx, winy + winh - 1u, winw, 1u, c_edge);
+
+                {   /* capstans, pinch rollers, head */
+                    static const signed char ox[4]    = { -48, -22, 8, 36 };
+                    static const unsigned char owd[4] = { 8u, 14u, 14u, 8u };
+                    for (uint32_t k = 0; k < 4u; k++)
+                        fb_round_rect((uint32_t)((int32_t)cx0 + ox[k]),
+                                      UI_WAVE_Y + 63u, owd[k], 6u, 2u, c_lip);
+                }
+                tape_face   = 1u;
+                tape_face_w = (uint16_t)ww;
+                tape_sup_r  = 0;
+                tape_take_r = 0;
+                tape_flash_drawn = 0xFFu;
+            }
+
+            {   /* Label: accent, brightened by BASS -- not by overall level.
+                 * The lowest cascade stage covers 86-172 Hz, where a kick
+                 * lives. Driven by peak it wobbles on everything, which is the
+                 * warning the idea bank already carried for the speaker cone. */
+                uint32_t bass = ((uint32_t)spec_lvl[SPEC_BANDS - 2u] +
+                                 (uint32_t)spec_lvl[SPEC_BANDS - 1u]) / 2u;
+                if (paused) bass = 0;
+                uint8_t bucket = (uint8_t)(bass >> 4);
+                if (bucket != tape_flash_drawn) {
+                    tape_flash_drawn = bucket;
+                    uint16_t dim = ui_mix(0, ui_accent, 42u, 100u);
+                    fb_round_rect(sx + 13u, UI_WAVE_Y + 4u, winw, 22u, 3u,
+                                  ui_mix(dim, ui_accent, bucket, 15u));
+                }
+            }
+
+            {   /* Reels. Supply empties, take-up fills. */
+                uint32_t tot = ui_total_secs();
+                uint32_t pr  = (tot && ui_sec <= tot) ? (ui_sec * 256u) / tot : 0u;
+                uint32_t span = TAPE_PACK_MAX - TAPE_PACK_MIN;
+                uint32_t sup  = TAPE_PACK_MAX - (span * pr) / 256u;
+                uint32_t take = TAPE_PACK_MIN + (span * pr) / 256u;
+
+                if (!paused) {
+                    /* Angular speed goes as 1/radius, so the supply reel
+                     * visibly speeds up as it empties. One divide, and it is
+                     * what makes this look like tape rather than two discs. */
+                    tape_ph += (TAPE_PACK_MAX * 24u) / (sup ? sup : 1u);
+                }
+
+                for (uint32_t side = 0; side < 2u; side++) {
+                    uint32_t r  = side ? take : sup;
+                    uint32_t cx = side ? cx0 + hdx : cx0 - hdx;
+                    uint8_t *drawn = side ? &tape_take_r : &tape_sup_r;
+
+                    if (*drawn != (uint8_t)r) {
+                        *drawn = (uint8_t)r;
+                        /* Clear only this reel's box. Repainting the whole
+                         * window once a second is visible. */
+                        fb_rect(cx - TAPE_PACK_MAX, rcy - TAPE_PACK_MAX,
+                                2u * TAPE_PACK_MAX + 1u,
+                                2u * TAPE_PACK_MAX + 1u, c_win);
+                        uint32_t k = 0;
+                        for (uint32_t rr = r; rr > TAPE_HUB_R; rr -= 3u, k++)
+                            tape_disc(cx, rcy, rr, (k & 1u) ? c_pack2 : c_pack);
+                    }
+
+                    tape_disc(cx, rcy, TAPE_HUB_R, c_hubf);
+                    {   /* the six slots, from the mask table */
+                        uint32_t ph = (tape_ph >> 8) % TAPE_HUB_PH;
+                        if (side) ph = (TAPE_HUB_PH - 1u) - ph;   /* counter-turn */
+                        for (uint32_t iy = 0; iy < TAPE_HUB_N; iy++) {
+                            uint32_t m = tape_hub[ph][iy];
+                            uint32_t y = rcy - TAPE_HUB_R + iy;
+                            for (uint32_t ix = 0; ix < TAPE_HUB_N; ) {
+                                if (!(m & (1u << ix))) { ix++; continue; }
+                                uint32_t run = 0;
+                                while (ix + run < TAPE_HUB_N &&
+                                       (m & (1u << (ix + run)))) run++;
+                                fb_rect(cx - TAPE_HUB_R + ix, y, run, 1u, c_hubs);
+                                ix += run;
+                            }
+                        }
+                    }
+                }
+
+                /* The tape itself, flat across the front on its rollers. */
+                fb_rect(cx0 - hdx, winy + winh - 5u, 2u * hdx, 2u, c_tape);
+            }
+            goto viz_done;
+        }
+
         if (viz_mode == VIZ_MIRROR) {
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
             const uint32_t half = UI_WAVE_H / 2u - 1u;
@@ -5298,7 +5508,7 @@ static void meters_feed(const short *pcm, int n, int stereo)
          * SPEC_BANDS. One pass down the ladder per sample, and most samples
          * stop after a stage or two, because the lower stages run at a
          * fraction of the rate. */
-        if (viz_mode == VIZ_LED) {
+        if (viz_mode == VIZ_LED || viz_mode == VIZ_TAPE) {
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
                 int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
                                    : (int32_t)pcm[i];
@@ -5666,7 +5876,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
                    : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
-                                            : "METER: SPECTRUM");
+                   : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
+                                            : "METER: CASSETTE");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
