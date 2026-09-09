@@ -75,9 +75,10 @@ Nothing is written to your music folder.
 - **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
   cover show no panel; a cover that can't be decoded shows the panel with the
   reason in it.
-- **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
+- **Twelve meters**, cycled with **X**: bars, waterfall, L/R levels, phase
   scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
-  bars, peak dots, a magic eye and a 16-band spectrum analyser.
+  bars, peak dots, a magic eye, a 16-band spectrum analyser and an animated
+  cassette whose reels wind as the track plays.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.

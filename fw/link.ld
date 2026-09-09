@@ -34,7 +34,15 @@ _stack_size = 0x4000;    /* 16 KB */
  * ~0.23 s at the 105 KB/s the CD-rip FLAC on the test card needs. Watch the
  * underrun flag if either ever looks marginal. */
 _ring_size  = 0x6000;    /* 24 KB -- ~0.6 s at 320 kbps */
-_tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
+/* 2 KB, down from 4. The only 4 KB consumer was io_bench(), which is behind
+ * `#if IO_BENCH` and that is 0 -- so it is compiled out and was reserving
+ * space for nothing. Every live read into this buffer is 512 bytes or less
+ * EXCEPT the FLAC seektable, and that one clamps itself to TAG_SIZE/18 points
+ * (see flac_scan_metadata), so halving the buffer halves the clamp instead of
+ * overflowing it: 227 seek points become 113. A coarser seed for the seek
+ * bracket costs a probe or two on files with big seektables; it cannot make a
+ * seek wrong. Buys 2 KB of image space, which is what the cassette needed. */
+_tag_size   = 0x800;     /* 2 KB  -- ID3 re-probe landing zone */
 
 SECTIONS {
 	.text : {
@@ -86,5 +94,10 @@ SECTIONS {
 	 * The guard that matters now is ARENA_BYTES in alloc.c, which is exact.
 	 * This one only keeps a token heap so a stray newlib path that reaches
 	 * _sbrk has somewhere to go rather than returning -1 in a corner. */
-	ASSERT(_heap_end - _heap_start >= 1024, "no room left for even a token heap")
+	/* 256, down from 1024. fw/alloc.c overrides malloc and free with a bump
+	 * allocator over its own fixed arena, so _sbrk in sysio.c is unreachable and
+	 * this region serves nothing. The guard is kept small rather than removed:
+	 * if a newlib routine ever does reach _sbrk, failing the link is a better
+	 * outcome than silently overwriting the DMA buffers below. */
+	ASSERT(_heap_end - _heap_start >= 256, "no room left for even a token heap")
 }

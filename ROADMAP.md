@@ -1351,8 +1351,9 @@ Memory is the constraint, not logic.
 ## More meters — idea bank (user, 2026-08-12)
 
 "I'd occasionally like to slip a new one in every once in a while." So this is
-a standing list, not a task. Nine exist: bars, waterfall, L/R levels, phase
-scope, oscilloscope, VU needles, scrolling waveform, mirrored bars, peak dots.
+a standing list, not a task. TWELVE exist: bars, waterfall, L/R levels, phase
+scope, oscilloscope, VU needles, scrolling waveform, mirrored bars, peak dots,
+magic eye, 16-band spectrum, and the cassette.
 
 **APPEND to the `VIZ_*` enum, never reorder it.** `viz_mode` persists as an
 INDEX, so inserting a meter in the middle silently repoints every user's saved
@@ -1400,14 +1401,33 @@ Two follow-on traps from the same episode:
 - **Vinyl platter and tonearm** -- platter spins, arm creeps inward with track
   progress, highlight pulses with level. Uses elapsed/total, which no current
   meter visualises.
-- **Tape reels** -- same data. The supply reel speeding up as it empties is the
-  detail that sells it.
+- **Tape reels** -- BUILT in v1.5.0, as the cassette meter. What actually sold
+  it was not the speeding-up reel: the geometry gives only 7px of pack travel,
+  and a 7px outline moving against a same-coloured neighbour reads as nothing.
+  Concentric 2px BANDS made the wind countable -- four on a full reel, one on
+  an empty one -- and that is the cue that works.
+
+  Three other things learned there, all the hard way:
+
+  * The exposed tape between the reels CANNOT show progress. packs + packt is
+    1+x and 1+(7-x), so the gap is constant and only shifts. A cue that moves
+    without meaning anything looks worse than no cue.
+  * Overlapping regions on independent redraw schedules is the recurring fault
+    in this UI -- it broke the label stripes and then the pack/tape boundary.
+    Either draw them together or make them geometrically disjoint.
+  * A clear must cover the FULL extent of what it erases. The pack clear was
+    3px short, so a SHRINKING reel kept its outermost arc forever and looked
+    frozen at maximum. Three rounds of reasoning missed it; one on-screen
+    readout of the actual values found it immediately.
 - **Radar sweep** -- a line sweeps a circle painting level as radius, with a
   decaying trail. Polar version of the scrolling waveform.
 
-### Needs one enabler: a bass proxy
+### Needs one enabler: a bass proxy -- ALREADY BUILT
 
-A **one-pole lowpass in the existing per-sample loop** -- a shift and an add.
+The v1.4.0 octave cascade IS this, and it was gated to the spectrum meter. The
+cassette widened that gate in one line and read its lowest band. Anything below
+can do the same; the enabler is no longer outstanding.
+
 Unlocks:
 
 - **Beating speaker cone** -- user's idea, and it NEEDS this. Driven by overall

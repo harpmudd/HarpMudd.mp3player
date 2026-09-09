@@ -2,6 +2,13 @@
 
 What changed in each release, newest first.
 
+## v1.5.0 — unreleased
+
+- New meter: an animated **cassette**. The reels wind as the track plays --
+  four bands of tape on the full reel down to one on the empty one -- the hubs
+  turn, the label carries the playlist's name, and the tape and shell react to
+  the music.
+
 ## v1.4.0 — 21 August 2026
 
 - **Playlist browser** — tap **Select**. **Up**/**Down** moves,
