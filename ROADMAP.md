@@ -938,6 +938,59 @@ a fraction of the work, and against MP3 files that already play.
 instrumented: `ld_head`, `ld_size`, `ld_art`, `ld_pre`, `ld_total`, all live,
 all one flag away (`UI_SHOW_DIAG 1`).
 
+### PARTLY ANSWERED without measuring — a flat 250 ms sleep, 2026-09-09
+
+`read_track_head()` slept an unconditional 250 ms on every call. `have_prev` is
+a local initialised to 0, so on the first pass `same` is always false and
+`attempt` is 0: **neither break could fire**, and the wait was reached every
+time regardless of whether the slot had settled. It cost boot and every track
+change alike.
+
+On boot it was waiting to converge against nothing at all -- the settle block
+above it is skipped there, because `sw_have_prev` is 0 when no previous file
+exists.
+
+Now it polls at 30 ms (the interval that settle block already uses for the same
+question) with the attempt cap raised from 2 to 8. Same worst-case budget,
+exits as soon as two reads agree, and a genuinely mid-switch slot gets four
+times the chances it had. Roughly 220 ms off every load.
+
+This did not need the timers because it was not a guess: an unconditional
+constant is readable from the source. **The disagreement below still stands and
+still needs measuring** -- this was dead time sitting in front of it, not an
+answer to it.
+
+Also dropped: the boot splash floor, 350 ms to 150 ms. It buys no animation,
+because the meter runs from inside `target_read_slot()`'s spin through the
+playlist read and the track open; the floor only has to outlast a flicker.
+
+### The playlist phase, unmeasured but visible in the source
+
+User localised the remaining wait to the LOADING PLAYLIST window, 2026-09-09.
+`ui_wave_anim_stop()` runs before `load_track()`, so "while the meter still
+moves" is exactly `ui_splash_anim()` + `pl_load()`.
+
+Boot reads **two entire files** whenever the remembered list is not
+`playlist.m3u` -- which is the normal case, since APF resets slot 3 to
+`playlist.m3u` at every core load, and any name longer than `PL_STEM_MAX` (12)
+cannot be reopened from the stored stem. So `pl_open_by_hash()` opens
+`playlists.m3u`, reads all of it through `pl_read_raw()` purely to map a hash
+back to a filename, opens the target, and `pl_read_raw()` runs again.
+
+Each read climbs a shrinking ladder, and reads past EOF fail, so the descent
+costs real commands -- `pl_read_raw()`'s own comment measures 19 for an
+846-byte playlist. Two ways out, neither taken yet:
+
+1. **Read the exact size instead of laddering.** APF's dataslot ID/size table
+   is at the start of the datatable BRAM and `dt_snapshot()` already captures
+   it. Unknown whether it survives a `0192` open-by-name -- `R_SLOT_SZ` does
+   not, and this file deliberately refuses to assume struct layouts. **One
+   boot settles it.** Do that before building on it.
+2. **Store the resolved playlist NAME**, so `playlists.m3u` is never read at
+   boot. Removes a whole file read. Needs more than the 12 characters a stem
+   allows, which means another persist slot -- and see the interact.json id
+   rules before touching that.
+
 ### MEASURE FIRST — and there is a live disagreement to settle
 
 This entry used to assert "artwork decode dominates". The comment on the size

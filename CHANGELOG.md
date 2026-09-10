@@ -6,6 +6,7 @@ What changed in each release, newest first.
 
 - New meter: an animated **cassette**. The hubs turn, the label carries the
   playlist's name, and the tape and the shell edge react to the music.
+- **Boots noticeably faster**, and **track changes are quicker** with it.
 
 ## v1.4.0 — 21 August 2026
 

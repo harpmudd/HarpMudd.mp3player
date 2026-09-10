@@ -2979,13 +2979,14 @@ static void ui_splash_anim(void)
      * as long as loading takes. Fixed length here rather than "until loaded"
      * so a fast card still gets a boot animation instead of a flicker.
      *
-     * 350, down from 1600. This is a FLOOR, not the animation's length -- the
-     * meter keeps running through the playlist read, the track open and the
-     * artwork decode, all of which follow. So 1600 was not buying animation,
-     * it was 1.25 seconds of delay in front of work that animates itself. The
-     * floor only has to outlast a flicker. */
+     * 150, down from 350 and originally 1600. This is a FLOOR, not the
+     * animation's length -- the meter keeps running through the playlist read,
+     * the track open and the artwork decode, all of which follow and all of
+     * which animate it from inside target_read_slot()'s spin. So this number
+     * buys no animation at all; it is dead time in front of work that already
+     * animates itself, and it only has to outlast a flicker. */
     ui_wave_anim_start();
-    const uint32_t INTRO_MS = 350u;
+    const uint32_t INTRO_MS = 150u;
     uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
     /* Redraw the card only when the fade STEP changes -- 33 times, not once per
      * spin of an unpaced loop. Repainting the title thousands of times a second
@@ -8005,7 +8006,7 @@ static int read_track_head(void)
             if (!track_title[i]) break;
         }
         if (same) break;                 /* two reads agree -> settled */
-        if (attempt >= 1) break;         /* 0190 gates the load; belt and braces */
+        if (attempt >= 7) break;         /* 0190 gates the load; belt and braces */
     }
 
     for (uint32_t i = 0; i < sizeof(track_title); i++) prev_try[i] = track_title[i];
@@ -8014,7 +8015,20 @@ static int read_track_head(void)
 
     reload_retries++;      /* R on screen = convergence passes, not failures */
     attempt++;
-    uint32_t until = cycles() + CLK_HZ / 4u;         /* ~250 ms, then re-read */
+    /* POLL at 30 ms, up to eight reads -- not one flat 250 ms sleep.
+     *
+     * `have_prev` is a local starting at 0, so the first pass can never take
+     * either break above: every call paid the full 250 ms whether or not the
+     * slot had settled. On boot it was pure dead time, because the settle
+     * block above is skipped there (no previous file to differ from), so
+     * there was nothing to converge against in the first place.
+     *
+     * Same worst-case budget (8 x 30 ms), but it exits the moment two reads
+     * agree, which for a settled slot is the second one. And when a slot IS
+     * mid-switch it now gets eight chances instead of two, so the check is
+     * stronger as well as faster. 30 ms is the interval the settle block
+     * above already uses for the same question. */
+    uint32_t until = cycles() + CLK_HZ / 32u;        /* ~30 ms, then re-read */
     while ((int32_t)(cycles() - until) < 0) { }
     }
 
