@@ -41,6 +41,26 @@ _start:
 	addi x31, zero, 0
 
 	la sp, _stack_top
+
+#ifdef STACK_PAINT
+	# MEASUREMENT BUILD ONLY. Fill the stack with a known pattern so the
+	# high-water mark can be read back later: the deepest untouched word
+	# tells us how much was ever actually used.
+	#
+	# Safe here and nowhere else -- main has not been called, so nothing is
+	# on the stack yet and painting right up to sp cannot clobber a live
+	# frame. Doing this from C would already have a frame to step around.
+	la a0, _stack_bottom
+	mv a2, sp
+	li a3, 0xA5A5A5A5
+5:
+	bge a0, a2, 6f
+	sw a3, 0(a0)
+	addi a0, a0, 4
+	j 5b
+6:
+#endif
+
 	la a0, __bss_start
 	la a1, __bss_end
 1:

@@ -762,6 +762,7 @@ static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_mq_off;      /* chars scrolled off the selected row     */
+static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
 static uint32_t pl_ui_mq_next;     /* when it steps again                     */
 static uint16_t pl_ui_mq_sel = 0xFFFFu;  /* row the scroll belongs to         */
 
@@ -1171,7 +1172,12 @@ static uint32_t ui_pal_idx;
 #define UI_TOAST_HOLD  (CLK_HZ)            /* full brightness ~1 s   */
 #define UI_TOAST_FADE  (CLK_HZ * 3u / 4u)  /* then dissolve over ~.75 s */
 #define UI_TOAST_STEPS 10u
-static char     ui_toast[24];
+/* 32, not 24. The load-phase readout "H363 S0 A833 T1241 K1580" is exactly 24
+ * characters, so at 24 it silently lost the last digit of the last field and
+ * reported a stack high-water of 158 -- a number the function cannot even
+ * produce, since it returns a multiple of 4. A diagnostic that truncates is
+ * worse than one that does not exist. */
+static char     ui_toast[32];
 static uint32_t ui_toast_t0;               /* 0 = inactive */
 static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone */
 static uint32_t ui_toast_end;              /* x the last toast draw reached    */
@@ -1185,7 +1191,12 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #define FB_RGB(r, g, b) ((uint16_t)((((r) & 0xF8u) << 8) | (((g) & 0xFCu) << 3) | ((b) >> 3)))
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
 #define UI_CARD_H  120u
+#ifndef UI_SHOW_DIAG
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
+#endif
+#ifndef STACK_PAINT
+#define STACK_PAINT 0         /* 1 = measure the stack high-water mark */
+#endif
 
 /* Speed-branch instrumentation. ON by default here and NOT behind a button
  * combo, deliberately: the last diagnostic on this project never appeared
@@ -1346,11 +1357,38 @@ static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
 /* One marquee per scrollable line. Title and artist can both overflow, and
  * they scroll independently -- a shared position would drag the shorter one
  * around for no reason. */
+/* All uint32. Narrowing pos/endpos to uint16 and the flags to uint8 was tried
+ * to buy space for a separate tail-hold constant: it made the image BIGGER by
+ * 16 bytes, because every use then needs masking that a word load does not.
+ * BSS saved, text spent, net loss. */
 typedef struct {
     char     text[64];
     uint32_t y, scale, on, pos, next;
+    uint32_t endpos;      /* furthest offset worth scrolling to -- see init */
+    uint32_t back;        /* 1 = returning to the start */
 } ui_marquee_t;
 static ui_marquee_t ui_mq_title, ui_mq_artist;
+/* One place for the marquee's timing, because two of them have to agree: the
+ * info card's title/artist and the playlist browser's selected row. They were
+ * separate literals and drifting apart was only a matter of time.
+ *
+ * HOLD is deliberately long. The pause is not dead time -- it is the only
+ * moment the line is actually readable, since a name is easier to take in
+ * standing still than sliding. Two seconds at each end, against one before. */
+#define MQ_STEP  (CLK_HZ / 3u)     /* between character steps */
+/* FOUR seconds, at BOTH ends, from one constant.
+ *
+ * A longer hold at the start than at the tail is the better design -- the
+ * beginning of a title is what identifies the track, the tail is only
+ * confirmation -- and it was built that way first. It did not fit: a second
+ * distinct large constant is materialised at each of six call sites, and the
+ * image was 32 bytes over the link guard. Narrowing the struct to pay for it
+ * lost another 16.
+ *
+ * So both ends hold for the longer time. The start pause is what was asked
+ * for and it is doubled; the tail merely rests longer than it needs to, which
+ * costs nothing but a little patience. Revisit when there is image space. */
+#define MQ_HOLD  (CLK_HZ * 4u)
 /* Visualisations, cycled with X. The choice persists via interact.json.
  *
  * All three run off what the decoder already produces -- there are no frequency
@@ -2482,7 +2520,7 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
     m->y     = y;
     m->scale = scale;
     m->pos   = 0;
-    m->next  = cycles() + CLK_HZ;          /* hold at the start first */
+    m->next  = cycles() + MQ_HOLD;         /* hold at the start first */
 
     /* Scroll when the PAINTED text overruns, not when its advances do.
      *
@@ -2502,6 +2540,36 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
                                       : FB_CELL(scale);
     m->on = (adv_w > ui_text_w) ||
             (UI_MARGIN + painted > UI_CARD_TEXT_R);
+
+    /* STOP when the tail is visible, rather than scrolling until the text has
+     * left the box entirely.
+     *
+     * `pos` used to run to the string length, so the window's start walked
+     * past the END of the text and the row went completely BLANK for a step
+     * before snapping back. That empty frame is what made this read as a
+     * glitch rather than as scrolling -- the travel was never the problem.
+     *
+     * endpos is the first offset whose remainder fits, measured with the same
+     * painted-width rule as the overflow test above, so the two cannot
+     * disagree about what "fits" means. Computed once here rather than
+     * re-measured every step. */
+    m->pos  = 0;
+    m->back = 0;
+
+    /* ONE pass, backwards from the tail, accumulating advances until the next
+     * character would not fit. That leaves k at the smallest offset whose
+     * remainder still fits the box -- exactly the resting end position.
+     *
+     * The obvious version walks k forward calling fb_text_width(text + k),
+     * which is a loop inside a loop: 64 measurements of up to 64 characters
+     * for a result this gets in one pass. It also cost more image space than
+     * was free, which is how it came to be written this way. */
+    uint32_t w = 0, k = i;
+    while (k && w + fb_adv(m->text[k - 1u], scale) <= ui_text_w) {
+        k--;
+        w += fb_adv(m->text[k], scale);
+    }
+    m->endpos = k;
 }
 
 /* One step. Repaints the whole row first, because the window that follows may
@@ -2509,12 +2577,19 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
 static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 {
     if (!m->on || (int32_t)(cycles() - m->next) < 0) return;
-    m->next = cycles() + CLK_HZ / 3u;
+    m->next = cycles() + MQ_STEP;
 
-    uint32_t len = 0;
-    while (m->text[len]) len++;
-    if (++m->pos > len) m->pos = 0;
-    if (m->pos == 0) m->next = cycles() + CLK_HZ;   /* pause at the start */
+    /* Out to the tail, hold, back to the start, hold, repeat -- what a DAP
+     * does. The hold at each end is what makes it readable: the start is the
+     * most identifying part of a title, and the tail is the part you were
+     * waiting for, so both deserve a beat of stillness rather than a turn. */
+    if (m->back) {
+        if (m->pos) m->pos--;
+        if (!m->pos) { m->back = 0; m->next = cycles() + MQ_HOLD; }
+    } else {
+        if (m->pos < m->endpos) m->pos++;
+        if (m->pos >= m->endpos) { m->back = 1; m->next = cycles() + MQ_HOLD; }
+    }
 
     /* Erase the full paintable width, not just the layout budget: a glyph
      * cell reaches past the budget, and anything painted outside the erased
@@ -2861,49 +2936,60 @@ static void ui_splash(void)
  * and the meter read flat and low. Biasing it upward instead just pinned it to
  * the ceiling. Pulling it gently back toward a centre gives a mean around half
  * height with excursions either way, which held across several seeds. */
-#define WV_FPS    18u    /* 36 bars at 18 fps: ~2.0 s for one to cross */
-
-/* The level is a slow BODY plus a decaying TRANSIENT, not one walk between a
- * floor and a ceiling. A single clamped walk gave a mean of 73% but a standard
- * deviation of only 5.7 px -- everything sat in a narrow band and the contour
- * read as texture rather than as music. Music is a sustained level with hits
- * punching above it and dropping back, so that is what this generates: the body
- * wanders gently, and every seventh frame or so a transient is struck somewhere
- * in the headroom left above it and then decays away.
+#define WV_FPS    36u    /* see WV_STEP -- the pair sets the sweep length */
+/* Columns generated per FRAME. The meter scrolls in one column at a time from
+ * an EMPTY history, so the width is not populated until UI_WAVE_N columns have
+ * arrived. At 18 fps and one per frame that is 36 frames -- a full 2.0 s --
+ * and boot used to outlast it, so nobody ever saw it half-drawn.
  *
- * Simulated over 900 frames: mean 69% of height, sd 10.4, range 18..72, and the
- * ceiling is touched under 1% of the time so peaks land rather than flatten. */
+ * Boot is now a few hundred milliseconds, which showed bars on the right and
+ * bare gradient on the left. Priming the history instead cured the half-drawn
+ * look and removed the motion with it: a few columns of scroll in a short boot
+ * reads as a frozen picture.
+ *
+ * The sweep IS the animation, so keep it and make it fit: 3 columns per frame
+ * at 36 fps fills the width in 12 frames, ~0.33 s.
+ *
+ * An OSCILLOSCOPE was built for this and is the better answer -- a trace spans
+ * the full width on its first frame, so it is complete AND moving at every
+ * instant, which is the property no version of the bars gives at both ends. It
+ * came to 16 bytes over the link guard and was set aside rather than shrink a
+ * memory guard to fit an animation. The work is on the branch; revisit it when
+ * there is room. */
+#define WV_STEP    3u
+
 #define WV_BODY   53u    /* percent of full height the body settles around */
 #define WV_PULL   18u    /* body is pulled back toward it by /this per frame */
 #define WV_DRIFT   5u    /* most the body may wander between samples */
-#define WV_HIT     7u    /* a transient is struck about 1 frame in this many */
+#define WV_HIT     8u    /* a transient about 1 frame in this many -- a POWER
+                          * OF TWO so the test is a mask, not a modulo. 7 was
+                          * chosen by feel and 8 is indistinguishable. */
 #define WV_DECAY   2u    /* transient keeps DECAY/4 of itself each frame */
 #define WV_FLOOR   2u    /* a bar at zero reads as broken rather than as quiet */
 
 static uint8_t  wv_on, wv_level, wv_tr;
-static uint32_t wv_next, wv_rng;
 static unsigned char wv_h[UI_WAVE_N];
+static uint32_t wv_next, wv_rng;
 
 /* One frame at env/100 of full height. The same code draws the run and the
  * settle: winding env down pulls the whole meter with it. */
-static void ui_wave_frame(void)
+/* GENERATE one column, no drawing. Split out so a caller can advance the
+ * history without painting -- see ui_wave_frame(), which does WV_STEP of these
+ * per frame. */
+static void ui_wave_gen(void)
 {
-    uint16_t bed = ui_grad_at(UI_WAVE_Y);
-    /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
-     * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
-     * was leaving a gap for an album-art panel that does not exist yet and
-     * cannot, since no track has been opened. The panel appears when the first
-     * track turns out to have artwork, and the player narrows the meter then. */
-    uint32_t ww  = UI_INNER_W;
-
     /* Scroll left and insert at the right -- the playback meter's own shift. */
     for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) wv_h[i] = wv_h[i + 1u];
 
     /* Body. One RNG draw, mean-reverting toward WV_BODY. */
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
     int32_t body = (int32_t)((UI_WAVE_H * WV_BODY) / 100u);
+    /* Multiply-shift instead of modulo. A 0..N range from the top bits of the
+     * RNG is as uniform as the remainder for this purpose, and it drops a
+     * __umodsi3 call from a loop that runs 64 times a frame. */
     int32_t lv   = (int32_t)wv_level
-                 + (int32_t)(wv_rng % (2u * WV_DRIFT + 1u)) - (int32_t)WV_DRIFT
+                 + (int32_t)(((wv_rng & 0x7FFFu) * (2u * WV_DRIFT + 1u)) >> 15)
+                 - (int32_t)WV_DRIFT
                  - ((int32_t)wv_level - body) / (int32_t)WV_PULL;
     if (lv < (int32_t)WV_FLOOR)   lv = (int32_t)WV_FLOOR;
     if (lv > (int32_t)UI_WAVE_H)  lv = (int32_t)UI_WAVE_H;
@@ -2918,7 +3004,7 @@ static void ui_wave_frame(void)
         uint32_t head = (uint32_t)(UI_WAVE_H - wv_level);
         if (head) {
             wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
-            uint32_t hit = wv_rng % (head + 1u);
+            uint32_t hit = ((wv_rng & 0x7FFFu) * (head + 1u)) >> 15;
             if (hit > wv_tr) wv_tr = (uint8_t)hit;
         }
     }
@@ -2926,6 +3012,20 @@ static void ui_wave_frame(void)
     uint32_t smp = (uint32_t)wv_level + wv_tr;
     if (smp > UI_WAVE_H) smp = UI_WAVE_H;
     wv_h[UI_WAVE_N - 1u] = (unsigned char)smp;
+}
+
+/* One frame at env/100 of full height. The same code draws the run and the
+ * settle: winding env down pulls the whole meter with it. */
+static void ui_wave_frame(void)
+{
+    uint16_t bed = ui_grad_at(UI_WAVE_Y);
+    /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
+     * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
+     * was leaving a gap for an album-art panel that does not exist yet and
+     * cannot, since no track has been opened. */
+    uint32_t ww  = UI_INNER_W;
+
+    for (uint32_t k = 0; k < WV_STEP; k++) ui_wave_gen();
 
     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
         uint32_t h   = wv_h[i];
@@ -2948,6 +3048,9 @@ static void ui_wave_anim_start(void)
     wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
     wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
     wv_tr    = 0;
+
+    /* EMPTY, deliberately -- the sweep in from the right IS the animation, and
+     * WV_STEP is what makes it finish in time to be seen whole. */
     for (uint32_t i = 0; i < UI_WAVE_N; i++) wv_h[i] = 0;
 }
 
@@ -3202,6 +3305,25 @@ static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist co
  * the heap Helix mallocs its decoder out of, to feed a screen that
  * cannot be reached. */
 #if DEBUG_DIAG
+#if STACK_PAINT
+/* How deep the stack has EVER been, in bytes.
+ *
+ * start.S painted the whole region with 0xA5A5A5A5 before main. Anything still
+ * holding the pattern was never written, so the first disturbed word from the
+ * bottom marks the deepest point reached. Measured rather than modelled:
+ * -fstack-usage gives static frames and says nothing about which chains
+ * actually run, or how deep the compiler's spills go in practice. */
+extern char _stack_bottom[], _stack_top[];
+static uint32_t stack_hwm(void)
+{
+    const volatile uint32_t *p = (const volatile uint32_t *)(uintptr_t)_stack_bottom;
+    uint32_t n = (uint32_t)(((uintptr_t)_stack_top - (uintptr_t)_stack_bottom) / 4u);
+    uint32_t i = 0;
+    while (i < n && p[i] == 0xA5A5A5A5u) i++;
+    return (n - i) * 4u;
+}
+#endif
+
 static uint32_t dt_snap[256];
 #endif
 
@@ -3242,9 +3364,15 @@ static void dt_dump_boot(void)
          * MP3 slot and moves on every track change -- flagging that as damage
          * was wrong and reported a healthy table as clobbered.
          *
-         * What must never move: the slot IDs (even words), and the sizes of
-         * the three files that are fixed for the session. */
-        int may_change = (w == 3u);          /* slot 2's size */
+         * What must never move: the slot IDs (even words).
+         *
+         * SLOT 3's SIZE MOVES TOO -- measured 2026-09-10. This used to say the
+         * other sizes were "fixed for the session", which was an assumption and
+         * a wrong one: opening a playlist by name took w5 from 0x2F9 (761,
+         * playlist.m3u) to 0x65 (101, abstest.m3u), exactly. The screen then
+         * flagged a healthy table with '!', which is the same mistake this
+         * comment block was written to fix for slot 2. */
+        int may_change = (w == 3u) || (w == 5u);   /* slots 2 and 3 sizes */
         if (live != dt_snap[w] && !may_change) bad = 1;
         q = b;
         *q++ = 'w'; q = ui_dec(q, w);
@@ -3823,8 +3951,18 @@ static void ui_draw_dynamic(void)
      * back to rest is the movement that makes it look like a tube rather than
      * a graphic, and freezing it half-shut looks broken. eye_v counts DOWN to
      * rest, so "not yet settled" is a non-zero deflection, same as the VU. */
-    uint32_t vu_settling = ((viz_mode == VIZ_VU)  && (vu_l || vu_r)) ||
-                           ((viz_mode == VIZ_EYE) && (eye_l || eye_r));
+    /* And the cassette's reels, for exactly the same reason: they COAST to a
+     * stop rather than halting on the same frame as the audio, and a spin-down
+     * needs frames to happen in. tape_spd is non-zero only while they are
+     * still turning, so it closes the gate by itself once they reach rest --
+     * the same shape as a needle's remaining deflection.
+     *
+     * Missing this is why the coast did nothing at first: the arithmetic was
+     * right, but the meter block is gated on !paused, so pausing bought one
+     * final frame and then silence. The animation had nowhere to run. */
+    uint32_t vu_settling = ((viz_mode == VIZ_VU)   && (vu_l || vu_r)) ||
+                           ((viz_mode == VIZ_EYE)  && (eye_l || eye_r)) ||
+                           ((viz_mode == VIZ_TAPE) && tape_spd);
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
 
@@ -4154,9 +4292,16 @@ static void ui_draw_dynamic(void)
                  * the audio is the one thing here that reads as a drawing
                  * rather than a machine.
                  *
-                 * Asymmetric on purpose -- 22/frame down is ~0.4 s to rest,
-                 * 40/frame up is ~0.2 s back to speed. A deck's motor picks up
-                 * faster than friction brings it down. */
+                 * Asymmetric on purpose: a deck's motor picks up faster than
+                 * friction brings it down.
+                 *
+                 * Rates are per METER FRAME, and the two directions run at
+                 * different rates, which is worth knowing before retuning
+                 * them. Spinning DOWN happens while paused, where the pause
+                 * loop paces at CLK_HZ/30 and the meter gate halves it: 15 Hz,
+                 * so 330 at 22/frame is ~1.0 s to rest. Spinning UP happens
+                 * while playing, at the normal meter rate, so 40/frame is a
+                 * few tenths. */
                 uint16_t want = paused ? 0u : 330u;
                 if (tape_spd < want) {
                     tape_spd += 40u;
@@ -6161,7 +6306,7 @@ static void poll_input(void)
              * never surfaced, so every question about a slow load used to be
              * answered by estimating. */
             sel_used = 1;
-            char b[24];
+            char b[40];        /* 24 held HSAT; K needs the rest */
             uint32_t i = 0;
             const char *lbl = "HSAT";
             const uint16_t v[4] = { ld_head, ld_size, ld_art, ld_total };
@@ -6174,6 +6319,17 @@ static void poll_input(void)
                 b[i++] = (char)('0' + n % 10u);
                 if (k < 4u) b[i++] = ' ';
             }
+#if STACK_PAINT
+            /* K = stack bytes ever used, against _stack_size. This is the
+             * number that decides how much of the 16 KB can be handed back. */
+            {
+                uint32_t hw = stack_hwm();
+                b[i++] = 'K';
+                uint32_t d = 10000u;
+                while (d > 1u && hw < d) d /= 10u;
+                while (d) { b[i++] = (char)('0' + (hw / d) % 10u); d /= 10u; }
+            }
+#endif
             b[i] = 0;
             ui_toast_set(b, 0xFFFFFFFFu, 0);
         } else
@@ -9735,17 +9891,32 @@ int main(void)
             if (pl_ui_mq_sel != pl_ui_sel) {
                 pl_ui_mq_sel  = pl_ui_sel;
                 pl_ui_mq_off  = 0;
-                pl_ui_mq_next = cycles() + CLK_HZ;      /* hold at the start */
+                pl_ui_mq_back = 0;
+                pl_ui_mq_next = cycles() + MQ_HOLD;     /* hold at the start */
             } else if ((int32_t)(cycles() - pl_ui_mq_next) >= 0) {
                 char nm[64];
                 pl_ui_label(pl_ui_sel, nm, sizeof(nm));
                 if (fb_text_width(nm, TS_1X) > PL_UI_W - 40u) {
-                    uint32_t len = 0;
-                    while (nm[len]) len++;
-                    pl_ui_mq_next = cycles() + CLK_HZ / 3u;
-                    if (++pl_ui_mq_off >= len) {
-                        pl_ui_mq_off  = 0;
-                        pl_ui_mq_next = cycles() + CLK_HZ;  /* pause, then again */
+                    pl_ui_mq_next = cycles() + MQ_STEP;
+                    /* Out to the tail, hold, back to the start, hold -- the
+                     * same bounce the info card's marquee does, and for the
+                     * same reason: the offset used to run to the string
+                     * length, so the row went BLANK for a step before it
+                     * snapped back. This row already re-measures each step, so
+                     * the tail test is free here. */
+                    if (pl_ui_mq_back) {
+                        if (pl_ui_mq_off) pl_ui_mq_off--;
+                        if (!pl_ui_mq_off) {
+                            pl_ui_mq_back = 0;
+                            pl_ui_mq_next = cycles() + MQ_HOLD;
+                        }
+                    } else {
+                        pl_ui_mq_off++;
+                        if (fb_text_width(nm + pl_ui_mq_off, TS_1X)
+                                <= PL_UI_W - 40u) {
+                            pl_ui_mq_back = 1;
+                            pl_ui_mq_next = cycles() + MQ_HOLD;
+                        }
                     }
                     if (pl_ui_sel >= pl_ui_top &&
                         pl_ui_sel <  pl_ui_top + PL_UI_ROWS)

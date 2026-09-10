@@ -70,6 +70,10 @@ SECTIONS {
 	_heap_start = .;
 
 	_stack_top  = ORIGIN(ram) + LENGTH(ram);
+	/* A real ADDRESS symbol, so start.S can paint the region without doing
+	 * arithmetic on an absolute symbol's value. Used only by the STACK_PAINT
+	 * measurement build; costs nothing when that is off. */
+	_stack_bottom = _stack_top - _stack_size;
 	_ring_start = _stack_top - _stack_size - _ring_size;
 
 	/* Separate landing zone for the periodic ID3 re-probe. It must NOT share
