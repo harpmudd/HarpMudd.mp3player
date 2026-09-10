@@ -1798,6 +1798,7 @@ static const uint32_t tape_hub[TAPE_HUB_PH][TAPE_HUB_N] = {
 static uint8_t  tape_face;          /* shell/label frame/window/openings drawn */
 static uint16_t tape_face_w;
 static uint32_t tape_ph_s;          /* hub rotation, 1/256 of a phase step */
+static uint16_t tape_spd;           /* current hub speed -- coasts, see below */
 static uint8_t  tape_rim  = 0xFFu;  /* level bucket the shell rim was at   */
 static uint8_t  tape_glow  = 0xFFu;            /* bass bucket last drawn  */
 static uint32_t tape_name_h;        /* playlist name the label carries     */
@@ -4147,7 +4148,23 @@ static void ui_draw_dynamic(void)
                  * track. That ease was the last consumer of the progress
                  * fraction, and a 10% drift nobody can perceive is not worth
                  * keeping the term alive for. */
-                if (!paused) tape_ph_s += 330u;
+                /* COAST, rather than stopping dead. A tape deck's reels have
+                 * mass: they run down over a moment when you hit pause and
+                 * spin back up when you let go. Stopping on the same frame as
+                 * the audio is the one thing here that reads as a drawing
+                 * rather than a machine.
+                 *
+                 * Asymmetric on purpose -- 22/frame down is ~0.4 s to rest,
+                 * 40/frame up is ~0.2 s back to speed. A deck's motor picks up
+                 * faster than friction brings it down. */
+                uint16_t want = paused ? 0u : 330u;
+                if (tape_spd < want) {
+                    tape_spd += 40u;
+                    if (tape_spd > want) tape_spd = want;
+                } else if (tape_spd > want) {
+                    tape_spd = (tape_spd > 22u) ? (uint16_t)(tape_spd - 22u) : 0u;
+                }
+                tape_ph_s += tape_spd;
                 uint32_t ph = (tape_ph_s >> 8) % TAPE_HUB_PH;
 
                 /* The hubs take the MID band. They are redrawn every frame for
@@ -6019,11 +6036,25 @@ static void poll_input(void)
     {
         static uint32_t a_t0;
         static uint8_t  a_fired;      /* the hold action already ran this press */
+        /* ARMED only by an edge THIS logic saw. Without it the hold trusts a
+         * timestamp another consumer may have skipped, and the playlist
+         * browser is exactly such a consumer: picking a track sets
+         * pl_ui_play_req and then masks A out of edge, fall AND keys for that
+         * pass. So a_t0 kept a timestamp from minutes earlier and a_fired kept
+         * 0, and on the very next pass -- overlay closed, nothing masking --
+         * a still-held A satisfied the hold comparison instantly and dropped
+         * the user into 1.2x on a track that had only just started.
+         *
+         * Disarming is what makes this work, and it is free: while the overlay
+         * is open `keys` is masked to SELECT, so the disarm below fires every
+         * pass and no edge can re-arm. A press that began inside the browser
+         * therefore cannot reach either action after it closes. */
+        static uint8_t  a_armed;
         const uint32_t  a_hold_cy = CLK_HZ / 1000u * SPEED_HOLD_MS;
 
-        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
+        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; a_armed = 1u; }
 
-        if ((keys & KEY_A) && !a_fired &&
+        if ((keys & KEY_A) && a_armed && !a_fired &&
             (int32_t)(cycles() - a_t0) >= (int32_t)a_hold_cy) {
             a_fired = 1;
             speed_fast ^= 1u;
@@ -6037,7 +6068,10 @@ static void poll_input(void)
             ui_last_sec = 0xFFFFFFFFu;
         }
 
-        if ((fall & KEY_A) && !a_fired) {
+        /* The tap is guarded too. The same swallowed press would otherwise
+         * pause the track the browser had just started, the moment the user
+         * let go of A -- the identical hole, one action further along. */
+        if ((fall & KEY_A) && a_armed && !a_fired) {
             /* Select+A shows the boot datatable snapshot, mirroring Select+B
              * for the 0190 struct. Plain A still plays/pauses. */
 #if DEBUG_DIAG
@@ -6049,6 +6083,11 @@ static void poll_input(void)
                 if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
             }
         }
+
+        /* AFTER both actions, never before: on the release pass `keys` has
+         * already lost A while `fall` still carries it, so disarming first
+         * would eat every ordinary tap. */
+        if (!(keys & KEY_A)) a_armed = 0u;
     }
     if (edge & KEY_X) {
         /* Forward only. A reverse on Select+X existed and was dropped: nine

@@ -15,7 +15,8 @@
 //
 // Memory: 1 pixel = 1 SDRAM word (RGB565), stride 512 words/line even though
 // only 400 are used -- keeps every row inside a single SDRAM page. Total:
-// 512*360*2 bytes =~360 KB of 32 MB SDRAM.
+// 512*360*2 bytes =~360 KB of 64 MB SDRAM (512 Mbit x16 -- see
+// _mister_pocket_lib/core/mem/README, validated on hardware).
 //
 // ---------------------------------------------------------------------------
 // REV 7: the CPU no longer draws row-by-row.

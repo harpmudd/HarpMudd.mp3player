@@ -80,3 +80,6 @@ sim/*.vvp
 /bitstream.rbf_r
 /*.rbf
 fw/*.o
+
+# Host-side test harness binaries -- rebuilt by the harness, never shipped.
+tools/host/*.elf

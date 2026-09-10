@@ -453,7 +453,7 @@ Restore the README line if anyone reports a wrong duration — the symptom is
 otherwise baffling, and the cause is a property of their file rather than
 anything they can see.
 
-## Picking a track in the playlist browser can start it at 1.2x — BACKLOGGED for 1.4.x
+## Picking a track in the playlist browser can start it at 1.2x — FIXED 2026-09-09
 
 User report, 2026-08-21: rare, and only when picking a track from the browser.
 Deliberately NOT listed as a README limitation and not fixed in 1.4.0.
@@ -492,6 +492,28 @@ Better still, make the hold require an edge the speed logic itself observed,
 rather than trusting a timestamp that another consumer may have skipped.
 
 The same shape should be checked anywhere else an A edge is swallowed.
+
+### FIXED — the hypothesis above was right
+
+Confirmed by reading, and the fix is the second option that entry proposed:
+require an edge the speed logic itself observed, rather than trusting a
+timestamp another consumer may have skipped.
+
+A new `a_armed` flag is set only by an A edge the handler sees, and cleared
+whenever A is not held. That disarm is what makes it work, and it is free:
+while the overlay is open `keys` is masked to SELECT, so the disarm fires on
+every pass and no edge can re-arm. A press that began inside the browser
+therefore cannot reach the hold after the overlay closes.
+
+**The tap needed the same guard, and that is a second bug the entry missed.**
+`fall & KEY_A` was checked with only `!a_fired`, so the identical swallowed
+press would toggle PAUSE the moment the user let go — pausing the very track
+the browser had just started. Same hole, one action further along. Both are
+guarded now.
+
+Ordering matters and is commented in the source: the disarm runs AFTER both
+actions, because on the release pass `keys` has already lost A while `fall`
+still carries it. Disarming first would eat every ordinary tap.
 
 ### Before fixing, reproduce it
 
