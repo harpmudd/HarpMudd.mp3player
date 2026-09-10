@@ -1401,8 +1401,37 @@ with two lookup tables. That is why they are 1 KB each and they earn it.
    the sample loop at -O2. Less than 6-8 KB, but safe. If `main` is ever wanted
    too, lift the sample loop out into its own -O2 unit FIRST rather than
    trusting -Os not to touch it.
-2. **Drop a meter.** `ui_draw_dynamic` is the single largest text symbol at 19
-   KB for ten meters. Cheap in effort, unpopular, last resort.
+2. **Drop a meter -- MEASURED PER METER 2026-09-10, and it is a bad trade.**
+   Each block was dead-coded in turn and the image diffed, against a 155576
+   baseline:
+
+   | meter | bytes | | meter | bytes |
+   |---|---|---|---|---|
+   | magic eye | **4860** | | spectrum | 760 |
+   | cassette | **3992** | | peak dots | 600 |
+   | VU needles | **3004** | | mirrored bars | 596 |
+   | oscilloscope | 1116 | | waveform | 532 |
+   | phase scope | 1048 | | waterfall | 520 |
+   | L/R levels | 940 | | bars | fall-through |
+
+   **Three meters are 73% of the cost.** Eye + cassette + VU = 11856 of ~18000.
+
+   Which inverts the intuition about dropping "the older, simpler ones": the
+   eight cheapest together come to ~6100, so removing ALL EIGHT buys less than
+   removing the magic eye and the cassette. And the expensive ones are the
+   characterful, hand-built ones with cached faces -- exactly the ones worth
+   keeping. The cheap ones are simple bar and line draws.
+
+   **It also is not free of risk, which "cheap in effort" hid.** `viz_mode`
+   persists as an INDEX. Removing a meter from the middle shifts every later
+   index down, so every saved preference silently repoints at a different
+   meter -- the same hazard as reordering the enum, which this file already
+   forbids. Narrowing interact.json's meter max from 11 is the same class of
+   edit that has broken persistence twice.
+
+   **Verdict: do not.** After the stack cut there are 7056 bytes free and the
+   largest queued item needs 4500. Dropping meters buys little, costs features,
+   and risks a settings migration.
 3. **`pl_text` 16 KB -> SDRAM.** Only if the CPU can address SDRAM directly,
    which is UNVERIFIED -- the framebuffer and art stash are reached through the
    drawing engine, not by load/store. Settle that question before planning
@@ -1913,12 +1942,16 @@ that currently runs 1241 ms. This is purely a memory problem, not a speed one.
 
 ### Three blockers that are NOT bytes
 
-1. **There is no spare data slot.** `data.json` declares 1 (Firmware, required),
-   2 (MP3, deferload), 3 (Playlist, deferload). A `.lrc` needs somewhere to be
-   opened into, so this needs slot 4 -- and **ship an unproven data file ALONE,
-   never batched with firmware**, per the input.json incident that broke all
-   input. Do that as its own step, confirm the core still boots and plays, and
-   only then build against it.
+1. ~~There is no spare data slot.~~ **CLEARED 2026-09-10.** Slot 4 "Lyrics"
+   added to `data.json`, shaped like slot 2 -- `deferload: true`, no filename,
+   `extensions: ["lrc"]` -- so APF loads nothing at boot and the core fills it
+   by name. **Shipped ALONE with the firmware untouched**, per the input.json
+   incident, and hardware-confirmed: the core loads, playback is unchanged, and
+   the new picker appears in the Analogue menu.
+
+   Reusing an existing slot was rejected: slot 2 is the streaming slot, and
+   slot 3 carries a periodic `0190` identity check plus a re-read whenever a
+   list is picked.
 
    Reusing slot 3 was considered and rejected: the periodic identity check is a
    deliberate `0190` on slot 3, and `pl_load()` re-reads it whenever a list is
@@ -1927,6 +1960,12 @@ that currently runs 1241 ms. This is purely a memory problem, not a speed one.
 2. **interact.json Meter slider max 11 -> 12**, or `viz_mode` silently stops
    persisting while the firmware looks correct throughout. Third time this rule
    applies.
+
+   **Do this WITH the meter, not before it.** Widening the slider while only 12
+   meters exist lets a user select index 12, which is `VIZ_COUNT` -- out of
+   range. `settings_load()` rejects it on the way in, so it would not persist,
+   but it is a setting that silently does nothing until the firmware catches
+   up. The data file and the enum change belong in the same build.
 
 3. **Read at LOAD, never lazily.** Opening the pane mid-track and fetching then
    is the far-read-on-another-slot pattern that drops the fragment cache. It
