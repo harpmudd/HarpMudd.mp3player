@@ -20,7 +20,35 @@ MEMORY {
 
 ENTRY(_start)
 
-_stack_size = 0x4000;    /* 16 KB */
+/* 9 KB, down from 16 -- and the number is chosen to make overflow
+ * ARITHMETICALLY IMPOSSIBLE rather than merely unlikely.
+ *
+ * Measured 2026-09-10 with -fstack-usage over every TU, flac.c and picojpeg.c
+ * included (build.sh compiles those with their own flags, so a default
+ * instrumented build misses them):
+ *
+ *   largest single frame anywhere   656   (flac_decode_frame)
+ *   SUM of every frame in the build 8464
+ *   measured high-water on hardware ~1580 (MP3 + artwork + browser session)
+ *
+ * 9216 exceeds 8464, so even if every function in the firmware were nested
+ * inside one another simultaneously the stack still fits. That cannot happen
+ * -- the MP3 and FLAC paths are mutually exclusive, siblings do not nest, the
+ * UI never runs inside the decoder -- which is the point: the guarantee does
+ * not depend on any of that reasoning being right.
+ *
+ * The 7 KB this frees goes to the image, which had 272 bytes of slack and was
+ * silently deciding design questions because of it.
+ *
+ * WHY IT MATTERS THAT THIS IS SAFE: the stack grows DOWN and the ring buffer
+ * is directly below it. An overflow would not fault -- it would quietly
+ * corrupt compressed audio mid-DMA, and present as intermittent glitching
+ * indistinguishable from the v1.4.0 fragment-cache stutter. `stack_ok()` in
+ * player.c watches a canary 256 bytes above the bottom as a second line.
+ *
+ * If a function with a very large frame is ever added, or anything recurses,
+ * re-run: EXTRA_CFLAGS=-fstack-usage bash fw/build.sh */
+_stack_size = 0x2400;    /* 9 KB -- see above; 8464 is the hard ceiling */
 /* 24 KB, down from 32.
  *
  * The ring sits ABOVE the image, so shrinking it moves _tag_start up and

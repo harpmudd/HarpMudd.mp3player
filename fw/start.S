@@ -42,6 +42,13 @@ _start:
 
 	la sp, _stack_top
 
+	# Stack canary, 256 bytes above the bottom. The ring buffer sits directly
+	# below the stack, so an overflow corrupts audio mid-DMA rather than
+	# faulting -- this gives 256 bytes of runway in which to notice.
+	la a0, _stack_bottom
+	li a1, 0x5A5A5A5A
+	sw a1, 256(a0)
+
 #ifdef STACK_PAINT
 	# MEASUREMENT BUILD ONLY. Fill the stack with a known pattern so the
 	# high-water mark can be read back later: the deepest untouched word

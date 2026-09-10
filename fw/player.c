@@ -3304,6 +3304,34 @@ static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist co
  * DEBUG_DIAG. In a release build this was a kilobyte of BSS taken from
  * the heap Helix mallocs its decoder out of, to feed a screen that
  * cannot be reached. */
+extern char _stack_bottom[], _stack_top[];
+
+/* The canary start.S laid 256 bytes above the stack bottom.
+ *
+ * _stack_size is sized so overflow cannot happen -- 9216 against a whole-build
+ * frame sum of 8464 -- so this should never fire. It exists because the
+ * consequence if it ever did is the worst in the firmware: the ring buffer is
+ * immediately below the stack, so an overflow corrupts compressed audio while
+ * APF is DMA-ing into it, and that presents as intermittent glitching with no
+ * fault raised -- indistinguishable from the fragment-cache stutter that cost
+ * three wrong fixes.
+ *
+ * Halting is the right response, not an over-reaction: by the time this trips
+ * only 256 bytes of runway remain, and continuing would trade a dead core for
+ * silently wrong audio. The signature matches the bitstream/firmware interlock
+ * so the two are told apart at a glance. */
+#define STACK_CANARY 0x5A5A5A5Au
+static void stack_check(void)
+{
+    const volatile uint32_t *c =
+        (const volatile uint32_t *)(uintptr_t)(_stack_bottom + 256);
+    if (*c != STACK_CANARY) {
+        REG(R_STAT0) = 0x57ACC000u; REG(R_STAT1) = 0x57ACC000u;
+        REG(R_STAT2) = 0x57ACC000u; REG(R_STAT3) = 0x57ACC000u;
+        for (;;) { }
+    }
+}
+
 #if DEBUG_DIAG
 #if STACK_PAINT
 /* How deep the stack has EVER been, in bytes.
@@ -3313,7 +3341,6 @@ static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist co
  * bottom marks the deepest point reached. Measured rather than modelled:
  * -fstack-usage gives static frames and says nothing about which chains
  * actually run, or how deep the compiler's spills go in practice. */
-extern char _stack_bottom[], _stack_top[];
 static uint32_t stack_hwm(void)
 {
     const volatile uint32_t *p = (const volatile uint32_t *)(uintptr_t)_stack_bottom;
@@ -8892,6 +8919,7 @@ int main(void)
 
     for (;;) {
         poll_input();
+        stack_check();
 
         /* Ticks the idle counter and blanks when it reaches the timeout.
          *

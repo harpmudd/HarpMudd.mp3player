@@ -1888,6 +1888,51 @@ or 252 when the art panel is up -- about 36 characters, 25 with art. That is
 enough to show the current line and a little context, and NOT enough for a
 lyric sheet. Design for a moving focus line, not a page.
 
+### What it would cost to build TODAY — costed 2026-09-10
+
+Slack at v1.5.0 is **272 bytes**. This does not fit, and the gap is not close.
+
+| item | bytes | where |
+|---|---|---|
+| lyric text buffer | 2000-3000 | BSS. ~40 lines x ~40 chars plus `[mm:ss.xx]` per line |
+| line index (offset + seconds) | ~160 | BSS, 40 lines x 4 |
+| `.lrc` parser | 300-500 | text |
+| meter draw block | 300-600 | text |
+| open-by-name + read at load | ~150 | text, reuses the `pl_open_into` pattern |
+| enum, toast name | ~50 | text |
+| **total** | **~3000-4500** | |
+
+**Funding it.** The stack cut is the only one that covers it outright and it
+covers it three times over: 12 KB measured, one line, leaves 8 KB spare.
+`-Os` on `load_track` (3-5 KB) would also do it. `art_acc` 20->18 (1104) and
+dropping one meter (~2000) do not, singly.
+
+**The READ is free, which is the good news.** A 2 KB `.lrc` is a single 4 KB
+target read against artwork's 43-207, so it adds nothing measurable to a load
+that currently runs 1241 ms. This is purely a memory problem, not a speed one.
+
+### Three blockers that are NOT bytes
+
+1. **There is no spare data slot.** `data.json` declares 1 (Firmware, required),
+   2 (MP3, deferload), 3 (Playlist, deferload). A `.lrc` needs somewhere to be
+   opened into, so this needs slot 4 -- and **ship an unproven data file ALONE,
+   never batched with firmware**, per the input.json incident that broke all
+   input. Do that as its own step, confirm the core still boots and plays, and
+   only then build against it.
+
+   Reusing slot 3 was considered and rejected: the periodic identity check is a
+   deliberate `0190` on slot 3, and `pl_load()` re-reads it whenever a list is
+   picked, so parking an `.lrc` there breaks both.
+
+2. **interact.json Meter slider max 11 -> 12**, or `viz_mode` silently stops
+   persisting while the firmware looks correct throughout. Third time this rule
+   applies.
+
+3. **Read at LOAD, never lazily.** Opening the pane mid-track and fetching then
+   is the far-read-on-another-slot pattern that drops the fragment cache. It
+   presents as a light stutter with no underrun recorded, and it cost three
+   wrong fixes in v1.4.0.
+
 ### A staged plan, cheapest first
 
 1. **`.lrc` sidecar, unsynchronised display.** Open `<track>.lrc` by name at
