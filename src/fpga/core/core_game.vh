@@ -311,6 +311,26 @@ sdram_fb #(.CLOCK_SPEED_MHZ(100), .BURST_TYPE(0), .CAS_LATENCY(2), .WRITE_BURST(
     .SDRAM_CKE(dram_cke), .SDRAM_CLK(dram_clk)
 );
 
+// Extended font. mp3font.bin is its own data slot at bridge 0x10000000, and APF
+// pushes it at boot alongside the firmware. A second data_loader on that
+// window hands its words straight to the draw engine, already in clk_sdram, and
+// the engine writes them into SDRAM between drawing and scanout. The CPU never
+// touches the font: it sends a glyph number and the engine reads the rows.
+wire        fontw_en;
+wire [21:0] fontw_addr;
+wire [15:0] fontw_data;
+
+data_loader #(
+    .ADDRESS_MASK_UPPER_4 (4'h1),
+    .ADDRESS_SIZE         (21),       // 4 MB window; the font is ~830 KB
+    .OUTPUT_WORD_SIZE     (2)
+) u_font_loader (
+    .clk_74a (clk_74a), .clk_memory (clk_sdram),
+    .bridge_wr (bridge_wr), .bridge_endian_little (bridge_endian_little),
+    .bridge_addr (bridge_addr), .bridge_wr_data (bridge_wr_data),
+    .write_en (fontw_en), .write_addr (fontw_addr), .write_data (fontw_data)
+);
+
 wire [23:0] vid_rgb_w;
 wire        vid_hs_w, vid_vs_w, vid_de_w;
 
@@ -331,6 +351,10 @@ mp3_fb u_fb (
     .cmd_sx    (soc_fb_cmd_sx),
     .cmd_sy    (soc_fb_cmd_sy),
     .cmd_full  (soc_fb_cmd_full),
+
+    .fontw_en  (fontw_en),
+    .fontw_addr(fontw_addr),
+    .fontw_data(fontw_data),
 
     .sdram_init_complete(sdram_init_complete),
     .p0_addr(fb_p0_addr), .p0_data(fb_p0_data), .p0_byte_en(fb_p0_byte_en),

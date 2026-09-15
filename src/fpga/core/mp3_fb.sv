@@ -74,10 +74,16 @@ module mp3_fb (
     input  wire [8:0]  cmd_h,       // RECT: height (rows)
     input  wire [15:0] cmd_fg,      // RGB565 fill / glyph foreground
     input  wire [15:0] cmd_bg,      // RGB565 glyph background
-    input  wire [6:0]  cmd_glyph,   // CHAR: ASCII code
+    input  wire [6:0]  cmd_glyph,   // CHAR: ASCII code, or 0x7F = index in {w,h}
     input  wire [1:0]  cmd_sx,      // CHAR: h scale 0=1x 1=1.5x 2=2x 3=3x
     input  wire [1:0]  cmd_sy,      // CHAR: v scale, same encoding
     output wire        cmd_full,
+
+    // Extended font load (clk_sdram), from a data_loader on bridge 0x1xxxxxxx.
+    // One pulse per 16-bit word, in file order.
+    input  wire        fontw_en,
+    input  wire [21:0] fontw_addr,  // byte offset into mp3font.bin
+    input  wire [15:0] fontw_data,
 
     // SDRAM master port (clk_sdram) -> wired to sdram_fb in core_game.vh ----
     input  wire        sdram_init_complete,
@@ -117,6 +123,20 @@ module mp3_fb (
     localparam [24:0] FB_BASE = 25'd0;
 
     localparam [1:0] OP_RUN = 2'd0, OP_RECT = 2'd1, OP_CHAR = 2'd2, OP_COPY = 2'd3;
+
+    // ---- Extended font (mp3font.bin, from tools/gen_font_ext.py) -----------
+    // The ROM holds ASCII only and block RAM is at 97%, so every other glyph
+    // lives in SDRAM, well clear of the framebuffer's ~184K words.
+    //
+    // A CHAR with glyph 0x7F takes its glyph from here, indexed by the size
+    // register a CHAR otherwise ignores: bit 17 selects the region and bits
+    // 16..0 are the glyph number within it.
+    //   4bpp region: 1024 glyphs x 64 words (16 rows x 4 words), Inter.
+    //   1bpp region: 16 words per glyph (one per row), Unifont.
+    // The generator and this file must agree on both constants.
+    localparam [24:0] FONT_BASE = 25'h0100000;
+    localparam [24:0] FONT1_OFF = 25'd65536;         // 1024 * 64
+    localparam [6:0]  GLYPH_EXT = 7'h7F;
     // COPY moves a w x h block SDRAM->SDRAM. It exists for the album-art panel:
     // sliding an image by re-sending its pixels from the CPU would be thousands
     // of commands per animation step and would starve the decoder, whereas the
@@ -255,7 +275,48 @@ module mp3_fb (
     reg [15:0] glyphbuf [0:127];
     reg [15:0] glyph_q;
     always @(posedge clk_sdram) glyph_q <= glyphbuf[wsrc_addr[6:0]];
-    assign wsrc_q = glyph_q;
+
+    // ======================================================================
+    // Font load queue. APF pushes mp3font.bin at boot through a data_loader
+    // whose output is already in this domain, and nothing can hold APF off,
+    // so words queue here and the engine drains them in streaming bursts.
+    //
+    // 256 is generous. The bridge delivers a word every ~50 cycles at best and
+    // the longest the dispatcher can make the queue wait is a scanout FILL plus
+    // one RECT row plus one CHAR row, about 1000 cycles -- ~20 words.
+    //
+    // No address per entry: a slot load is one sequential pass from offset 0,
+    // so queue order IS address order. fw_disc records it if that ever stops
+    // being true (the testbench checks it stays clear).
+    // ======================================================================
+    (* ramstyle = "M10K" *) reg [15:0] fw_mem [0:255];
+    reg  [8:0]  fw_wr = 0;              // written here
+    reg  [8:0]  fw_rd = 0;              // advanced by the engine on retire
+    reg  [20:0] fw_next = 0;            // font word offset of the entry at fw_rd
+    reg  [21:0] fw_expect = 0;
+    reg         fw_ovf = 0, fw_disc = 0;
+    wire [8:0]  fw_fill = fw_wr - fw_rd;
+
+    always @(posedge clk_sdram) begin
+        if (reset) begin
+            fw_wr <= 0; fw_expect <= 0;
+        end else if (fontw_en) begin
+            if (fontw_addr != fw_expect) fw_disc <= 1'b1;
+            fw_expect <= fontw_addr + 22'd2;
+            if (fw_fill != 9'd256) begin
+                fw_mem[fw_wr[7:0]] <= fontw_data;
+                fw_wr <= fw_wr + 9'd1;
+            end else fw_ovf <= 1'b1;
+        end
+    end
+
+    // Streamed straight out of the queue: beat N of a burst is entry fw_rd+N,
+    // read one cycle ahead like glyphbuf.
+    reg [15:0] fw_q;
+    always @(posedge clk_sdram) fw_q <= fw_mem[fw_rd[7:0] + wsrc_addr[7:0]];
+
+    reg wr_is_font = 1'b0;
+    assign wsrc_q = wr_is_font ? fw_q : glyph_q;
 
     // ---- Font ROM (generated; see tools/gen_font_rom.py) -------------------
     reg  [11:0] font_addr;
@@ -270,7 +331,7 @@ module mp3_fb (
     // between any two bursts.
     // ======================================================================
     localparam A_IDLE=3'd0, A_FILL=3'd1, A_FILL_END=3'd2, A_WRWAIT=3'd3,
-               A_ROWFETCH=3'd4, A_COMPOSE=3'd5, A_COPYRD=3'd6;
+               A_ROWFETCH=3'd4, A_COMPOSE=3'd5, A_COPYRD=3'd6, A_EXTRD=3'd7;
     reg [2:0]  astate = A_IDLE;
     reg [10:0] fill_cnt = 0;
 
@@ -309,6 +370,24 @@ module mp3_fb (
     reg [1:0]  rowf_cnt;                // row-fetch sequencer
     reg [31:0] rowlo, rowhi;            // one source row, 16 px x 4bpp
     reg [11:0] char_base;               // (glyph - 0x20) * 32
+
+    // Extended glyph: rows come from SDRAM, not the ROM
+    reg        char_ext = 1'b0;
+    reg        char_fmt1;               // 1bpp region
+    reg [24:0] char_ebase;              // SDRAM word of the glyph's row 0
+    reg [2:0]  ecnt;
+    reg [15:0] ew0, ew1, ew2;
+    reg [8:0]  fw_len;                  // words in the in-flight font burst
+
+    // A 1bpp row is one word, bit 15 = leftmost pixel. Expanded to the same
+    // 4bpp shape the ROM delivers so compose and blend run unchanged: a set
+    // pixel is full coverage, which blends to exactly the foreground.
+    function [63:0] expand1(input [15:0] w);
+        integer k;
+        begin
+            for (k = 0; k < 16; k = k + 1) expand1[k*4 +: 4] = {4{w[15-k]}};
+        end
+    endfunction
 
     // Which unit of work the in-flight burst belongs to
     reg        wr_is_char;
@@ -404,6 +483,9 @@ module mp3_fb (
             char_rows_left_nz <= 1'b0;
             char_row_ready <= 1'b0;
             copy_mode <= 1'b0;
+            char_ext <= 1'b0;
+            wr_is_font <= 1'b0;
+            fw_rd <= 0; fw_next <= 0;
             rd_ptr <= 0; rd_ptr_g <= 0;
         end else begin
             case (astate)
@@ -424,6 +506,7 @@ module mp3_fb (
                         p0_wr_stream <= 1'b1;
                         p0_wr_req    <= 1'b1;
                         wr_is_char   <= 1'b1;
+                        wr_is_font   <= 1'b0;
                         astate       <= A_WRWAIT;
 
                     // One rect row = one constant-data burst.
@@ -435,6 +518,31 @@ module mp3_fb (
                         p0_wr_stream <= 1'b0;
                         p0_wr_req    <= 1'b1;
                         wr_is_char   <= 1'b0;
+                        wr_is_font   <= 1'b0;
+                        astate       <= A_WRWAIT;
+
+                    // Font load: whatever has queued, up to 128 words, in one
+                    // streaming burst.
+                    //
+                    // BATCHED while there is drawing to do. Words trickle in
+                    // continuously during a load, so "anything queued" is true
+                    // nearly every time the dispatcher looks -- and composing a
+                    // glyph row sits BELOW this branch, so a CHAR started
+                    // mid-load did not finish until the load had (caught in
+                    // simulation). Waiting for 64 words hands the dispatcher
+                    // back for a row at a time; with nothing else pending the
+                    // queue drains at once. 64 leaves 192 of headroom against a
+                    // worst-case wait of ~20 words at bridge speed.
+                    end else if (fw_fill != 9'd0 && can_sdram &&
+                                 (fw_fill >= 9'd64 || !(char_rows_left_nz || !fifo_empty))) begin
+                        p0_addr      <= FONT_BASE + {4'd0, fw_next};
+                        p0_byte_en   <= 2'b11;
+                        fw_len       <= (fw_fill > 9'd128) ? 9'd128 : fw_fill;
+                        p0_wr_len    <= (fw_fill > 9'd128) ? 11'd128 : {2'd0, fw_fill};
+                        p0_wr_stream <= 1'b1;
+                        p0_wr_req    <= 1'b1;
+                        wr_is_char   <= 1'b0;
+                        wr_is_font   <= 1'b1;
                         astate       <= A_WRWAIT;
 
                     // Composing needs no SDRAM, so it runs only once nothing
@@ -446,7 +554,17 @@ module mp3_fb (
                         p0_rd_req <= 1'b1;
                         copy_cnt  <= 8'd0;
                         astate    <= A_COPYRD;
-                    end else if (!copy_mode && char_rows_left_nz && !char_row_ready) begin
+                    // Extended glyph row: 4 words (4bpp) or 1 word (1bpp) out of
+                    // SDRAM, where the ROM path below needs no bus at all.
+                    end else if (!copy_mode && char_ext && char_rows_left_nz
+                                 && !char_row_ready && can_sdram) begin
+                        p0_addr   <= char_ebase + (char_fmt1 ? {21'd0, ey}
+                                                             : {19'd0, ey, 2'b00});
+                        p0_rd_req <= 1'b1;
+                        ecnt      <= 3'd0;
+                        astate    <= A_EXTRD;
+                    end else if (!copy_mode && !char_ext && char_rows_left_nz
+                                 && !char_row_ready) begin
                         rowf_cnt <= 2'd0;
                         astate   <= A_ROWFETCH;
 
@@ -477,8 +595,16 @@ module mp3_fb (
                                 char_base <= ((q_glyph >= 7'h20) && (q_glyph <= 7'h7E))
                                            ? {1'b0, (q_glyph - 7'h20), 5'd0}
                                            : 12'd0;
+                                // 0x7F: glyph number rides in the size fields.
+                                char_ext   <= (q_glyph == GLYPH_EXT);
+                                char_fmt1  <= q_w[8];
+                                char_ebase <= q_w[8]
+                                    ? FONT_BASE + FONT1_OFF + {4'd0, q_w[7:0], q_h, 4'd0}
+                                    : FONT_BASE + {2'd0, q_w[7:0], q_h, 6'd0};
                                 rowf_cnt  <= 2'd0;
-                                astate    <= A_ROWFETCH;
+                                // The SDRAM fetch is dispatched from IDLE, which
+                                // is where every bus user has to start.
+                                astate    <= (q_glyph == GLYPH_EXT) ? A_IDLE : A_ROWFETCH;
                             end
                             OP_RECT: begin
                                 rect_addr   <= q_addr;
@@ -523,7 +649,11 @@ module mp3_fb (
 
                 // ------------------------------------- burst write retire --
                 A_WRWAIT: if (p0_ready) begin
-                    if (wr_is_char) begin
+                    if (wr_is_font) begin
+                        fw_rd      <= fw_rd + fw_len;
+                        fw_next    <= fw_next + {12'd0, fw_len};
+                        wr_is_font <= 1'b0;
+                    end else if (wr_is_char) begin
                         char_row_ready <= 1'b0;
                         char_addr      <= char_addr + 19'd512;   // next row
                         copy_src       <= copy_src  + 19'd512;
@@ -557,6 +687,34 @@ module mp3_fb (
                             char_row_ready   <= 1'b1;
                             astate <= A_IDLE;
                         end else copy_cnt <= copy_cnt + 8'd1;
+                    end
+                end
+
+                // --------------------------------- extended glyph row read --
+                // Assembled into rowlo/rowhi exactly as the ROM path leaves
+                // them, then straight on to compose, which touches no bus.
+                A_EXTRD: begin
+                    if (p0_data_available) begin
+                        if (char_fmt1) begin
+                            p0_end_burst_req <= 1'b1;
+                            {rowhi, rowlo}   <= expand1(p0_q);
+                            ox <= 7'd0; ex <= 4'd0; acc_x <= 3'd0;
+                            astate <= A_COMPOSE;
+                        end else begin
+                            case (ecnt)
+                                3'd0: ew0 <= p0_q;
+                                3'd1: ew1 <= p0_q;
+                                3'd2: ew2 <= p0_q;
+                                default: begin
+                                    p0_end_burst_req <= 1'b1;
+                                    rowlo <= {ew1, ew0};
+                                    rowhi <= {p0_q, ew2};
+                                    ox <= 7'd0; ex <= 4'd0; acc_x <= 3'd0;
+                                    astate <= A_COMPOSE;
+                                end
+                            endcase
+                            ecnt <= ecnt + 3'd1;
+                        end
                     end
                 end
 
