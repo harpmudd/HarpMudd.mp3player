@@ -1389,6 +1389,32 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * for and it is doubled; the tail merely rests longer than it needs to, which
  * costs nothing but a little patience. Revisit when there is image space. */
 #define MQ_HOLD  (CLK_HZ * 4u)
+/* Lyrics state, hoisted above ui_draw_dynamic() for the reason given in
+ * lyrics.inc: that function is defined before any include in this file, so the
+ * meter cannot see anything declared later. The logic stays in lyrics.inc,
+ * which must follow playlist.inc for pl_open_try(). */
+#define LRC_SLOT_ID   4u        /* data.json slot 4, deferload, no filename */
+#define LRC_TEXT_MAX  3072u     /* ~60 lines of ~45 chars; truncates beyond */
+/* 80, not 64. Measured on the card: the longest sheet there is 66 lines, so 64
+ * silently dropped the end of it -- and a lyric that stops two lines early
+ * reads as a bug, not as a limit.
+ *
+ * 80 rather than 96 because 96 put the image 64 bytes over the link guard, and
+ * 16 lines of headroom over the longest real file is enough. Each line costs 4
+ * bytes of index, so this is the cheapest dial in the feature. */
+#define LRC_LINES     80u
+#define LRC_NOTIME    0xFFFFu
+
+static char     lrc_text[LRC_TEXT_MAX];
+static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
+static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
+static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
+static uint16_t lrc_n;                  /* lines parsed                       */
+static uint8_t  lrc_synced;             /* at least one real timestamp        */
+static uint32_t lrc_index_for(uint32_t t10);  /* both defined in lyrics.inc */
+static uint32_t lrc_now10(void);
+
+
 /* Visualisations, cycled with X. The choice persists via interact.json.
  *
  * All three run off what the decoder already produces -- there are no frequency
@@ -1411,6 +1437,11 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
        /* Same rule again: APPENDED. Adding this required the Meter slider's
         * max in interact.json to go from 10 to 11. */
        VIZ_TAPE,
+       /* Same rule a third time: APPENDED. Adding this required the Meter
+        * slider's max in interact.json to go from 11 to 12, and that edit
+        * ships in the SAME build -- widening it first would offer an index
+        * equal to VIZ_COUNT, which nothing can select. */
+       VIZ_LYRICS,
        VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
@@ -2564,8 +2595,30 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
      * which is a loop inside a loop: 64 measurements of up to 64 characters
      * for a result this gets in one pass. It also cost more image space than
      * was free, which is how it came to be written this way. */
+    /* TWO budgets, and the tighter one wins.
+     *
+     * ui_text_w budgets ADVANCES, but fb_char paints a whole CELL and
+     * fb_text_boxed REFUSES to paint one crossing UI_CARD_TEXT_R rather than
+     * clipping it. So a tail whose advances fit can still lose its final glyph
+     * outright -- measured on "Daft Punk Is Playing at My House" at the fixed
+     * 2x title size: the walk stopped at offset 12 and painted "...at My Hous",
+     * with the marquee at rest believing it had shown everything.
+     *
+     * The painted tail is (w - last + cell), so requiring that to fit is just a
+     * tighter bound on w -- 350 against 352 for that title. Folding it in here
+     * costs one comparison; testing it inside the loop instead cost 112 bytes
+     * the image did not have. Stopping one character earlier scrolls one
+     * character FURTHER, which is what brings the last glyph inside the box. */
+    uint32_t budget = ui_text_w;
+    {
+        uint32_t cell = FB_CELL(scale);
+        uint32_t room = (UI_CARD_TEXT_R - UI_MARGIN) + last;
+        room = (room > cell) ? room - cell : 0u;
+        if (room < budget) budget = room;
+    }
+
     uint32_t w = 0, k = i;
-    while (k && w + fb_adv(m->text[k - 1u], scale) <= ui_text_w) {
+    while (k && w + fb_adv(m->text[k - 1u], scale) <= budget) {
         k--;
         w += fb_adv(m->text[k], scale);
     }
@@ -3837,6 +3890,70 @@ static void pl_ui_draw(void)
 }
 
 
+/* Where a line must be split so its first row fits `maxw`, or 0 if it fits
+ * whole. Breaks at the last SPACE before the limit so words stay intact --
+ * breaking mid-word is worse than clipping, because it reads as corruption
+ * rather than as a wrap. */
+static uint32_t lrc_split(const char *s, uint32_t maxw)
+{
+    uint32_t w = 0, sp = 0;
+    for (uint32_t i = 0; s[i]; i++) {
+        if (s[i] == ' ') sp = i;
+        w += fb_adv(s[i], TS_1X);
+        if (w > maxw) return sp ? sp : i;
+    }
+    return 0;
+}
+
+static uint32_t lrc_maxw(uint32_t ww) { return (ww > 8u) ? ww - 8u : ww; }
+
+static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
+{
+    return lrc_split(lrc_text + lrc_off[idx], lrc_maxw(ww)) ? 2u : 1u;
+}
+
+/* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
+ * left-aligned, because a lyric line has no left edge to align to -- lengths
+ * vary wildly and a ragged right margin reads as a list rather than as verse.
+ *
+ * Background is sampled at this row, not shared: the box is a ramp and a glyph
+ * cell paints its own background, so one value for all five rows would band. */
+static void lrc_row(uint32_t y, uint32_t ww, const char *s,
+                    uint32_t from, uint32_t to, int is_cur)
+{
+    char t[80];
+    uint32_t n = 0;
+    while (from + n < to && n < sizeof(t) - 1u) { t[n] = s[from + n]; n++; }
+    while (n && t[n - 1u] == ' ') n--;          /* no dangling space on a wrap */
+    t[n] = 0;
+    if (!n) return;
+
+    uint16_t bg = ui_grad_at(y + 8u);
+    uint32_t w  = fb_text_width(t, TS_1X);
+    uint32_t dx = (ww > w) ? (ww - w) / 2u : 0u;
+    fb_set_color(is_cur ? ui_accent : ui_mix(bg, UI_DIM, 1u, 3u), bg);
+    fb_text_boxed(UI_MARGIN + dx, y, t, TS_1X, TS_1X,
+                  (ww > dx) ? ww - dx : 2u, UI_MARGIN + ww);
+}
+
+/* Emit one lyric line at `row`, wrapping to a second row if it does not fit.
+ * Rows outside the visible five are simply skipped, so clipping at either end
+ * needs no special case. Returns the rows the line occupies. */
+static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
+                         int32_t row, int is_cur)
+{
+    const char *s = lrc_text + lrc_off[idx];
+    uint32_t len = 0;
+    while (s[len]) len++;
+    uint32_t c = lrc_split(s, lrc_maxw(ww));
+
+    if (row >= 0 && row < 5)
+        lrc_row(top + 8u + (uint32_t)row * 16u, ww, s, 0, c ? c : len, is_cur);
+    if (c && row + 1 >= 0 && row + 1 < 5)
+        lrc_row(top + 8u + (uint32_t)(row + 1) * 16u, ww, s, c, len, is_cur);
+    return c ? 2u : 1u;
+}
+
 static void ui_draw_dynamic(void)
 {
     if (screen_blank) return;
@@ -4032,6 +4149,51 @@ static void ui_draw_dynamic(void)
          * about a centre line instead of colour-coded from the bottom -- a
          * DAW-style envelope building up left to right. ~5 commands a frame,
          * because COPY moves the whole strip for the price of one. */
+        if (viz_mode == VIZ_LYRICS) {
+            /* Five rows. The CURRENT line is anchored at row 2 and stays there
+             * whatever the neighbours do -- a line that moves as its context
+             * changes length is much harder to read than one that holds still.
+             * Earlier lines are laid out backwards from it and later ones
+             * forwards, so a wrapped neighbour eats a row of context rather
+             * than displacing the line being sung.
+             *
+             * Redrawn only when the LINE changes, a few times a minute. */
+            const uint32_t top  = UI_WAVE_Y - UI_WAVE_TOP;
+            const uint32_t boxh = UI_WAVE_H + UI_WAVE_TOP;
+
+            uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(lrc_now10()) : 0u;
+            if (wf) lrc_drawn = 0xFFFFu;
+
+            if (cur != lrc_drawn) {
+                lrc_drawn = (uint16_t)cur;
+                ui_bg_restore(UI_MARGIN, top, ww, boxh);
+
+                if (!lrc_n) {
+                    /* Most tracks have no sidecar. Say so -- an empty box reads
+                     * as a broken meter rather than as an absent file. */
+                    uint32_t y = top + boxh / 2u - 8u;
+                    uint32_t w = fb_text_width("NO LYRICS", TS_1X);
+                    fb_set_color(UI_FAINT, ui_grad_at(y + 8u));
+                    fb_text_boxed(UI_MARGIN + ((ww > w) ? (ww - w) / 2u : 0u),
+                                  y, "NO LYRICS", TS_1X, TS_1X, ww,
+                                  UI_MARGIN + ww);
+                } else {
+                    uint32_t used = lrc_emit(top, ww, cur, 2, 1);
+
+                    int32_t r = 2 + (int32_t)used;
+                    for (uint32_t k = 1u; cur + k < lrc_n && r < 5; k++)
+                        r += (int32_t)lrc_emit(top, ww, cur + k, r, 0);
+
+                    r = 2;
+                    for (uint32_t k = 1u; k <= cur && r > 0; k++) {
+                        r -= (int32_t)lrc_rows(cur - k, ww);
+                        lrc_emit(top, ww, cur - k, r, 0);
+                    }
+                }
+            }
+            goto viz_done;
+        }
+
         if (viz_mode == VIZ_SCROLL) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
@@ -6284,7 +6446,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
                    : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
                    : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
-                                            : "METER: CASSETTE");
+                   : viz_mode == VIZ_TAPE   ? "METER: CASSETTE"
+                                            : "METER: LYRICS");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
@@ -6975,6 +7138,7 @@ static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
 #include "art.inc"
 #include "playlist.inc"
+#include "lyrics.inc"        /* AFTER playlist.inc -- uses pl_open_try() */
 #include "settings.inc"
 
 /* Slide unconsumed bytes down and pull in ONE chunk. Compaction keeps Helix's
@@ -8305,6 +8469,16 @@ static int read_track_head(void)
 
 /* Everything needed to start a track from the beginning, shared by boot and by
  * a reload. ONE function deliberately -- two copies of this drift apart. */
+/* -Os on THIS FUNCTION ONLY. It is 11 KB of genuinely cold code -- one run per
+ * track change -- and the image has been deciding design questions for want of
+ * a few hundred bytes. The ROADMAP assumed this needed the file split into a
+ * separate translation unit, with dozens of statics exported; the attribute
+ * does it without touching the structure at all.
+ *
+ * The audio path is NOT affected: main's sample loop stays at -O2, which is
+ * what build.sh's comment insists on for the 45.7 MHz of 60 the MP3 decode
+ * needs. */
+__attribute__((optimize("Os")))
 static int load_track(void)
 {
     /* Release the FLAC buffer FIRST. This runs before the format is known --
@@ -8600,6 +8774,14 @@ static int load_track(void)
         art_file_id = cur_file_id;
     }
     art_ready = 1;
+
+    /* Lyrics ride the artwork's gap deliberately. Both are far reads on a slot
+     * that is not the stream, both are wanted before the first note, and doing
+     * them here means neither ever happens during playback -- which is the one
+     * thing that would reintroduce the fragment-cache stutter. Costs one open
+     * and one read beside artwork's 43 to 207. */
+    lrc_load();
+
     ld_art = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
