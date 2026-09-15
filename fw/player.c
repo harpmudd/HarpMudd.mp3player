@@ -2564,8 +2564,30 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
      * which is a loop inside a loop: 64 measurements of up to 64 characters
      * for a result this gets in one pass. It also cost more image space than
      * was free, which is how it came to be written this way. */
+    /* TWO budgets, and the tighter one wins.
+     *
+     * ui_text_w budgets ADVANCES, but fb_char paints a whole CELL and
+     * fb_text_boxed REFUSES to paint one crossing UI_CARD_TEXT_R rather than
+     * clipping it. So a tail whose advances fit can still lose its final glyph
+     * outright -- measured on "Daft Punk Is Playing at My House" at the fixed
+     * 2x title size: the walk stopped at offset 12 and painted "...at My Hous",
+     * with the marquee at rest believing it had shown everything.
+     *
+     * The painted tail is (w - last + cell), so requiring that to fit is just a
+     * tighter bound on w -- 350 against 352 for that title. Folding it in here
+     * costs one comparison; testing it inside the loop instead cost 112 bytes
+     * the image did not have. Stopping one character earlier scrolls one
+     * character FURTHER, which is what brings the last glyph inside the box. */
+    uint32_t budget = ui_text_w;
+    {
+        uint32_t cell = FB_CELL(scale);
+        uint32_t room = (UI_CARD_TEXT_R - UI_MARGIN) + last;
+        room = (room > cell) ? room - cell : 0u;
+        if (room < budget) budget = room;
+    }
+
     uint32_t w = 0, k = i;
-    while (k && w + fb_adv(m->text[k - 1u], scale) <= ui_text_w) {
+    while (k && w + fb_adv(m->text[k - 1u], scale) <= budget) {
         k--;
         w += fb_adv(m->text[k], scale);
     }
@@ -8305,6 +8327,16 @@ static int read_track_head(void)
 
 /* Everything needed to start a track from the beginning, shared by boot and by
  * a reload. ONE function deliberately -- two copies of this drift apart. */
+/* -Os on THIS FUNCTION ONLY. It is 11 KB of genuinely cold code -- one run per
+ * track change -- and the image has been deciding design questions for want of
+ * a few hundred bytes. The ROADMAP assumed this needed the file split into a
+ * separate translation unit, with dozens of statics exported; the attribute
+ * does it without touching the structure at all.
+ *
+ * The audio path is NOT affected: main's sample loop stays at -O2, which is
+ * what build.sh's comment insists on for the 45.7 MHz of 60 the MP3 decode
+ * needs. */
+__attribute__((optimize("Os")))
 static int load_track(void)
 {
     /* Release the FLAC buffer FIRST. This runs before the format is known --

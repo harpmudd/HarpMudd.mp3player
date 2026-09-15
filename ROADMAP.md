@@ -434,6 +434,59 @@ RTL comment that stated it absolutely has been corrected.
 Documented in the README as a known limitation, so a user who does hit it
 knows to pick again rather than assuming the core is broken.
 
+## Seeking a VBR MP3 lands the CLOCK in the wrong place — found 2026-09-10
+
+Reported as "lyrics lose alignment after a seek", which is where it shows, but
+the lyrics are innocent: they read `ui_sec` and `ui_sec` is what is wrong.
+
+`ui_byte_rate()` returns a WHOLE-FILE AVERAGE:
+
+    if (track_secs && slot_size > audio_start)
+        return (slot_size - audio_start) / track_secs;
+
+and the MP3 seek turns a byte position into a time with it:
+
+    ui_sec = rate ? (file_pos - audio_start) / rate : 0u;
+
+Exact for CBR. For VBR that average is right only on average, so the seek puts
+the audio at one point and the clock at another, off by however far the bitrate
+has deviated up to that byte. The offset then PERSISTS, because playback
+advances correctly from a wrong starting value.
+
+Measured on the test card with tools/xing_check.py -- of the eight files
+carrying .lrc sidecars:
+
+| header | files | seek |
+|---|---|---|
+| Xing (VBR) | Bad Religion, Blind Melon, Death Cab, Gorillaz | estimate |
+| Info (CBR) | Dire Straits, Sea Wolf | exact |
+| none | LCD Soundsystem, Stone Temple Pilots | meas_rate, worst case |
+
+Six of eight cannot be exact. FLAC is unaffected -- its seek is
+`ui_sec = landed / fl.rate`, sample-exact.
+
+### The fix is in the file format, and it is not read yet
+
+A Xing header carries a **100-entry TOC** mapping time-percentage to
+byte-percentage, which exists precisely for VBR seeking. This core parses Xing
+for the frame count and byte count but ignores the TOC.
+
+With it, seek runs the other way round: pick the target TIME, use the TOC to
+find the byte, and set `ui_sec` to the time that was asked for. The clock
+becomes correct BY CONSTRUCTION rather than by estimate, and the audio lands
+within the TOC's resolution -- 1% of duration between entries, better with
+interpolation.
+
+That fixes the progress bar and the elapsed clock too, not only lyrics.
+
+Rough cost ~280 bytes (100 of TOC in BSS, the rest parse and interpolation)
+against 256 free at the time of writing. The honest way to fund it is lever 1
+under Memory and speed -- `-Os` on `load_track`, measured at 3-5 KB -- rather
+than shaving the lyrics buffers, which are already sized to the real files.
+
+Nothing can help the two files with no header at all: with no frame count and
+no TOC there is no constant to read, and `meas_rate` is all that exists.
+
 ## Headerless VBR still estimates the total time — dropped from the README
 
 Removed from Known limitations 2026-08-12 as too narrow to be worth a user's
@@ -579,6 +632,20 @@ trigger the defect, and changing the load path for a reason that is not present
 is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
+
+## Sequencing after 1.5.0 — decided 2026-09-15
+
+1. **1.6.0: the SDRAM migration** (see "Correction to the record: SDRAM is
+   ALREADY in use" under Memory and speed). It is the space fix that several
+   entries below are queued behind.
+2. **Then lyrics.** Built as a meter and pulled from 1.5.0 before release, to
+   keep 1.5.0 small and because it is one of the space-hungry features the
+   migration exists for. The work is parked, pushed, on **`feature/lyrics`**
+   (0c247e5): parser, `VIZ_LYRICS` meter, slot 4, slider widened to 12, and
+   `tools/host/lrc_check.py`. One fix on it is still unconfirmed on hardware --
+   lyrics appearing on a track change without a stop/start. Rebase it onto the
+   migration rather than merging it as it stands; its buffers are sized for
+   BSS, not SDRAM.
 
 ## Progressive JPEG covers are silently skipped — user report 2026-08-13
 
@@ -1750,6 +1817,9 @@ seamless export is wanted after all does `0184` come back into the picture,
 with the safeguards listed above.
 
 ## Lyrics — requested 2026-09-10
+
+**Parked on `feature/lyrics`, scheduled after the 1.6.0 SDRAM migration** --
+see Sequencing at the top of Enhancements.
 
 Fits this core better than most features on the list: the screen is otherwise
 idle during playback, the player already knows the elapsed second, and people
