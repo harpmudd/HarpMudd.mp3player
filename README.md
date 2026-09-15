@@ -19,7 +19,9 @@ Pocket's SD card, merging with what's already there. Then drop your `.mp3` and
 
 They can live in subfolders under that path — an `Artist/Album` layout works
 without rearranging. `mp3player.rom` is the firmware and has to stay in that
-folder — the core won't start without it.
+folder — the core won't start without it. `mp3font.bin` sits beside it and
+carries the Japanese and accented characters; without it those titles fall back
+to `?`, and everything else still works.
 
 ## Playing
 
@@ -65,6 +67,18 @@ records no position at all — so for an audiobook, use a playlist; a one-line
 The album art panel and screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
+
+## Language and characters
+
+Titles, artists and filenames display in **Japanese** — kanji, hiragana and
+katakana — as well as Chinese characters, accented Latin (Édith, Björk,
+Motörhead), Greek, Cyrillic and symbols like ♪ and ★.
+
+Tags are read as UTF-8 or UTF-16, whichever the file uses, and FLAC tags are
+always UTF-8. Filenames work too, so an untagged file still reads as itself.
+
+This comes from `mp3font.bin`, which the core loads into memory at startup. See
+[Known limitations](#known-limitations) for what is not covered.
 
 ## What it shows
 
@@ -262,6 +276,13 @@ framework bugs that had to be found first — is in
   that loads next launch, and resume won't follow it. A `playlists.m3u` that
   exists but doesn't list that playlist has the same effect as none at all. See
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
+- **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
+  UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
+  carry, and converting it needs a lookup table the firmware has no room for.
+  Re-saving the tags as UTF-8 fixes it.
+- **Korean, Thai and emoji show as `?`.** The font covers Japanese and Chinese
+  characters, kana, Latin, Greek, Cyrillic and common symbols; the rest was
+  left out to keep the file small.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
@@ -292,6 +313,12 @@ from that source file's own copyright header.
   ([rsms](https://github.com/rsms)) — SIL Open Font License 1.1, bundled at
   [`third_party/font/OFL.txt`](third_party/font/OFL.txt). The font ROM the core
   draws with is generated from it and is a derivative under the same license.
+- **[GNU Unifont](https://unifoundry.com/unifont/)** — Roman Czyborra, Paul
+  Hardy and the Unifont contributors, dual licensed under the SIL Open Font
+  License 1.1 and the GNU GPL 2+ with the font embedding exception, bundled at
+  [`third_party/unifont/OFL-1.1.txt`](third_party/unifont/OFL-1.1.txt). Its
+  Japanese variant supplies the kana, CJK ideographs and symbols in
+  `mp3font.bin`, which is a derivative under the same license.
 - **Core, firmware, UI and integration** —
   [HarpMudd](https://github.com/harpmudd).
 

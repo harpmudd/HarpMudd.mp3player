@@ -448,14 +448,41 @@ module mp3_fb (
         endcase
     endfunction
 
-    wire [4:0] cov16 = cov_weight(cov);
-    wire [4:0] inv16 = 5'd16 - cov16;
+    // ---- compose pipeline --------------------------------------------------
+    // Two registered stages between the coverage row and glyphbuf. Done in one
+    // cycle -- select a nibble out of 64 bits, the weight table, three
+    // multiply-adds, then a block RAM's input setup -- this was the design's
+    // tightest path at +1.029 ns in v1.2.0, and the extended-font logic tipped
+    // it to -1.888. Splitting it costs no state: the last pixels of a row land
+    // in glyphbuf up to two cycles after COMPOSE hands back to IDLE, and the
+    // streaming write that reads them is many cycles behind that.
+    //   S1: nibble select + weight   (registered with its column)
+    //   S2: blend                    (registered, then written)
+    reg  [4:0]  cov16_s1;
+    reg  [6:0]  ox_s1, ox_s2;
+    reg         v_s1 = 1'b0, v_s2 = 1'b0;
+    reg  [15:0] px_s2;
+    // COPY's row read writes glyphbuf through a register too, so the RAM has
+    // exactly one write port.
+    reg         cp_we = 1'b0;
+    reg  [6:0]  cp_wa;
+    reg  [15:0] cp_wd;
 
-    wire [10:0] mix_r = char_fg[15:11] * cov16 + char_bg[15:11] * inv16;
-    wire [11:0] mix_g = char_fg[10:5]  * cov16 + char_bg[10:5]  * inv16;
-    wire [10:0] mix_b = char_fg[4:0]   * cov16 + char_bg[4:0]   * inv16;
+    wire [4:0] inv16 = 5'd16 - cov16_s1;
+
+    wire [10:0] mix_r = char_fg[15:11] * cov16_s1 + char_bg[15:11] * inv16;
+    wire [11:0] mix_g = char_fg[10:5]  * cov16_s1 + char_bg[10:5]  * inv16;
+    wire [10:0] mix_b = char_fg[4:0]   * cov16_s1 + char_bg[4:0]   * inv16;
 
     wire [15:0] px_color = {mix_r[8:4], mix_g[9:4], mix_b[8:4]};
+
+    always @(posedge clk_sdram) begin
+        v_s2  <= v_s1;
+        ox_s2 <= ox_s1;
+        px_s2 <= px_color;
+        if (v_s2)       glyphbuf[ox_s2]  <= px_s2;
+        else if (cp_we) glyphbuf[cp_wa]  <= cp_wd;
+    end
 
     // Dispatch guards: a new command may only be popped once the previous one
     // has fully retired, and any SDRAM work needs the controller idle.
@@ -468,6 +495,8 @@ module mp3_fb (
         p0_end_burst_req <= 1'b0;
         p0_wr_stream     <= 1'b0;
         lb_we            <= 1'b0;
+        v_s1             <= 1'b0;
+        cp_we            <= 1'b0;
 
         fill_req_s <= {fill_req_s[1:0], fill_req_tgl};
         if (fill_req_edge) begin
@@ -681,7 +710,9 @@ module mp3_fb (
                 // ------------------------------------------- copy row read --
                 A_COPYRD: begin
                     if (p0_data_available) begin
-                        glyphbuf[copy_cnt[6:0]] <= p0_q;
+                        cp_we <= 1'b1;
+                        cp_wa <= copy_cnt[6:0];
+                        cp_wd <= p0_q;
                         if (copy_cnt == char_w[6:0] - 7'd1) begin
                             p0_end_burst_req <= 1'b1;
                             char_row_ready   <= 1'b1;
@@ -740,7 +771,9 @@ module mp3_fb (
                 // One output pixel per cycle into glyphbuf. Worst case 64
                 // cycles for a 4x glyph -- 1.5% of a scanline's slack.
                 A_COMPOSE: begin
-                    glyphbuf[ox[5:0]] <= px_color;
+                    cov16_s1 <= cov_weight(cov);
+                    ox_s1    <= ox;
+                    v_s1     <= 1'b1;
                     if (ox == char_w - 7'd1) begin
                         char_row_ready <= 1'b1;
                         astate <= A_IDLE;

@@ -26,6 +26,8 @@
 #include <stdint.h>
 #include "mp3dec.h"
 #include "font_metrics.h"
+#include "font_ext.h"
+#include "utf8.h"
 /* Up here, not down beside the FLAC glue where it used to sit. The diagnostic
  * row is ~800 lines ABOVE that point and reads flac_order, and C would have
  * taken the undeclared name as an error -- the same ordering trap that once
@@ -188,29 +190,54 @@ static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
-/* The one place a byte becomes a glyph index. The atlas holds 0x20..0x7E and
- * nothing else, so everything outside that is a space.
+/* Set at boot once APF's slot table shows mp3font.bin loaded at the size this
+ * firmware was built against. Without it every non-ASCII character is '?'. */
+static uint8_t fext_ok;
+
+#define FB_EXT  0x80000000u     /* fb_resolve(): result is an extended index */
+
+/* The one place a CODE POINT becomes a glyph, for measuring and drawing alike.
  *
- * This exists because the width path and the DRAW path disagreed. fb_adv()
+ * It exists because the width path and the draw path once disagreed: fb_adv()
  * substituted a space for an out-of-range byte while fb_char() masked with
- * 0x7F and sent the result to the engine -- so the first UTF-8 byte of an
- * accented or symbol character (0xE2, say) was drawn as 'b' while being
- * measured as a space. Wrong glyphs AND overlapping spacing, from one title
- * containing a character the font cannot show. Both now ask this. */
-static uint32_t fb_glyph(char ch)
+ * 0x7F -- so a title containing one character the font could not show drew
+ * wrong glyphs AND overlapped them. Both still ask the same function.
+ *
+ * ASCII comes from the ROM. Anything the extended font covers returns its
+ * engine index with FB_EXT set; everything else is '?'. Controls stay spaces,
+ * as they always were. *adv is the advance in source pixels. */
+static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
 {
-    uint32_t c = (unsigned char)ch;
-    return (c < FONT_FIRST || c > FONT_LAST) ? (uint32_t)' ' : c;
+    if (cp >= FONT_FIRST && cp <= FONT_LAST) { *adv = font_adv[cp - FONT_FIRST]; return cp; }
+    if (cp < 0x80u) { *adv = font_adv[0]; return ' '; }
+    if (fext_ok) {
+        for (uint32_t r = 0; r < FEXT_NRANGES; r++) {
+            uint32_t d = cp - fext_ranges[r].first;
+            if (d >= fext_ranges[r].count) continue;
+            uint32_t n = fext_ranges[r].base + d;
+            if (n & FEXT_1BPP) {
+                uint32_t g = n & ~FEXT_1BPP;
+                *adv = (g >= FEXT_N1_MIXED ||
+                        ((fext_wide1[g >> 3] >> (g & 7u)) & 1u)) ? 16u : 8u;
+            } else {
+                *adv = ((fext_adv4[n >> 1] >> ((n & 1u) << 2)) & 0xFu) + 1u;
+            }
+            return n | FB_EXT;
+        }
+    }
+    *adv = font_adv['?' - FONT_FIRST];
+    return '?';
 }
 
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
  * transparent blit. */
-static uint32_t fb_adv(char ch, uint32_t sx)
+static uint32_t fb_adv(uint32_t cp, uint32_t sx)
 {
-    unsigned char c = (unsigned char)ch;
-    return ((uint32_t)font_adv[fb_glyph(c) - FONT_FIRST] * ts_half[sx]) / 2u;
+    uint32_t a;
+    fb_resolve(cp, &a);
+    return (a * ts_half[sx]) / 2u;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -315,14 +342,20 @@ static void fb_copy(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
     }
 }
 
-static void fb_char(uint32_t x, uint32_t y, char ch, uint32_t sx, uint32_t sy)
+/* Draws a glyph fb_resolve() already chose. An extended one travels as CHAR
+ * 0x7F with its index in the size register, which a CHAR otherwise ignores:
+ * bit 17 region, bits 16..0 glyph, split 9/9 across the w and h fields the
+ * engine reads it back from. Safe to clobber -- fb_rect and fb_copy_span both
+ * set the size register on every call. */
+static void fb_glyph_draw(uint32_t x, uint32_t y, uint32_t g, uint32_t sx, uint32_t sy)
 {
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
-    REG(R_FB_GO)   = FB_OP_CHAR
-                   | ((fb_glyph(ch) & 0x7Fu) << 3)
-                   | (sx << 10)
-                   | (sy << 12);
+    if (g & FB_EXT) {
+        REG(R_FB_SIZE) = ((g & 0x1FFu) << 9) | ((g >> 9) & 0x1FFu);
+        g = FEXT_GLYPH;
+    }
+    REG(R_FB_GO) = FB_OP_CHAR | (g << 3) | (sx << 10) | (sy << 12);
 }
 
 /* Stage 4b bring-up proof, isolated from playback deliberately: this is the
@@ -357,7 +390,7 @@ static void fb_test_pattern(void)
 static uint32_t fb_text_width(const char *s, uint32_t sx)
 {
     uint32_t w = 0;
-    while (*s) w += fb_adv(*s++, sx);
+    while (*s) w += fb_adv(u8_next(&s), sx);
     return w;
 }
 
@@ -388,12 +421,12 @@ static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
     uint32_t limit = x + max_w;
     if (paint_r > FB_W) paint_r = FB_W;
     while (*s) {
-        uint32_t a = fb_adv(*s, sx);
+        uint32_t a, g = fb_resolve(u8_next(&s), &a);
+        a = (a * ts_half[sx]) / 2u;
         if (x + a > limit)   break;        /* out of layout budget */
         if (x + cell > paint_r) break;     /* would paint past the box */
-        fb_char(x, y, *s, sx, sy);
+        fb_glyph_draw(x, y, g, sx, sy);
         x += a;
-        s++;
     }
     return x;
 }
@@ -410,12 +443,12 @@ static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
     uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
     uint32_t limit = x + max_w;
     while (*s) {
-        uint32_t a = fb_adv(*s, sx);
+        uint32_t a, g = fb_resolve(u8_next(&s), &a);
+        a = (a * ts_half[sx]) / 2u;
         if (x + a > limit) break;          /* out of layout budget */
         if (x + cell > FB_W) break;        /* would paint off-screen */
-        fb_char(x, y, *s, sx, sy);
+        fb_glyph_draw(x, y, g, sx, sy);
         x += a;
-        s++;
     }
     return x;
 }
@@ -574,9 +607,9 @@ enum { FLR_NONE = 0, FLR_RATE, FLR_DEPTH, FLR_CHANS, FLR_BLOCK };
 static uint8_t  fl_reject_kind;
 static uint32_t fl_reject_val;
 
-static char track_title[48];
-static char track_artist[48];
-static char track_album[48];
+static char track_title[96];
+static char track_artist[96];
+static char track_album[96];
 static char track_year[8];
 static char track_trk[8];
 
@@ -761,7 +794,7 @@ static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
 static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
-static uint16_t pl_ui_mq_off;      /* chars scrolled off the selected row     */
+static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
 static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
 static uint32_t pl_ui_mq_next;     /* when it steps again                     */
 static uint16_t pl_ui_mq_sel = 0xFFFFu;  /* row the scroll belongs to         */
@@ -1078,10 +1111,10 @@ static uint32_t slot_size;
  * staleness detectable: `prev_head`/`prev_slot_size` used to be overwritten by
  * the (possibly stale) load itself, which destroyed the very reference the
  * later probes needed to compare against. */
-static char     stale_ref_title[48];   /* title of the track being left */
+static char     stale_ref_title[96];   /* title of the track being left */
 static uint32_t stale_ref_size;        /* and the size APF reported for it */
-static char     last_title[48];        /* title the current load settled on */
-static char     track_file[64];        /* filename APF reports for the slot  */
+static char     last_title[96];        /* title the current load settled on */
+static char     track_file[160];        /* filename APF reports for the slot  */
 
 /* A file identity that SURVIVES A POWER CYCLE, which cur_file_id does not.
  *
@@ -1362,7 +1395,7 @@ static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
  * 16 bytes, because every use then needs masking that a word load does not.
  * BSS saved, text spent, net loss. */
 typedef struct {
-    char     text[64];
+    char     text[96];
     uint32_t y, scale, on, pos, next;
     uint32_t endpos;      /* furthest offset worth scrolling to -- see init */
     uint32_t back;        /* 1 = returning to the start */
@@ -2516,6 +2549,7 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
 {
     uint32_t i = 0;
     while (text[i] && i < sizeof(m->text) - 1u) { m->text[i] = text[i]; i++; }
+    i = u8_trim(m->text, i);
     m->text[i] = 0;
     m->y     = y;
     m->scale = scale;
@@ -2534,8 +2568,14 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
      * against a 352 budget -- inside it by four -- yet paints to 390 against a
      * right edge of 380. "Alabama Getaway" is 312 and paints to 342, which
      * genuinely fits and correctly stays still. */
+    /* Offsets below are BYTES but every step is a whole CHARACTER: a kanji is
+     * three bytes, and stopping inside one draws a '?' at the window's edge. */
     uint32_t adv_w = fb_text_width(m->text, scale);
-    uint32_t last  = i ? fb_adv(m->text[i - 1u], scale) : 0u;
+    uint32_t last  = 0u;
+    if (i) {
+        const char *lp = m->text + u8_prev(m->text, i);
+        last = fb_adv(u8_next(&lp), scale);
+    }
     uint32_t painted = (adv_w > last) ? (adv_w - last + FB_CELL(scale))
                                       : FB_CELL(scale);
     m->on = (adv_w > ui_text_w) ||
@@ -2587,9 +2627,13 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
     }
 
     uint32_t w = 0, k = i;
-    while (k && w + fb_adv(m->text[k - 1u], scale) <= budget) {
-        k--;
-        w += fb_adv(m->text[k], scale);
+    while (k) {
+        uint32_t j = u8_prev(m->text, k);
+        const char *cp = m->text + j;
+        uint32_t a = fb_adv(u8_next(&cp), scale);
+        if (w + a > budget) break;
+        w += a;
+        k = j;
     }
     m->endpos = k;
 }
@@ -2606,10 +2650,10 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
      * most identifying part of a title, and the tail is the part you were
      * waiting for, so both deserve a beat of stillness rather than a turn. */
     if (m->back) {
-        if (m->pos) m->pos--;
+        if (m->pos) m->pos = u8_prev(m->text, m->pos);
         if (!m->pos) { m->back = 0; m->next = cycles() + MQ_HOLD; }
     } else {
-        if (m->pos < m->endpos) m->pos++;
+        if (m->pos < m->endpos) m->pos = u8_skip(m->text, m->pos);
         if (m->pos >= m->endpos) { m->back = 1; m->next = cycles() + MQ_HOLD; }
     }
 
@@ -2646,7 +2690,7 @@ static void ui_draw_chrome(void)
      * words -- a tag encoding the parser declines to handle is our limitation
      * to state in the README, not a caption for someone's music. The filename
      * is the better answer there too, and those files always have one. */
-    char namebuf[48];
+    char namebuf[96];
     const char *title = track_title;
     if (!track_title[0]) {
         /* Last path component, extension dropped: the slot holds a full path
@@ -2664,7 +2708,7 @@ static void ui_draw_chrome(void)
          * such as "Blur - 13.mp3" must not lose its number, and a leading dot
          * is not an extension at all. */
         if (dot && n - dot <= 5u) n = dot;
-        namebuf[n] = 0;
+        namebuf[u8_trim(namebuf, n)] = 0;
 
         /* No tag and no name means APF told us nothing about the slot. Rare,
          * and still not the user's problem to diagnose. */
@@ -2738,14 +2782,16 @@ static void ui_draw_chrome(void)
      * reconnaissance is finished; the capability it demonstrated is what
      * in-core track selection will be built on. */
     if (track_album[0] || track_year[0] || track_trk[0]) {
-        char b[64], *q = b;
+        char b[112], *q = b;
         if (track_trk[0]) {
             const char *t = track_trk;
             while (*t) *q++ = *t++;
             *q++ = ' '; *q++ = '-'; *q++ = ' ';
         }
         const char *a = track_album;
+        char *seg = q;
         while (*a && q < b + sizeof(b) - 10) *q++ = *a++;
+        q = seg + u8_trim(seg, (uint32_t)(q - seg));   /* no half a character */
         if (track_album[0] && track_year[0]) { *q++ = ' '; *q++ = '-'; *q++ = ' '; }
         const char *yr = track_year;
         while (*yr && q < b + sizeof(b) - 1) *q++ = *yr++;
@@ -3748,7 +3794,7 @@ static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
         out[n++] = nm[i];
     }
     if (dot && n - dot <= 5u) n = dot;      /* ".mp3"/".flac", not "Blur - 13" */
-    out[n] = 0;
+    out[u8_trim(out, n)] = 0;
 }
 
 /* Keeps the selection on screen after any move. */
@@ -3790,7 +3836,7 @@ static void pl_ui_row(uint32_t i)
     else
         fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
 
-    char nm[64];
+    char nm[96];
     pl_ui_label(pos, nm, sizeof(nm));
 
     /* The selected row scrolls when it does not fit. Steps by whole characters
@@ -5859,6 +5905,7 @@ ui_tail:
 
 #define UNCACHED    0xC0000000u
 #define MP3_SLOT_ID 2u
+#define FONT_SLOT_ID 5u    /* mp3font.bin -- loaded straight into SDRAM by RTL */
 #define FW_SLOT_ID  1u   /* touched only to flush APF's slot cache */
 
 /* MP3 ring buffer: an APF DMA target, so firmware must read it through the
@@ -6949,8 +6996,30 @@ static int slot_changed(void)
     return id && cur_file_id && id != cur_file_id;
 }
 
+/* End of a filename run starting at i.
+ *
+ * Printable ASCII, plus COMPLETE UTF-8 sequences so a Japanese filename is one
+ * run rather than several ASCII fragments. Deliberately strict about the high
+ * bytes: the run's offset is what the playlist writes a new name over, so a
+ * stray 0x80+ byte belonging to a neighbouring field must end the run rather
+ * than extend it. */
+static uint32_t name_run_end(const uint8_t *b, uint32_t i, uint32_t n)
+{
+    while (i < n) {
+        uint32_t c = b[i], k, j = 1u;
+        if (c >= 0x20u && c < 0x7Fu) { i++; continue; }
+        k = (c >= 0xC2u && c <= 0xDFu) ? 1u : (c >= 0xE0u && c <= 0xEFu) ? 2u
+          : (c >= 0xF0u && c <= 0xF4u) ? 3u : 0u;
+        if (!k || i + k >= n) break;
+        while (j <= k && (b[i + j] & 0xC0u) == 0x80u) j++;
+        if (j <= k) break;
+        i += k + 1u;
+    }
+    return i;
+}
+
 /* Pull the filename out of the 0190 response WITHOUT knowing its layout: the
- * longest run of printable ASCII in the struct IS the name. */
+ * longest run of filename text in the struct IS the name. */
 static void slot_filename(char *out, uint32_t out_size)
 {
     uint8_t raw[DT_WORDS * 4u];
@@ -6967,7 +7036,7 @@ static void slot_filename(char *out, uint32_t out_size)
     uint32_t best = 0, best_len = 0, i = 0;
     while (i < sizeof(raw)) {
         uint32_t start = i;
-        while (i < sizeof(raw) && raw[i] >= 0x20u && raw[i] < 0x7Fu) i++;
+        i = name_run_end(raw, i, sizeof(raw));
         if (i - start > best_len) { best_len = i - start; best = start; }
         i++;
     }
@@ -6975,7 +7044,7 @@ static void slot_filename(char *out, uint32_t out_size)
     uint32_t n = best_len;
     if (n > out_size - 1u) n = out_size - 1u;
     for (uint32_t k = 0; k < n; k++) out[k] = (char)raw[best + k];
-    out[n] = 0;
+    out[u8_trim(out, n)] = 0;
 }
 
 /* Force APF to forget what it knows about the MP3 slot. Its fragment cache is
@@ -7741,20 +7810,74 @@ static uint32_t id3_len(const uint8_t *b)
             ((uint32_t)(b[9] & 0x7Fu)));
 }
 
-/* Extracts a text frame (TIT2, TPE2, TALB, ...) from a tag already in memory.
- * Scoped deliberately: only what the caller loaded, and only ISO-8859-1/UTF-8
- * -- UTF-16 is reported as its own case rather than silently garbled. Handles
- * v2.3 (plain big-endian size) and v2.4 (syncsafe). */
-/* Decode one text frame BODY -- the encoding byte and the bytes after it -- into
- * out. Shared by the in-memory parser and the card walk so the two cannot drift
- * on what a given encoding means.
+/* Windows-1252's 0x80..0x9F, which is what "Latin-1" tags really contain: the
+ * smart quotes and dashes a tagger types sit here, where true ISO-8859-1 has
+ * only control codes. 0 = unassigned. */
+static const uint16_t cp1252_hi[32] = {
+    0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017D, 0,
+    0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+};
+
+/* Is this whole run valid UTF-8? Pure ASCII is. */
+static int u8_valid(const uint8_t *b, uint32_t n)
+{
+    uint32_t i = 0;
+    while (i < n && b[i]) {
+        uint32_t c = b[i], k;
+        if (c < 0x80u) { i++; continue; }
+        k = (c >= 0xC2u && c <= 0xDFu) ? 1u : (c >= 0xE0u && c <= 0xEFu) ? 2u
+          : (c >= 0xF0u && c <= 0xF4u) ? 3u : 0u;
+        if (!k || i + k >= n) return 0;
+        for (uint32_t j = 1; j <= k; j++)
+            if ((b[i + j] & 0xC0u) != 0x80u) return 0;
+        i += k + 1u;
+    }
+    return 1;
+}
+
+/* Single-byte tag text into UTF-8: ID3v2 encodings 0 and 3, and ID3v1.
  *
- * UTF-16 (encodings 1 and 2) used to be refused outright, surfacing as its own
- * error text. That is honest but it is still a track with no title, and UTF-16
- * is what several taggers emit by default -- one of the ten tracks on the test
- * card has every text frame in it. The font atlas is ASCII 0x20..0x7E, so
- * anything above Latin-1 could not be drawn regardless; a code unit that does
- * not fit becomes '?', which loses an accent but keeps the title. */
+ * Encoding 0 is supposed to be ISO-8859-1, but taggers write UTF-8 into it all
+ * the time, and a real Latin-1 string is almost never valid UTF-8 by accident.
+ * So a run that validates is taken as UTF-8, and anything else is read as
+ * Windows-1252. Shift-JIS, which older Japanese rips store here, is neither
+ * and will still come out wrong -- decoding it needs a table this image has
+ * no room for. */
+static uint32_t txt8_to_utf8(const uint8_t *b, uint32_t n, char *out, uint32_t cap)
+{
+    int      utf8 = u8_valid(b, n);
+    uint32_t i = 0, o = 0;
+    while (i < n && b[i]) {
+        uint32_t c = b[i], k = 1u, cp = c;
+        if (c >= 0x80u) {
+            if (utf8) {
+                k = (c >= 0xF0u) ? 4u : (c >= 0xE0u) ? 3u : 2u;
+                if (o + k >= cap) break;
+                for (uint32_t j = 0; j < k; j++) out[o++] = (char)b[i + j];
+                i += k;
+                continue;
+            }
+            if (c < 0xA0u) cp = cp1252_hi[c - 0x80u] ? cp1252_hi[c - 0x80u] : '?';
+        }
+        uint32_t o2 = u8_put(out, o, cap, cp);
+        if (o2 == o) break;
+        o = o2;
+        i += k;
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* Decode one text frame BODY -- the encoding byte and the bytes after it -- into
+ * out, as UTF-8. Shared by the in-memory parser and the card walk so the two
+ * cannot drift on what a given encoding means. Handles v2.3 and v2.4 alike;
+ * the frame size has already been decoded by the caller.
+ *
+ * UTF-16 (encodings 1 and 2) used to become '?' above Latin-1 because the font
+ * was ASCII. It is converted now; a surrogate pair is outside the font's plane
+ * and stays a single '?'. */
 static int id3_text_body(const uint8_t *b, uint32_t fsize, char *out,
                          uint32_t out_size)
 {
@@ -7770,22 +7893,23 @@ static int id3_text_body(const uint8_t *b, uint32_t fsize, char *out,
             if (b[1] == 0xFFu && b[2] == 0xFEu)      { be = 0; s = 3u; }
             else if (b[1] == 0xFEu && b[2] == 0xFFu) { be = 1; s = 3u; }
         }
-        while (s + 1u < fsize && i + 1u < out_size) {
+        while (s + 1u < fsize) {
             uint32_t u = be ? (((uint32_t)b[s] << 8) | b[s + 1u])
                             : (((uint32_t)b[s + 1u] << 8) | b[s]);
             if (!u) break;
-            out[i++] = (u < 0x100u) ? (char)u : '?';
             s += 2u;
+            if (u >= 0xD800u && u < 0xE000u) {
+                if (u < 0xDC00u) s += 2u;       /* drop the low half with it */
+                u = '?';
+            }
+            uint32_t i2 = u8_put(out, i, out_size, u);
+            if (i2 == i) break;
+            i = i2;
         }
+        out[i] = 0;
     } else {
-        if (n > out_size - 1u) n = out_size - 1u;
-        for (i = 0; i < n; i++) {
-            uint8_t c = b[1u + i];
-            if (c == 0) break;
-            out[i] = (char)c;
-        }
+        i = txt8_to_utf8(b + 1u, n, out, out_size);
     }
-    out[i] = 0;
     return i ? ID3_OK : ID3_NO_FRAME;
 }
 
@@ -7864,9 +7988,7 @@ static void id3v1_read(void)
         uint32_t n = f[k].len;
         while (n && (tagbuf[f[k].off + n - 1u] == ' ' ||
                      tagbuf[f[k].off + n - 1u] == 0)) n--;
-        if (n > cap[k] - 1u) n = cap[k] - 1u;
-        for (uint32_t i = 0; i < n; i++) dst[k][i] = (char)tagbuf[f[k].off + i];
-        dst[k][n] = 0;
+        txt8_to_utf8(tagbuf + f[k].off, n, dst[k], cap[k]);
     }
 
     if (!track_year[0]) {
@@ -8040,7 +8162,7 @@ static int read_track_head(void)
 
     int attempt = 0, have_prev = 0;
     uint32_t skip = 0, prev_skip = 0;
-    char prev_try[48];
+    char prev_try[96];
     /* PROVE THE SLOT HAS SETTLED before reading anything we will act on.
      *
      * After a 0192 the slot does not switch instantly, and the old design
@@ -8803,6 +8925,19 @@ int main(void)
      * delivered any controller state, so the read was always 0. The capture
      * has to happen now; the viewing does not. Select+A shows it. */
     dt_snapshot();
+
+    /* Is the extended font in SDRAM? APF lists every slot as an {id, size} pair
+     * at the START of that same table (measured -- see core_game.vh), and the
+     * snapshot above caught it before anything of ours wrote there. The RTL
+     * loads the file; the CPU only needs to know whether to send glyph indexes
+     * or fall back to '?'.
+     *
+     * EXACT size, not merely present: a font built by a different revision of
+     * the generator would put glyphs where this firmware does not expect them,
+     * and the wrong character is worse than a '?'. */
+    for (uint32_t w = 0; w + 1u < DT_RESP_W; w += 2u)
+        if (dt_read(w) == FONT_SLOT_ID && dt_read(w + 1u) == FEXT_BYTES)
+            fext_ok = 1u;
 
     /* Settings FIRST, so the splash is drawn in the accent the user actually
      * chose. It only reads a slot -- nothing on screen depends on it -- and
@@ -9954,7 +10089,7 @@ int main(void)
                 pl_ui_mq_back = 0;
                 pl_ui_mq_next = cycles() + MQ_HOLD;     /* hold at the start */
             } else if ((int32_t)(cycles() - pl_ui_mq_next) >= 0) {
-                char nm[64];
+                char nm[96];
                 pl_ui_label(pl_ui_sel, nm, sizeof(nm));
                 if (fb_text_width(nm, TS_1X) > PL_UI_W - 40u) {
                     pl_ui_mq_next = cycles() + MQ_STEP;
@@ -9964,14 +10099,15 @@ int main(void)
                      * length, so the row went BLANK for a step before it
                      * snapped back. This row already re-measures each step, so
                      * the tail test is free here. */
+                    /* A character at a time, not a byte: see ui_marq_init. */
                     if (pl_ui_mq_back) {
-                        if (pl_ui_mq_off) pl_ui_mq_off--;
+                        if (pl_ui_mq_off) pl_ui_mq_off = u8_prev(nm, pl_ui_mq_off);
                         if (!pl_ui_mq_off) {
                             pl_ui_mq_back = 0;
                             pl_ui_mq_next = cycles() + MQ_HOLD;
                         }
                     } else {
-                        pl_ui_mq_off++;
+                        pl_ui_mq_off = u8_skip(nm, pl_ui_mq_off);
                         if (fb_text_width(nm + pl_ui_mq_off, TS_1X)
                                 <= PL_UI_W - 40u) {
                             pl_ui_mq_back = 1;

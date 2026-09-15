@@ -124,7 +124,7 @@ static uint32_t pl_template(uint32_t slot, uint8_t *buf, uint32_t *name_at)
     uint32_t best = 0, best_len = 0, i = 0;
     while (i < DT_WORDS * 4u) {
         uint32_t start = i;
-        while (i < DT_WORDS * 4u && buf[i] >= 0x20u && buf[i] < 0x7Fu) i++;
+        i = name_run_end(buf, i, DT_WORDS * 4u);   /* UTF-8 aware; see player.c */
         if (i - start > best_len) { best_len = i - start; best = start; }
         i++;
     }
@@ -476,6 +476,11 @@ static void pl_parse(uint32_t len)
 {
     pl_count = 0;
     uint32_t i = 0;
+    /* A UTF-8 byte order mark, which Windows editors put at the front of a
+     * saved .m3u. Left in place it rides on the FIRST entry's name -- drawn as
+     * a stray glyph, and handed to APF as a filename that does not exist. */
+    if (len >= 3u && (uint8_t)pl_text[0] == 0xEFu && (uint8_t)pl_text[1] == 0xBBu
+                  && (uint8_t)pl_text[2] == 0xBFu) i = 3u;
     while (i < len && pl_count < PL_MAX) {
         while (i < len && (pl_text[i] == '\n' || pl_text[i] == '\r')) i++;
         if (i >= len) break;

@@ -633,7 +633,78 @@ is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
 
+## Japanese and accented text — BUILT for 1.5.0, 2026-09-15
+
+Requested by a user: Japanese tags and filenames showed as blanks. The font ROM
+in the bitstream is ASCII 0x20..0x7E and BRAM is at 97%, so the answer could
+never be "add glyphs to the ROM".
+
+**Where the glyphs live.** `mp3font.bin`, ~833 KB, its own data slot at bridge
+0x10000000. A second `data_loader` hands its words to `mp3_fb.sv` already in
+clk_sdram; the engine writes them to SDRAM at word 0x100000, clear of the
+framebuffer's ~184K words. The CPU never reads the font -- it sends a glyph
+number and the engine fetches the rows. Two regions, because two sources want
+two formats: 1024 glyphs of 4bpp Inter (Latin-1, Latin Ext-A, Greek, Cyrillic,
+punctuation, currency, letterlike -- the same renderer as the ROM, so an
+accented letter matches the plain one beside it), then 1bpp Unifont JP (kana,
+20,992 CJK ideographs, symbols, full/half width).
+
+**How a glyph is asked for.** CHAR with glyph 0x7F, index in the size register
+a CHAR otherwise ignores: bit 17 region, bits 16..0 glyph number. No wider FIFO
+entry, no SoC change -- the 18 bits were already there and unused.
+
+**Accented capitals do not fit a 16-row cell.** Baseline is row 12 and caps
+start at row 1, so an acute lands at rows -2..-5 and was simply cut off: E-acute
+drew as a plain E. Rendered candidates side by side: shifting the glyph down
+moves the baseline visibly, squeezing only the accent shrinks it to one row and
+it vanishes. Squashing the ink above the baseline into the cell keeps the accent
+and the baseline both, at a capital a pixel or two short, which does not read at
+16 px. 112 glyphs are touched; the rest are untouched.
+
+**Two bugs simulation caught, before any hardware.**
+
+1. *A CHAR started during the font load did not finish until the load did.*
+   Words arrive continuously, so "anything queued" was true nearly every time
+   the dispatcher looked, and composing a glyph row sits below the font branch.
+   Font bursts now wait for 64 queued words whenever drawing is pending.
+2. *Timing.* The compose path -- select a nibble from 64 bits, the weight
+   table, three multiply-adds, then block RAM setup -- was the design's tightest
+   at +1.029 ns (v1.2.0) and the extra logic tipped it to **-1.888 ns**. Split
+   into two registered stages. The last pixels of a row land up to two cycles
+   after COMPOSE returns to IDLE; the streaming write that reads them is many
+   cycles behind that.
+
+**Firmware: every string is UTF-8 now.** Decoders convert at the door and the
+draw primitives walk characters, not bytes. `fb_resolve()` is the one place a
+code point becomes a glyph, for measuring and drawing alike. Watch for:
+
+- Marquees step by CHARACTER (`u8_prev`/`u8_skip`); a byte step lands inside a
+  kanji and draws '?'.
+- Every fixed buffer trims with `u8_trim` so it cannot end mid-character.
+- ID3 encoding 0 is UTF-8 if the bytes validate, else Windows-1252 -- taggers
+  write both, and real Latin-1 is almost never valid UTF-8 by accident.
+- **Filenames were extracted as "the longest run of printable ASCII"**, which a
+  Japanese filename splits. The run now takes complete UTF-8 sequences too, but
+  stays strict about stray high bytes: the playlist writes a new name over that
+  same offset, so a run that swallows a neighbouring field breaks opening files.
+- `.m3u` files keep a UTF-8 BOM, which rode on the first entry's name.
+
+**Verified before hardware:** `sim/tb_mp3_fb.v` loads 80K words of the real file
+at 12x bridge speed with drawing and scanout interleaved (byte-identical, no
+overflow, kana pixel-exact at 1x and 2x); `tools/host/text_check.py` runs the
+EXTRACTED decoders and `fb_resolve` under rv32sim against Python's own UTF-8,
+including that each glyph index lands on inked pixels in the file.
+
+**Known gap: Shift-JIS.** Older Japanese rips store it in encoding 0. Detecting
+it is easy; converting it needs a ~14 KB table the image has no room for. In
+the README as a limitation. Korean, Thai and emoji are '?' -- Hangul alone is
+another 358 KB of font and a boot-time cost.
+
 ## Sequencing after 1.5.0 — decided 2026-09-15
+
+(Language support was pulled INTO 1.5.0 after this was written -- it turned out
+to need the draw engine and a font in SDRAM, not the CPU-side SDRAM port the
+migration is about, so it did not have to wait.)
 
 1. **1.6.0: the SDRAM migration** (see "Correction to the record: SDRAM is
    ALREADY in use" under Memory and speed). It is the space fix that several

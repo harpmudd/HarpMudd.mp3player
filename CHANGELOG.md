@@ -4,6 +4,11 @@ What changed in each release, newest first.
 
 ## v1.5.0 — unreleased
 
+- **Japanese text displays.** Kanji, hiragana and katakana in titles, artists
+  and filenames, plus Chinese characters, accented Latin, Greek, Cyrillic and
+  symbols such as ♪ and ★. Tags in UTF-8 and UTF-16 are both read. Needs
+  `mp3font.bin`, which ships alongside the firmware.
+
 - New meter: an animated **cassette**. The hubs turn and coast to a stop when
   you pause, the label carries the playlist's name, and the tape and the shell
   edge react to the music.
