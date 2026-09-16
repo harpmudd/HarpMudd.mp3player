@@ -973,6 +973,36 @@ static uint8_t pl_restore_pending = 1u;
  * completion branch clears it too, for the paths that never get that far. */
 #define PAUSE_LOAD 4u
 static uint8_t  menu_was;         /* the OS menu was open on the last poll      */
+static uint32_t menu_at;          /* cycles() when the OS menu was last open    */
+
+/* The identity backstops run ONLY around menu activity -- never during
+ * ordinary playback.
+ *
+ * A pick can only be MADE in the OS menu, so that is the only time a missed
+ * notification can happen. Both slots are asked outright on the closing edge,
+ * and these periodic checks cover the case where even that is missed: a pick
+ * whose slot switch lands a moment after the menu shuts.
+ *
+ * They used to run every 2-3 s for as long as the core was playing, which was
+ * the wrong trade. Each is a blocking command the decoder waits out, and on a
+ * card that answers slowly that is a stall in the middle of a track -- heard
+ * as a glitch out of nowhere, on any file, unreproducible. The comment on the
+ * playlist poll predicted exactly this ("a tic every three seconds ... one
+ * constant backs it out").
+ *
+ * Nothing is given up in the normal path: the notification still loads
+ * instantly, and the closing edge still asks. What is given up is noticing a
+ * pick that produced NO notification AND no closing edge AND landed more than
+ * 15 s after the menu shut -- at which point picking again, which is what a
+ * user does anyway, is the remedy. */
+#define POLL_NEAR_MENU (CLK_HZ * 15u)   /* how long after the menu shuts */
+
+static int near_menu(void)
+{
+    return (int32_t)(cycles() - menu_at) < (int32_t)POLL_NEAR_MENU;
+}
+
+static int audio_cushion(void);    /* defined below, once RING_SIZE exists */
 static uint32_t pl_poll_at;       /* next periodic slot-3 identity check         */
 static uint8_t  pl_check_req;     /* menu just closed: ask slot 3 what it holds */
 static uint8_t  pl_skip_gate;     /* 0190 already proved it changed             */
@@ -5915,6 +5945,25 @@ ui_tail:
 extern char _ring_start, _ring_size;
 #define RING_OFF     ((uint32_t)(uintptr_t)&_ring_start)
 #define RING_SIZE    ((uint32_t)(uintptr_t)&_ring_size)
+
+/* A slot identity check may only run with enough audio buffered to sit out
+ * a slow answer from the card.
+ *
+ * Rarer is not the same as safe: a blocking command issued while the decoder
+ * is already behind is the stall, however seldom it runs. So a check waits
+ * until the hardware FIFO is at least half full AND the ring holds at least
+ * half its bytes -- roughly 23 ms of decoded audio on top of a couple of
+ * hundred milliseconds of compressed. If that never comes true the check is
+ * simply skipped, which is the right answer: a core struggling to keep the
+ * buffers full has no business spending time asking the card questions.
+ *
+ * Always true while idle or paused, where there is nothing to disturb --
+ * including the moment the menu closes, which is the check that matters. */
+static int audio_cushion(void)
+{
+    if (idle || paused) return 1;
+    return pcm_level() >= 1024u && ring_fill >= RING_SIZE / 2u;
+}
 #define REFILL_CHUNK 4096u
 
 
@@ -6605,10 +6654,13 @@ static void poll_input(void)
      * closing edge below never fired. */
     if (in & IN_MENU) {
         if (!menu_was) { set_flush_now = 1u; menu_was = 1u; }
+        menu_at = cycles();             /* keeps the backstops quick nearby */
         paused |= 2u;
     } else {
-        /* CLOSING edge: the moment a Load Playlist pick has just been made. */
-        if (menu_was) { pl_check_req = 1u; menu_was = 0u; }
+        /* CLOSING edge: the moment a pick has just been made. Ask about BOTH
+         * slots -- this used to ask only about the playlist, which is why the
+         * track slot needed a poll running all through playback to cover it. */
+        if (menu_was) { pl_check_req = 1u; tk_poll_at = cycles(); menu_was = 0u; }
         paused &= ~2u;
     }
 
@@ -8291,11 +8343,21 @@ static int read_track_head(void)
     title_status = ID3_NO_TAG;
     if (skip) {
         /* MUST happen before the audio re-read below, which overwrites ring[]
-         * with audio content. TPE2 (band/album artist) rather than TPE1. */
+         * with audio content. */
         title_status = id3_find_text(ring, ring_fill, skip, "TIT2",
                                      track_title,  sizeof(track_title));
+        /* TPE2 (band / album artist) first, TPE1 (lead performer) second.
+         *
+         * TPE1 was missing here entirely -- only the fuller walk below knew
+         * about it -- so a file whose TITLE was found early never reached
+         * that walk and its artist row stayed blank, however close to the
+         * front TPE1 sat. Found on a file carrying TPE1 at offset 29 with
+         * TPE2 past a 30 KB cover. Costs nothing: the tag is already here. */
         id3_find_text(ring, ring_fill, skip, "TPE2",
                       track_artist, sizeof(track_artist));
+        if (!track_artist[0])
+            id3_find_text(ring, ring_fill, skip, "TPE1",
+                          track_artist, sizeof(track_artist));
         id3_find_text(ring, ring_fill, skip, "TALB",
                       track_album, sizeof(track_album));
         id3_find_text(ring, ring_fill, skip, "TRCK",
@@ -8315,7 +8377,7 @@ static int read_track_head(void)
          * the in-memory parser then finds everything for free. The ring is
          * 32 KB and is reloaded with audio immediately below, so filling it
          * with tag bytes here costs nothing. */
-        if (title_status != ID3_OK && skip > ring_fill) {
+        if ((title_status != ID3_OK || !track_artist[0]) && skip > ring_fill) {
             uint32_t want = skip;
             if (want > RING_SIZE) want = RING_SIZE;
             int ok = 1;
@@ -8328,6 +8390,8 @@ static int read_track_head(void)
             title_status = id3_find_text(ring, ring_fill, skip, "TIT2",
                                          track_title,  sizeof(track_title));
             if (!track_artist[0]) id3_find_text(ring, ring_fill, skip, "TPE2",
+                                                track_artist, sizeof(track_artist));
+            if (!track_artist[0]) id3_find_text(ring, ring_fill, skip, "TPE1",
                                                 track_artist, sizeof(track_artist));
             if (!track_album[0])  id3_find_text(ring, ring_fill, skip, "TALB",
                                                 track_album, sizeof(track_album));
@@ -9333,6 +9397,7 @@ int main(void)
             && !pl_reload_pending && !pl_reload_armed
             && !reload_pending    && !reload_armed
             && !rd_pending
+            && near_menu() && audio_cushion()
             && (int32_t)(cycles() - pl_poll_at) >= 0) {
             pl_poll_at   = cycles() + CLK_HZ * 3u;
             pl_check_req = 1u;              /* same comparison path as below */
@@ -9345,6 +9410,7 @@ int main(void)
             && !pl_reload_pending && !pl_reload_armed
             && !reload_pending    && !reload_armed
             && !rd_pending
+            && near_menu() && audio_cushion()
             && (int32_t)(cycles() - tk_poll_at) >= 0) {
             tk_poll_at = cycles() + CLK_HZ * 2u;
             if (slot_changed()) reload_pending = 1u;
