@@ -700,6 +700,40 @@ it is easy; converting it needs a ~14 KB table the image has no room for. In
 the README as a limitation. Korean, Thai and emoji are '?' -- Hangul alone is
 another 358 KB of font and a boot-time cost.
 
+## More scripts in the extended font — BACKLOG, 2026-09-16
+
+What ships covers Japanese, Chinese, Latin (Western, Central and Eastern
+European), Greek, Cyrillic, punctuation and symbols. Verified by rendering real
+sample text per language against the actual `mp3font.bin`, not from the range
+table. What is missing, and what each would cost:
+
+| want | glyphs | size | blocked on |
+|---|---|---|---|
+| Vietnamese + Romanian comma forms (U+1E00..1EFF) | 256 | 32 KB at 4bpp, 8 KB at 1bpp | the 4bpp region is FULL |
+| Korean (Hangul syllables) | 11172 | 349 KB at 1bpp | boot time, unmeasured |
+| Thai, Hebrew, Arabic, Devanagari | varies | small | Arabic/Hebrew also need RTL layout |
+| Emoji | - | large | outside the BMP this format addresses |
+
+**The binding constraint is not SDRAM, it is the 4bpp region's fixed size.** It
+holds 1024 glyphs and 864 are used -- 160 free -- and its size is a constant in
+BOTH `mp3_fb.sv` (FONT1_OFF) and the generator, so exceeding it is a Quartus
+compile and a hardware round, not a data change. Three ways out, cheapest
+first:
+
+1. Add only the ~134 letters Vietnamese actually uses plus Romanian's four, as
+   several small ranges. Fits the 160 free slots. Data only.
+2. Put the whole block in the 1bpp region: no RTL change, 8 KB, but those
+   accented letters render as bitmap beside anti-aliased Latin.
+3. Raise the region to 2048 glyphs and pay for the compile.
+
+The 1bpp region has no cap, so Korean is purely a size-and-boot-time question.
+
+**Measure the boot cost first.** The font is a data slot APF loads BEFORE the
+CPU starts, so the Pocket sits transferring 814 KB with nothing on screen, and
+that transfer has never been timed. Hangul would make it 1.2 MB. A stopwatch
+settles whether this matters at all; boot speed has been tuned deliberately
+before and should not be given back by accident.
+
 ## Sequencing after 1.5.0 — decided 2026-09-15
 
 (Language support was pulled INTO 1.5.0 after this was written -- it turned out
