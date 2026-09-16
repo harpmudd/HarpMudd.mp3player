@@ -59,6 +59,11 @@ static uint32_t hread(uint32_t off, void *dst, uint32_t len)
 
 static uint32_t hfilesize(void) { return MMIO_SIZE; }
 
+/* Instructions retired so far -- the simulator's stand-in for the target's
+ * cycle counter, for fw/flac.c's FLAC_PROFILE hooks. */
+#define MMIO_ICOUNT (*(volatile uint32_t *)0xF0000020u)
+static uint32_t hticks(void) { return MMIO_ICOUNT; }
+
 void *memset(void *d, int c, unsigned n)
 {
     uint8_t *p = (uint8_t *)d;
