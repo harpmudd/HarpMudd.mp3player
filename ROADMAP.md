@@ -465,6 +465,30 @@ carrying .lrc sidecars:
 Six of eight cannot be exact. FLAC is unaffected -- its seek is
 `ui_sec = landed / fl.rate`, sample-exact.
 
+### DEFERRED from 1.5.0 — decided 2026-09-16
+
+Held until lyrics ship, because lyrics are the feature that makes it matter.
+Without them the whole symptom is a clock and a progress bar a few seconds out
+after a seek, and only on genuinely variable files.
+
+Measured on the test card, error after seeking to 25% / 50% / 75%:
+
+| file | header | error |
+|---|---|---|
+| Gorillaz - Feel Good Inc. | Xing | -3.4 / -3.1 / -1.3 s |
+| Bad Religion - A Walk | Xing | -0.3 / -0.8 / -1.4 s |
+| LCD Soundsystem, Stone Temple Pilots | none | ~0 |
+| Dire Straits - Sultans of Swing | Info (CBR) | ~0 |
+
+So the worst case on real files here is ~3 s, not the minutes a whole-file
+average might suggest -- these files simply are not that variable.
+
+**It IS testable without lyrics**, which is worth knowing before deferring
+again: seek to about a quarter into Feel Good Inc., then let it play to the
+end. The music stops while the clock still reads ~3:38 of 3:41 and the bar
+falls short. Without seeking first it ends exactly at 3:41. After the fix, the
+seeked playthrough should end full as well.
+
 ### The fix is in the file format, and it is not read yet
 
 A Xing header carries a **100-entry TOC** mapping time-percentage to
