@@ -738,6 +738,14 @@ table. What is missing, and what each would cost:
 | Thai, Hebrew, Arabic, Devanagari | varies | small | Arabic/Hebrew also need RTL layout |
 | Emoji | - | large | outside the BMP this format addresses |
 
+**Confirmed on hardware 2026-09-17** with the generated set in
+`tools/make_lang_tests.py` -- 13 silent MP3s whose tags cover every script,
+across UTF-16, UTF-8 and Latin-1 encodings, listed in `test.m3u`. Japanese,
+Chinese, Greek, Cyrillic, Polish, Czech, Turkish, accented Latin (including
+capitals) and the symbol set all render in the browser and on the player card.
+Korean showed '?' and Vietnamese showed partial text, exactly as the table
+below predicts, so the gaps are the only gaps.
+
 **The binding constraint is not SDRAM, it is the 4bpp region's fixed size.** It
 holds 1024 glyphs and 864 are used -- 160 free -- and its size is a constant in
 BOTH `mp3_fb.sv` (FONT1_OFF) and the generator, so exceeding it is a Quartus
