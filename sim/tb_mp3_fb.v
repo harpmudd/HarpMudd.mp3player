@@ -12,6 +12,11 @@
 //     of each beat (BRAM read latency 1)
 //   * p0_ready pulses once when the burst has fully retired
 //
+// sim/mp3font_head.hex is a FIXTURE, not a source: the first 80000 16-bit
+// words of dist/Assets/mp3player/common/mp3font.bin, little-endian, one hex
+// word per line. Regenerate it with a short struct.unpack over that file if
+// the font layout ever changes.
+//
 //   iverilog -g2012 -o tb.vvp sim/tb_mp3_fb.v src/fpga/core/mp3_fb.sv \
 //            src/fpga/core/font_rom.v && vvp tb.vvp
 // ============================================================================

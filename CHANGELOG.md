@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.5.0 — unreleased
+## v1.5.0 — 17 September 2026
 
 - **Text in most of the world's widely used scripts** — Japanese (kanji, kana,
   fullwidth), Chinese, Greek, Cyrillic and every accented Latin alphabet from
