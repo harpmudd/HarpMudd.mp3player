@@ -31,6 +31,14 @@
                 "extensions": [
                     "m3u"
                 ]
+            },
+            {
+                "name": "Font",
+                "id": 5,
+                "required": false,
+                "parameters": "0x108",
+                "filename": "mp3font.bin",
+                "address": "0x10000000"
             }
         ]
     }
