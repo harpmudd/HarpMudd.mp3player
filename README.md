@@ -68,17 +68,32 @@ The album art panel and screen-blank timeout reset each launch. Everything
 saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
 Nothing is written to your music folder.
 
-## Language and characters
+## Languages
 
-Titles, artists and filenames display in **Japanese** — kanji, hiragana and
-katakana — as well as Chinese characters, accented Latin (Édith, Björk,
-Motörhead), Greek, Cyrillic and symbols like ♪ and ★.
+Titles, artists and filenames display in most of the world's widely used
+scripts, in the player and in the playlist browser alike — 22,800 characters,
+checked against real text rather than a list of ranges:
+
+| | |
+|---|---|
+| **Japanese** | Kanji, hiragana, katakana, fullwidth forms, 「」、。 |
+| **Chinese** | Simplified and Traditional |
+| **Western European** | English, French, German, Spanish, Portuguese, Italian, Dutch, Nordic — é è ê ü ö ñ ç ß å ø æ |
+| **Central and Eastern European** | Polish, Czech, Slovak, Hungarian, Croatian, Slovenian, Turkish, Latvian, Lithuanian, Estonian |
+| **Greek** | Ελληνικά |
+| **Cyrillic** | Russian, Ukrainian, Bulgarian, Serbian, Belarusian, Macedonian |
+| **Punctuation and symbols** | Curly quotes, dashes, ellipsis, € ™ °, ♪ ♫ ★ ♥ → ● ■ ½ ± |
+
+Accented capitals keep their accents — Édith, Ólafur, ŠKODA — which a 16-pixel
+line normally clips.
 
 Tags are read as UTF-8 or UTF-16, whichever the file uses, and FLAC tags are
 always UTF-8. Filenames work too, so an untagged file still reads as itself.
 
-This comes from `mp3font.bin`, which the core loads into memory at startup. See
-[Known limitations](#known-limitations) for what is not covered.
+Not covered: Korean, Thai, Hebrew, Arabic, Hindi and emoji; Vietnamese and
+Romanian are partial. See [Known limitations](#known-limitations).
+
+This comes from `mp3font.bin`, which the core loads at startup.
 
 ## What it shows
 
@@ -276,13 +291,29 @@ framework bugs that had to be found first — is in
   that loads next launch, and resume won't follow it. A `playlists.m3u` that
   exists but doesn't list that playlist has the same effect as none at all. See
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
+- **The most demanding FLAC files can stutter.** Decoding runs on a 60 MHz
+  CPU inside the FPGA, and a few files need most of it. Measured on real
+  tracks, as a share of the CPU spent decoding alone:
+
+  | file | share |
+  |---|---|
+  | 16-bit/44.1 kHz, ~900 kbps, default compression | 64% — fine |
+  | 16-bit/44.1 kHz, ~1000 kbps, **maximum compression** | 75% — stutters |
+  | **24-bit/48 kHz**, ~1800 kbps | 76% — stutters |
+
+  Both of the last two play cleanly on a computer and neither is broken; they
+  simply ask for more than this hardware has left once the screen and the card
+  are served too. Re-encoding at the default compression setting, or down to
+  16-bit/44.1 kHz, fixes it. This is not new in this release — the same files
+  behave the same way on v1.4.0.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.
   Re-saving the tags as UTF-8 fixes it.
-- **Korean, Thai and emoji show as `?`.** The font covers Japanese and Chinese
-  characters, kana, Latin, Greek, Cyrillic and common symbols; the rest was
-  left out to keep the file small.
+- **Korean, Thai, Hebrew, Arabic, Hindi and emoji show as `?`**, and
+  **Vietnamese and Romanian are partial** — the plain accents are there, the
+  stacked ones (ị ơ ễ ư) and the comma forms (Ș Ț) are not. Those were left out
+  to keep the font small and startup quick; see [ROADMAP.md](ROADMAP.md).
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
