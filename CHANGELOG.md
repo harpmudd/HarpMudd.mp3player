@@ -4,31 +4,14 @@ What changed in each release, newest first.
 
 ## v1.5.0 — 17 September 2026
 
-- **Titles and artists in other scripts** — Japanese (kanji, hiragana,
-  katakana), Chinese, Greek, Cyrillic and every accented Latin alphabet from
-  Portuguese to Polish to Turkish, plus ♪ ★ € ™ and curly quotes. 22,800
-  characters, on the player card and in the playlist browser alike, and
-  accented capitals keep their accents. Tags are read as UTF-8 or UTF-16, and
-  filenames too, so an untagged file still reads as itself. Ships as
-  `mp3font.bin`, beside the firmware.
+- **Titles and artists now display in Japanese, Chinese, Greek, Cyrillic and
+  European accents** — é ö ł ş as well as 初恋 — on the player and in the
+  playlist browser. Ships as `mp3font.bin`, beside the firmware.
 - New meter: an animated **cassette**. The hubs turn and coast to a stop when
   you pause, the label carries the playlist's name, and the tape and the shell
   edge react to the music. Twelve meters now.
 - **Boots noticeably faster**, and **track changes are quicker** with it.
-- **No SD card reads while a track plays.** The core used to ask every two or
-  three seconds whether you had picked something new; a slow answer was audible
-  as a glitch. It now asks only around the moment a pick can happen.
-- Fixed: **every track began with a faint click**, from audio starting before
-  the decoder had produced anything.
 - Fixed: **picking a track in the playlist browser could start it at 1.2x**.
-- Fixed: **the artist line could be blank** on files tagged with a performer
-  but no album artist.
-- Fixed: **a scrolling title could lose its last character** — "Daft Punk Is
-  Playing at My Hous".
-- Fixed: **both scrolling rows went blank for a step** before snapping back to
-  the start.
-- Small tidying: the README now says which FLAC files this hardware cannot keep
-  up with, and how to re-encode them.
 
 ## v1.4.0 — 21 August 2026
 
