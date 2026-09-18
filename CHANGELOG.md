@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.5.0 — 17 September 2026
+## v1.5.0 — 18 September 2026
 
 - **Titles and artists now display in Japanese, Chinese, Greek, Cyrillic and
   European accents** — é ö ł ş as well as 初恋 — on the player and in the
@@ -10,7 +10,7 @@ What changed in each release, newest first.
 - New meter: an animated **cassette**. The hubs turn and coast to a stop when
   you pause, the label carries the playlist's name, and the tape and the shell
   edge react to the music. Twelve meters now.
-- **Boots noticeably faster**, and **track changes are quicker** with it.
+- **Boots a little faster**, and track changes with it.
 - Fixed: **picking a track in the playlist browser could start it at 1.2x**.
 
 ## v1.4.0 — 21 August 2026
