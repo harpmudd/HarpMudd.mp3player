@@ -152,7 +152,21 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
-#define EXPECT_VERSION 0x4D503316u   /* rev 22: SDRAM font, FIFO priming  */
+/* NOT bumped for the SDRAM font or the FIFO priming, deliberately.
+ *
+ * This halts on mismatch, and it halts BEFORE the first draw -- so its failure
+ * mode is a black screen, the most confusing thing this core can show.
+ * Bumping it would have turned every mismatched pair into one.
+ *
+ * It does not need to: those RTL changes are additive and compatible both
+ * ways. New firmware on old RTL sends glyph 0x7F, which the old engine treats
+ * as out of range and draws as a space -- non-ASCII text goes blank and
+ * everything else works. Old firmware on new RTL never sends it. No MMIO
+ * register changed meaning.
+ *
+ * Bump this only when the MMIO contract itself changes, where running on is
+ * genuinely worse than stopping. */
+#define EXPECT_VERSION 0x4D503315u   /* rev 21: 16 setting slots          */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.

@@ -17,6 +17,15 @@ What changed in each release, newest first.
   edge react to the music.
 - **Boots noticeably faster**, and **track changes are quicker** with it.
 - Fixed: **picking a track in the playlist browser could start it at 1.2x**.
+- Fixed: **every track began with a faint click.** Audio started before the
+  decoder had produced anything; the player now waits for a small cushion
+  before the first sample.
+- Fixed: **the artist line could be blank** on files tagged with a performer
+  but no album artist.
+- Changed: **the core no longer talks to the SD card during playback.** It used
+  to re-check every two or three seconds whether you had picked something new,
+  and a slow answer from the card was heard as a glitch. It now asks only
+  around the moment a pick can happen.
 
 ## v1.4.0 — 21 August 2026
 
