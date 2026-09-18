@@ -90,9 +90,6 @@ line normally clips.
 Tags are read as UTF-8 or UTF-16, whichever the file uses, and FLAC tags are
 always UTF-8. Filenames work too, so an untagged file still reads as itself.
 
-Not covered: Korean, Thai, Hebrew, Arabic, Hindi and emoji; Vietnamese and
-Romanian are partial. See [Known limitations](#known-limitations).
-
 This comes from `mp3font.bin`, which the core loads at startup.
 
 ## What it shows
@@ -310,10 +307,6 @@ framework bugs that had to be found first — is in
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.
   Re-saving the tags as UTF-8 fixes it.
-- **Korean, Thai, Hebrew, Arabic, Hindi and emoji show as `?`**, and
-  **Vietnamese and Romanian are partial** — the plain accents are there, the
-  stacked ones (ị ơ ễ ư) and the comma forms (Ș Ț) are not. Those were left out
-  to keep the font small and startup quick; see [ROADMAP.md](ROADMAP.md).
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
