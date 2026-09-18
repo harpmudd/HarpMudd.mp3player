@@ -10,7 +10,8 @@ What changed in each release, newest first.
 - New meter: an animated **cassette**. The hubs turn and coast to a stop when
   you pause, the label carries the playlist's name, and the tape and the shell
   edge react to the music. Twelve meters now.
-- **Boots a little faster**, and track changes with it.
+- **Boot and track changes are a little quicker** — a quarter-second wait
+  in the file loader that never did anything is gone.
 - Fixed: **picking a track in the playlist browser could start it at 1.2x**.
 
 ## v1.4.0 — 21 August 2026
