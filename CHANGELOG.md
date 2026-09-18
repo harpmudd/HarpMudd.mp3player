@@ -2,6 +2,18 @@
 
 What changed in each release, newest first.
 
+## v1.5.0 — 18 September 2026
+
+- **Titles and artists now display in Japanese, Chinese, Greek, Cyrillic and
+  European accents** — é ö ł ş as well as 初恋 — on the player and in the
+  playlist browser. Ships as `mp3font.bin`, beside the firmware.
+- New meter: an animated **cassette**. The hubs turn and coast to a stop when
+  you pause, the label carries the playlist's name, and the tape and the shell
+  edge react to the music. Twelve meters now.
+- **Boot and track changes are a little quicker** — a quarter-second wait
+  in the file loader that never did anything is gone.
+- Fixed: **picking a track in the playlist browser could start it at 1.2x**.
+
 ## v1.4.0 — 21 August 2026
 
 - **Playlist browser** — tap **Select**. **Up**/**Down** moves,

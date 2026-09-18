@@ -2,6 +2,7 @@
  * than libFLAC or dr_flac. */
 
 #include "flac.h"
+#include "utf8.h"
 
 /* ------------------------------------------------------------------ input */
 
@@ -140,7 +141,8 @@ static void tag_copy(char *dst, uint32_t cap, const char *src, uint32_t n)
     if (!dst || !cap) return;
     uint32_t j = 0;
     while (j < n && j + 1u < cap) { dst[j] = src[j]; j++; }
-    dst[j] = 0;
+    /* Vorbis comments are UTF-8 by specification; don't end on half a kanji. */
+    dst[u8_trim(dst, j)] = 0;
 }
 
 static void vorbis_comments(flac_t *f, uint32_t length)
@@ -160,8 +162,9 @@ static void vorbis_comments(flac_t *f, uint32_t length)
 
         /* Only the head of an entry is worth holding: the longest key of
          * interest is ALBUMARTIST, and the values are truncated to the tag
-         * buffers anyway. Anything past this is skipped in place. */
-        char e[80];
+         * buffers anyway. Anything past this is skipped in place.
+         * 112, was 80: a kanji is three bytes, so 80 held only ~24 of them. */
+        char e[112];
         uint32_t keep = n < sizeof(e) ? n : (uint32_t)sizeof(e);
         for (uint32_t i = 0; i < keep; i++) e[i] = (char)bits(f, 8);
         for (uint32_t i = keep; i < n; i++) (void)bits(f, 8);

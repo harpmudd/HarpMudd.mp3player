@@ -20,7 +20,35 @@ MEMORY {
 
 ENTRY(_start)
 
-_stack_size = 0x4000;    /* 16 KB */
+/* 9 KB, down from 16 -- and the number is chosen to make overflow
+ * ARITHMETICALLY IMPOSSIBLE rather than merely unlikely.
+ *
+ * Measured 2026-09-10 with -fstack-usage over every TU, flac.c and picojpeg.c
+ * included (build.sh compiles those with their own flags, so a default
+ * instrumented build misses them):
+ *
+ *   largest single frame anywhere   656   (flac_decode_frame)
+ *   SUM of every frame in the build 8464
+ *   measured high-water on hardware ~1580 (MP3 + artwork + browser session)
+ *
+ * 9216 exceeds 8464, so even if every function in the firmware were nested
+ * inside one another simultaneously the stack still fits. That cannot happen
+ * -- the MP3 and FLAC paths are mutually exclusive, siblings do not nest, the
+ * UI never runs inside the decoder -- which is the point: the guarantee does
+ * not depend on any of that reasoning being right.
+ *
+ * The 7 KB this frees goes to the image, which had 272 bytes of slack and was
+ * silently deciding design questions because of it.
+ *
+ * WHY IT MATTERS THAT THIS IS SAFE: the stack grows DOWN and the ring buffer
+ * is directly below it. An overflow would not fault -- it would quietly
+ * corrupt compressed audio mid-DMA, and present as intermittent glitching
+ * indistinguishable from the v1.4.0 fragment-cache stutter. `stack_ok()` in
+ * player.c watches a canary 256 bytes above the bottom as a second line.
+ *
+ * If a function with a very large frame is ever added, or anything recurses,
+ * re-run: EXTRA_CFLAGS=-fstack-usage bash fw/build.sh */
+_stack_size = 0x2400;    /* 9 KB -- see above; 8464 is the hard ceiling */
 /* 24 KB, down from 32.
  *
  * The ring sits ABOVE the image, so shrinking it moves _tag_start up and
@@ -34,6 +62,21 @@ _stack_size = 0x4000;    /* 16 KB */
  * ~0.23 s at the 105 KB/s the CD-rip FLAC on the test card needs. Watch the
  * underrun flag if either ever looks marginal. */
 _ring_size  = 0x6000;    /* 24 KB -- ~0.6 s at 320 kbps */
+/* 2 KB, down from 4. The only 4 KB consumer was io_bench(), which is behind
+ * `#if IO_BENCH` and that is 0 -- so it is compiled out and was reserving
+ * space for nothing. Every live read into this buffer is 512 bytes or less
+ * EXCEPT the FLAC seektable, and that one clamps itself to TAG_SIZE/18 points
+ * (see flac_scan_metadata), so halving the buffer halves the clamp instead of
+ * overflowing it: 227 seek points become 113. A coarser seed for the seek
+ * bracket costs a probe or two on files with big seektables; it cannot make a
+ * seek wrong. Buys 2 KB of image space, which is what the cassette needed. */
+/* BACK TO 4 KB. Halving this to buy image space for the cassette meter was a
+ * bad trade that was not visible at the time: art_need_bytes() feeds picojpeg
+ * in TAG_SIZE chunks, so 2 KB DOUBLED the target reads for every cover -- 43
+ * to 86 on a typical 175 KB one, 207 to 414 on the 847 KB outlier. That is
+ * paid on every track load, boot included. The ROADMAP's own lever list has
+ * "raise _tag_size" as the cheapest artwork win; halving it was the same lever
+ * pulled backwards. */
 _tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
 
 SECTIONS {
@@ -55,6 +98,10 @@ SECTIONS {
 	_heap_start = .;
 
 	_stack_top  = ORIGIN(ram) + LENGTH(ram);
+	/* A real ADDRESS symbol, so start.S can paint the region without doing
+	 * arithmetic on an absolute symbol's value. Used only by the STACK_PAINT
+	 * measurement build; costs nothing when that is off. */
+	_stack_bottom = _stack_top - _stack_size;
 	_ring_start = _stack_top - _stack_size - _ring_size;
 
 	/* Separate landing zone for the periodic ID3 re-probe. It must NOT share
@@ -86,5 +133,10 @@ SECTIONS {
 	 * The guard that matters now is ARENA_BYTES in alloc.c, which is exact.
 	 * This one only keeps a token heap so a stray newlib path that reaches
 	 * _sbrk has somewhere to go rather than returning -1 in a corner. */
-	ASSERT(_heap_end - _heap_start >= 1024, "no room left for even a token heap")
+	/* 256, down from 1024. fw/alloc.c overrides malloc and free with a bump
+	 * allocator over its own fixed arena, so _sbrk in sysio.c is unreachable and
+	 * this region serves nothing. The guard is kept small rather than removed:
+	 * if a newlib routine ever does reach _sbrk, failing the link is a better
+	 * outcome than silently overwriting the DMA buffers below. */
+	ASSERT(_heap_end - _heap_start >= 256, "no room left for even a token heap")
 }

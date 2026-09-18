@@ -26,6 +26,8 @@
 #include <stdint.h>
 #include "mp3dec.h"
 #include "font_metrics.h"
+#include "font_ext.h"
+#include "utf8.h"
 /* Up here, not down beside the FLAC glue where it used to sit. The diagnostic
  * row is ~800 lines ABOVE that point and reads flac_order, and C would have
  * taken the undeclared name as an error -- the same ordering trap that once
@@ -150,12 +152,26 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * bitstream needs a ~6 min compile, so flashing firmware onto stale RTL is easy
  * and its symptoms (dead peripheral, silent audio, unresponsive buttons) look
  * exactly like logic bugs. Checking here turns that into an obvious signal. */
+/* NOT bumped for the SDRAM font or the FIFO priming, deliberately.
+ *
+ * This halts on mismatch, and it halts BEFORE the first draw -- so its failure
+ * mode is a black screen, the most confusing thing this core can show.
+ * Bumping it would have turned every mismatched pair into one.
+ *
+ * It does not need to: those RTL changes are additive and compatible both
+ * ways. New firmware on old RTL sends glyph 0x7F, which the old engine treats
+ * as out of range and draws as a space -- non-ASCII text goes blank and
+ * everything else works. Old firmware on new RTL never sends it. No MMIO
+ * register changed meaning.
+ *
+ * Bump this only when the MMIO contract itself changes, where running on is
+ * genuinely worse than stopping. */
 #define EXPECT_VERSION 0x4D503315u   /* rev 21: 16 setting slots          */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.4.0"
+#define APP_VER "1.5.0"
 
 /* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
  * Select+A (APF slot table, boot vs live), Select+B (the framework's file
@@ -188,29 +204,54 @@ static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
-/* The one place a byte becomes a glyph index. The atlas holds 0x20..0x7E and
- * nothing else, so everything outside that is a space.
+/* Set at boot once APF's slot table shows mp3font.bin loaded at the size this
+ * firmware was built against. Without it every non-ASCII character is '?'. */
+static uint8_t fext_ok;
+
+#define FB_EXT  0x80000000u     /* fb_resolve(): result is an extended index */
+
+/* The one place a CODE POINT becomes a glyph, for measuring and drawing alike.
  *
- * This exists because the width path and the DRAW path disagreed. fb_adv()
+ * It exists because the width path and the draw path once disagreed: fb_adv()
  * substituted a space for an out-of-range byte while fb_char() masked with
- * 0x7F and sent the result to the engine -- so the first UTF-8 byte of an
- * accented or symbol character (0xE2, say) was drawn as 'b' while being
- * measured as a space. Wrong glyphs AND overlapping spacing, from one title
- * containing a character the font cannot show. Both now ask this. */
-static uint32_t fb_glyph(char ch)
+ * 0x7F -- so a title containing one character the font could not show drew
+ * wrong glyphs AND overlapped them. Both still ask the same function.
+ *
+ * ASCII comes from the ROM. Anything the extended font covers returns its
+ * engine index with FB_EXT set; everything else is '?'. Controls stay spaces,
+ * as they always were. *adv is the advance in source pixels. */
+static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
 {
-    uint32_t c = (unsigned char)ch;
-    return (c < FONT_FIRST || c > FONT_LAST) ? (uint32_t)' ' : c;
+    if (cp >= FONT_FIRST && cp <= FONT_LAST) { *adv = font_adv[cp - FONT_FIRST]; return cp; }
+    if (cp < 0x80u) { *adv = font_adv[0]; return ' '; }
+    if (fext_ok) {
+        for (uint32_t r = 0; r < FEXT_NRANGES; r++) {
+            uint32_t d = cp - fext_ranges[r].first;
+            if (d >= fext_ranges[r].count) continue;
+            uint32_t n = fext_ranges[r].base + d;
+            if (n & FEXT_1BPP) {
+                uint32_t g = n & ~FEXT_1BPP;
+                *adv = (g >= FEXT_N1_MIXED ||
+                        ((fext_wide1[g >> 3] >> (g & 7u)) & 1u)) ? 16u : 8u;
+            } else {
+                *adv = ((fext_adv4[n >> 1] >> ((n & 1u) << 2)) & 0xFu) + 1u;
+            }
+            return n | FB_EXT;
+        }
+    }
+    *adv = font_adv['?' - FONT_FIRST];
+    return '?';
 }
 
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
  * transparent blit. */
-static uint32_t fb_adv(char ch, uint32_t sx)
+static uint32_t fb_adv(uint32_t cp, uint32_t sx)
 {
-    unsigned char c = (unsigned char)ch;
-    return ((uint32_t)font_adv[fb_glyph(c) - FONT_FIRST] * ts_half[sx]) / 2u;
+    uint32_t a;
+    fb_resolve(cp, &a);
+    return (a * ts_half[sx]) / 2u;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -218,6 +259,20 @@ static uint32_t fb_adv(char ch, uint32_t sx)
  * in one colour costs ONE colour write plus two writes per character. */
 static uint32_t fb_color_shadow = 0xFFFFFFFFu;
 
+/* UNBOUNDED, deliberately. Bounding it overflowed the image once already: it
+ * is called from every draw primitive, so even out-of-lined the extra work did
+ * not fit.
+ *
+ * This comment used to say the read spin was "the one with evidence" for the
+ * end-of-song freeze. That was wrong, and worth recording so nobody re-derives
+ * it. The freeze was the cassette meter computing a pack radius of 16,843,009
+ * from an unclamped progress ratio and then drawing eight million discs -- a
+ * draw-path hang, but one this handshake would have sat through happily,
+ * because the FIFO was being fed correctly the whole time. Bounding fb_wait()
+ * would not have caught it and a bound here still would not.
+ *
+ * So: no evidence has ever pointed at this spin. Leave it until something
+ * does. */
 static inline void fb_wait(void) { while (REG(R_FB_GO) & 1u) { } }
 
 static void fb_set_color(uint16_t fg, uint16_t bg)
@@ -301,14 +356,20 @@ static void fb_copy(uint32_t sx_, uint32_t sy_, uint32_t dx, uint32_t dy,
     }
 }
 
-static void fb_char(uint32_t x, uint32_t y, char ch, uint32_t sx, uint32_t sy)
+/* Draws a glyph fb_resolve() already chose. An extended one travels as CHAR
+ * 0x7F with its index in the size register, which a CHAR otherwise ignores:
+ * bit 17 region, bits 16..0 glyph, split 9/9 across the w and h fields the
+ * engine reads it back from. Safe to clobber -- fb_rect and fb_copy_span both
+ * set the size register on every call. */
+static void fb_glyph_draw(uint32_t x, uint32_t y, uint32_t g, uint32_t sx, uint32_t sy)
 {
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
-    REG(R_FB_GO)   = FB_OP_CHAR
-                   | ((fb_glyph(ch) & 0x7Fu) << 3)
-                   | (sx << 10)
-                   | (sy << 12);
+    if (g & FB_EXT) {
+        REG(R_FB_SIZE) = ((g & 0x1FFu) << 9) | ((g >> 9) & 0x1FFu);
+        g = FEXT_GLYPH;
+    }
+    REG(R_FB_GO) = FB_OP_CHAR | (g << 3) | (sx << 10) | (sy << 12);
 }
 
 /* Stage 4b bring-up proof, isolated from playback deliberately: this is the
@@ -343,7 +404,7 @@ static void fb_test_pattern(void)
 static uint32_t fb_text_width(const char *s, uint32_t sx)
 {
     uint32_t w = 0;
-    while (*s) w += fb_adv(*s++, sx);
+    while (*s) w += fb_adv(u8_next(&s), sx);
     return w;
 }
 
@@ -374,12 +435,12 @@ static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
     uint32_t limit = x + max_w;
     if (paint_r > FB_W) paint_r = FB_W;
     while (*s) {
-        uint32_t a = fb_adv(*s, sx);
+        uint32_t a, g = fb_resolve(u8_next(&s), &a);
+        a = (a * ts_half[sx]) / 2u;
         if (x + a > limit)   break;        /* out of layout budget */
         if (x + cell > paint_r) break;     /* would paint past the box */
-        fb_char(x, y, *s, sx, sy);
+        fb_glyph_draw(x, y, g, sx, sy);
         x += a;
-        s++;
     }
     return x;
 }
@@ -396,12 +457,12 @@ static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
     uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
     uint32_t limit = x + max_w;
     while (*s) {
-        uint32_t a = fb_adv(*s, sx);
+        uint32_t a, g = fb_resolve(u8_next(&s), &a);
+        a = (a * ts_half[sx]) / 2u;
         if (x + a > limit) break;          /* out of layout budget */
         if (x + cell > FB_W) break;        /* would paint off-screen */
-        fb_char(x, y, *s, sx, sy);
+        fb_glyph_draw(x, y, g, sx, sy);
         x += a;
-        s++;
     }
     return x;
 }
@@ -560,9 +621,9 @@ enum { FLR_NONE = 0, FLR_RATE, FLR_DEPTH, FLR_CHANS, FLR_BLOCK };
 static uint8_t  fl_reject_kind;
 static uint32_t fl_reject_val;
 
-static char track_title[48];
-static char track_artist[48];
-static char track_album[48];
+static char track_title[96];
+static char track_artist[96];
+static char track_album[96];
 static char track_year[8];
 static char track_trk[8];
 
@@ -747,7 +808,8 @@ static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
 static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
-static uint16_t pl_ui_mq_off;      /* chars scrolled off the selected row     */
+static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
+static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
 static uint32_t pl_ui_mq_next;     /* when it steps again                     */
 static uint16_t pl_ui_mq_sel = 0xFFFFu;  /* row the scroll belongs to         */
 
@@ -925,6 +987,36 @@ static uint8_t pl_restore_pending = 1u;
  * completion branch clears it too, for the paths that never get that far. */
 #define PAUSE_LOAD 4u
 static uint8_t  menu_was;         /* the OS menu was open on the last poll      */
+static uint32_t menu_at;          /* cycles() when the OS menu was last open    */
+
+/* The identity backstops run ONLY around menu activity -- never during
+ * ordinary playback.
+ *
+ * A pick can only be MADE in the OS menu, so that is the only time a missed
+ * notification can happen. Both slots are asked outright on the closing edge,
+ * and these periodic checks cover the case where even that is missed: a pick
+ * whose slot switch lands a moment after the menu shuts.
+ *
+ * They used to run every 2-3 s for as long as the core was playing, which was
+ * the wrong trade. Each is a blocking command the decoder waits out, and on a
+ * card that answers slowly that is a stall in the middle of a track -- heard
+ * as a glitch out of nowhere, on any file, unreproducible. The comment on the
+ * playlist poll predicted exactly this ("a tic every three seconds ... one
+ * constant backs it out").
+ *
+ * Nothing is given up in the normal path: the notification still loads
+ * instantly, and the closing edge still asks. What is given up is noticing a
+ * pick that produced NO notification AND no closing edge AND landed more than
+ * 15 s after the menu shut -- at which point picking again, which is what a
+ * user does anyway, is the remedy. */
+#define POLL_NEAR_MENU (CLK_HZ * 15u)   /* how long after the menu shuts */
+
+static int near_menu(void)
+{
+    return (int32_t)(cycles() - menu_at) < (int32_t)POLL_NEAR_MENU;
+}
+
+static int audio_cushion(void);    /* defined below, once RING_SIZE exists */
 static uint32_t pl_poll_at;       /* next periodic slot-3 identity check         */
 static uint8_t  pl_check_req;     /* menu just closed: ask slot 3 what it holds */
 static uint8_t  pl_skip_gate;     /* 0190 already proved it changed             */
@@ -1063,10 +1155,10 @@ static uint32_t slot_size;
  * staleness detectable: `prev_head`/`prev_slot_size` used to be overwritten by
  * the (possibly stale) load itself, which destroyed the very reference the
  * later probes needed to compare against. */
-static char     stale_ref_title[48];   /* title of the track being left */
+static char     stale_ref_title[96];   /* title of the track being left */
 static uint32_t stale_ref_size;        /* and the size APF reported for it */
-static char     last_title[48];        /* title the current load settled on */
-static char     track_file[64];        /* filename APF reports for the slot  */
+static char     last_title[96];        /* title the current load settled on */
+static char     track_file[160];        /* filename APF reports for the slot  */
 
 /* A file identity that SURVIVES A POWER CYCLE, which cur_file_id does not.
  *
@@ -1157,7 +1249,12 @@ static uint32_t ui_pal_idx;
 #define UI_TOAST_HOLD  (CLK_HZ)            /* full brightness ~1 s   */
 #define UI_TOAST_FADE  (CLK_HZ * 3u / 4u)  /* then dissolve over ~.75 s */
 #define UI_TOAST_STEPS 10u
-static char     ui_toast[24];
+/* 32, not 24. The load-phase readout "H363 S0 A833 T1241 K1580" is exactly 24
+ * characters, so at 24 it silently lost the last digit of the last field and
+ * reported a stack high-water of 158 -- a number the function cannot even
+ * produce, since it returns a multiple of 4. A diagnostic that truncates is
+ * worse than one that does not exist. */
+static char     ui_toast[32];
 static uint32_t ui_toast_t0;               /* 0 = inactive */
 static uint32_t ui_toast_step;             /* 0 = solid, UI_TOAST_STEPS = gone */
 static uint32_t ui_toast_end;              /* x the last toast draw reached    */
@@ -1165,10 +1262,18 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
                               * rather than bare background, so the meter reads
                               * as one object at any level */
 #define UI_RED     0xF800u
-
+/* Pack an 8-8-8 colour into RGB565. Every colour before this was a hex
+ * literal, which is fine for a handful of UI tones and unreadable for a
+ * meter that names ten shades of grey. */
+#define FB_RGB(r, g, b) ((uint16_t)((((r) & 0xF8u) << 8) | (((g) & 0xFCu) << 3) | ((b) >> 3)))
 #define UI_FAINT   0x6B4Du   /* filename line -- present but recessive */
 #define UI_CARD_H  120u
+#ifndef UI_SHOW_DIAG
 #define UI_SHOW_DIAG 0        /* 1 = show A/S/T/F reload diagnostics */
+#endif
+#ifndef STACK_PAINT
+#define STACK_PAINT 0         /* 1 = measure the stack high-water mark */
+#endif
 
 /* Speed-branch instrumentation. ON by default here and NOT behind a button
  * combo, deliberately: the last diagnostic on this project never appeared
@@ -1291,6 +1396,20 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
 #define UI_WAVE_N   36u
 #define UI_WAVE_Y   173u
 #define UI_WAVE_H   72u
+/* Rows ABOVE the meter box that a meter is allowed to use.
+ *
+ * Every meter fits 72px and every one of them looked squashed as a cassette:
+ * a real cassette is 1.56:1, so at 72 tall it can only be ~112 wide. The space
+ * is there -- the card ends at 136, the box starts at 173, and the art panel
+ * already occupies 145..249 on the RIGHT, so the band beside it is free.
+ *
+ * 24 rows makes the usable box 96 tall, and 150x96 is 1.56:1 exactly.
+ *
+ * Two things had to follow: ui_bg_restore's stash and ui_wave_clear both ran
+ * to UI_WAVE_Y..+UI_WAVE_H, so anything drawn above that could be neither
+ * erased nor restored -- the restore copies horizontally from a stash column
+ * on the SAME row, and those rows had never been painted. */
+#define UI_WAVE_TOP 24u
 #define UI_WAVE_GAP 2u
 #define UI_TRANSPORT_Y 262u
 #define UI_TIME_Y   288u
@@ -1315,11 +1434,38 @@ static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
 /* One marquee per scrollable line. Title and artist can both overflow, and
  * they scroll independently -- a shared position would drag the shorter one
  * around for no reason. */
+/* All uint32. Narrowing pos/endpos to uint16 and the flags to uint8 was tried
+ * to buy space for a separate tail-hold constant: it made the image BIGGER by
+ * 16 bytes, because every use then needs masking that a word load does not.
+ * BSS saved, text spent, net loss. */
 typedef struct {
-    char     text[64];
+    char     text[96];
     uint32_t y, scale, on, pos, next;
+    uint32_t endpos;      /* furthest offset worth scrolling to -- see init */
+    uint32_t back;        /* 1 = returning to the start */
 } ui_marquee_t;
 static ui_marquee_t ui_mq_title, ui_mq_artist;
+/* One place for the marquee's timing, because two of them have to agree: the
+ * info card's title/artist and the playlist browser's selected row. They were
+ * separate literals and drifting apart was only a matter of time.
+ *
+ * HOLD is deliberately long. The pause is not dead time -- it is the only
+ * moment the line is actually readable, since a name is easier to take in
+ * standing still than sliding. Two seconds at each end, against one before. */
+#define MQ_STEP  (CLK_HZ / 3u)     /* between character steps */
+/* FOUR seconds, at BOTH ends, from one constant.
+ *
+ * A longer hold at the start than at the tail is the better design -- the
+ * beginning of a title is what identifies the track, the tail is only
+ * confirmation -- and it was built that way first. It did not fit: a second
+ * distinct large constant is materialised at each of six call sites, and the
+ * image was 32 bytes over the link guard. Narrowing the struct to pay for it
+ * lost another 16.
+ *
+ * So both ends hold for the longer time. The start pause is what was asked
+ * for and it is doubled; the tail merely rests longer than it needs to, which
+ * costs nothing but a little patience. Revisit when there is image space. */
+#define MQ_HOLD  (CLK_HZ * 4u)
 /* Visualisations, cycled with X. The choice persists via interact.json.
  *
  * All three run off what the decoder already produces -- there are no frequency
@@ -1339,6 +1485,9 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
         * that the setting stops persisting and the firmware looks correct
         * throughout while doing it. */
        VIZ_LED,
+       /* Same rule again: APPENDED. Adding this required the Meter slider's
+        * max in interact.json to go from 10 to 11. */
+       VIZ_TAPE,
        VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
@@ -1706,6 +1855,93 @@ static uint32_t spec_log(uint32_t v)
 #define SPEC_FLOOR 200u
 #define SPEC_SPAN   50u
 
+/* ============================================================== CASSETTE ==
+ * A cassette shell with two reels, drawn in the 360x72 meter box.
+ *
+ * Designed on the desk first -- tools/cassette_preview.py renders this exact
+ * geometry to a PNG, and five iterations there cost nothing. The magic eye took
+ * about eight HARDWARE rounds; that is what the preview tool exists to avoid.
+ *
+ * Three things carry it, in order of how much they matter:
+ *
+ *   1. The reels are DIFFERENT SIZES and the difference moves with the track.
+ *      That is the cassette cue; everything else is decoration.
+ *   2. Angular speed goes as 1/radius, so the supply reel visibly speeds up as
+ *      it empties. Physically what a real tape does, and nearly free.
+ *   3. The shell is NEUTRAL grey with white hubs, not accent-tinted. A grey
+ *      object on the accent-tinted background ramp reads as a physical thing;
+ *      an accent-tinted shell read as a green graphic. The accent is kept for
+ *      the label, which is also what flashes.
+ */
+/* 160, not 240. At 240 the shell nearly touched both edges whenever the album
+ * art panel is up -- ui_wave_w() is only 252 then -- and read as cut off. It
+ * was also 3.5:1 against a real cassette's 1.56:1, which is what "too long"
+ * was. 160 leaves 46px of margin with art and 100 without, and is 2.3:1. */
+#define TAPE_SHELL_W  150u
+#define TAPE_SHELL_H   96u   /* 150x96 is 1.56:1 -- a real cassette */
+
+/* Hub slot masks: bit x set = SLOT (dark), clear = hub face. Generated from
+ * the same geometry the preview uses, so the two cannot drift. Six phases span
+ * one tooth pitch -- a six-slot hub repeats every 60 degrees, so that is all
+ * the unique rotation there is. 156 bytes against per-pixel atan2. */
+#define TAPE_HUB_R   9u
+/* Fixed wind on both reels.
+ *
+ * This used to track playback progress -- the supply pack thinning as the
+ * take-up grew -- and it is gone for two reasons.
+ *
+ * It never read as progress: packs + packt was 1+x and 1+(7-x), invariant, so
+ * the reels only traded thickness while the gap between them stayed put.
+ *
+ * And the arithmetic behind it CRASHED THE PLAYER. ui_sec == tot makes the
+ * progress fraction exactly 256, not 255 -- the ratio was the one in this file
+ * that did not clamp -- so 255u - pr underflowed and the band loop went on to
+ * draw eight million discs of radius sixteen million. An unrecoverable hang in
+ * the draw loop, at the last second of a track, on this meter alone. */
+#define TAPE_PACK    5u
+#define TAPE_HUB_N   19u
+#define TAPE_HUB_PH  6u
+static const uint32_t tape_hub[TAPE_HUB_PH][TAPE_HUB_N] = {
+    { 0x00000, 0x000E0, 0x041E0, 0x0E1C0, 0x0F180, 0x07000, 0x00002, 0x00F9E, 0x00F9E, 0x7CF9F, 0x3CF80, 0x3CF80, 0x20000, 0x00070, 0x00C78, 0x01C38, 0x03C10, 0x03800, 0x00000 },
+    { 0x00000, 0x03060, 0x07070, 0x070F0, 0x038E0, 0x01040, 0x00000, 0x00F80, 0x38F9E, 0x7CF9F, 0x3CF8E, 0x00F80, 0x00000, 0x01040, 0x038E0, 0x07870, 0x07070, 0x03060, 0x00000 },
+    { 0x00000, 0x03800, 0x03830, 0x01838, 0x01C70, 0x00060, 0x00000, 0x38F80, 0x3CF80, 0x7CF9F, 0x00F9E, 0x00F8E, 0x00000, 0x03000, 0x071C0, 0x0E0C0, 0x060E0, 0x000E0, 0x00000 },
+    { 0x00200, 0x01E00, 0x00E00, 0x00E18, 0x00E3C, 0x30038, 0x38030, 0x3CF80, 0x1CF80, 0x00F80, 0x00F9C, 0x00F9E, 0x0600E, 0x0E006, 0x1E380, 0x0C380, 0x00380, 0x003C0, 0x00200 },
+    { 0x00200, 0x00700, 0x00700, 0x00700, 0x1860C, 0x3C01E, 0x3E03E, 0x0CF90, 0x00F80, 0x00F80, 0x00F80, 0x04F98, 0x3E03E, 0x3C01E, 0x1830C, 0x00700, 0x00700, 0x00700, 0x00200 },
+    { 0x00200, 0x00380, 0x00380, 0x08380, 0x1C300, 0x1E006, 0x0601E, 0x00F9E, 0x00F90, 0x00F80, 0x04F80, 0x3CF80, 0x3C030, 0x3003C, 0x0061C, 0x00E08, 0x00E00, 0x00E00, 0x00200 },
+};
+
+static uint8_t  tape_face;          /* shell/label frame/window/openings drawn */
+static uint16_t tape_face_w;
+static uint32_t tape_ph_s;          /* hub rotation, 1/256 of a phase step */
+static uint16_t tape_spd;           /* current hub speed -- coasts, see below */
+static uint8_t  tape_rim  = 0xFFu;  /* level bucket the shell rim was at   */
+static uint8_t  tape_glow  = 0xFFu;            /* bass bucket last drawn  */
+static uint32_t tape_name_h;        /* playlist name the label carries     */
+
+/* Filled disc. w descends monotonically with the row, so this is O(r) rather
+ * than a square-root per row. */
+/* Half-width of a circle of radius r at row offset dy. Used to CONTOUR the
+ * exposed tape against the two packs: on a real cassette the tape you see
+ * between the reels is bounded by their curves, not by straight edges. */
+static uint32_t tape_hw(uint32_t r, int32_t dy)
+{
+    uint32_t d = (uint32_t)(dy < 0 ? -dy : dy);
+    if (d >= r) return 0;
+    uint32_t rr = r * r, w = r;
+    while (w && w * w + d * d > rr) w--;
+    return w;
+}
+
+static void tape_disc(uint32_t cx, uint32_t cy, uint32_t r, uint16_t c)
+{
+    uint32_t rr = r * r, w = r;
+    for (uint32_t i = 0; i <= r; i++) {
+        while (w && w * w + i * i > rr) w--;
+        fb_rect(cx - w, cy - i, 2u * w + 1u, 1u, c);
+        if (i) fb_rect(cx - w, cy + i, 2u * w + 1u, 1u, c);
+    }
+}
+
 static const uint16_t spec_gain[SPEC_BANDS] = {
     /* MEASURED for the HALF-OCTAVE cascade, low band first. Re-measured rather
      * than carried over: splitting each octave in two changes every level, and
@@ -1937,7 +2173,8 @@ static void ui_bg_restore(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     if (!w || !h) return;
     if (!ui_bg_ready) {
-        for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+        for (uint32_t yy = UI_WAVE_Y - UI_WAVE_TOP;
+             yy < UI_WAVE_Y + UI_WAVE_H; yy++)
             fb_rect(UI_BG_X, yy, UI_BG_W, 1, ui_grad_at(yy));
         ui_bg_ready = 1;
     }
@@ -1970,8 +2207,9 @@ static void ui_art_bg_range(uint32_t x, uint32_t w)
  * invites that; a list with a name is at least the place to look. */
 static void ui_meter_faces_invalidate(void)
 {
-    vu_face  = 0;
-    eye_face = 0;
+    vu_face   = 0;
+    eye_face  = 0;
+    tape_face = 0;
 }
 
 /* Blit the stash to the current position, clipped at the right edge. The panel
@@ -2207,7 +2445,8 @@ static void ui_wave_clear(void)
      * that. */
     ui_meter_faces_invalidate();
 
-    for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
+    for (uint32_t y = UI_WAVE_Y - UI_WAVE_TOP;
+         y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
             for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_drawn[z] = 0xFFu; }
@@ -2354,11 +2593,12 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
 {
     uint32_t i = 0;
     while (text[i] && i < sizeof(m->text) - 1u) { m->text[i] = text[i]; i++; }
+    i = u8_trim(m->text, i);
     m->text[i] = 0;
     m->y     = y;
     m->scale = scale;
     m->pos   = 0;
-    m->next  = cycles() + CLK_HZ;          /* hold at the start first */
+    m->next  = cycles() + MQ_HOLD;         /* hold at the start first */
 
     /* Scroll when the PAINTED text overruns, not when its advances do.
      *
@@ -2372,12 +2612,74 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
      * against a 352 budget -- inside it by four -- yet paints to 390 against a
      * right edge of 380. "Alabama Getaway" is 312 and paints to 342, which
      * genuinely fits and correctly stays still. */
+    /* Offsets below are BYTES but every step is a whole CHARACTER: a kanji is
+     * three bytes, and stopping inside one draws a '?' at the window's edge. */
     uint32_t adv_w = fb_text_width(m->text, scale);
-    uint32_t last  = i ? fb_adv(m->text[i - 1u], scale) : 0u;
+    uint32_t last  = 0u;
+    if (i) {
+        const char *lp = m->text + u8_prev(m->text, i);
+        last = fb_adv(u8_next(&lp), scale);
+    }
     uint32_t painted = (adv_w > last) ? (adv_w - last + FB_CELL(scale))
                                       : FB_CELL(scale);
     m->on = (adv_w > ui_text_w) ||
             (UI_MARGIN + painted > UI_CARD_TEXT_R);
+
+    /* STOP when the tail is visible, rather than scrolling until the text has
+     * left the box entirely.
+     *
+     * `pos` used to run to the string length, so the window's start walked
+     * past the END of the text and the row went completely BLANK for a step
+     * before snapping back. That empty frame is what made this read as a
+     * glitch rather than as scrolling -- the travel was never the problem.
+     *
+     * endpos is the first offset whose remainder fits, measured with the same
+     * painted-width rule as the overflow test above, so the two cannot
+     * disagree about what "fits" means. Computed once here rather than
+     * re-measured every step. */
+    m->pos  = 0;
+    m->back = 0;
+
+    /* ONE pass, backwards from the tail, accumulating advances until the next
+     * character would not fit. That leaves k at the smallest offset whose
+     * remainder still fits the box -- exactly the resting end position.
+     *
+     * The obvious version walks k forward calling fb_text_width(text + k),
+     * which is a loop inside a loop: 64 measurements of up to 64 characters
+     * for a result this gets in one pass. It also cost more image space than
+     * was free, which is how it came to be written this way. */
+    /* TWO budgets, and the tighter one wins.
+     *
+     * ui_text_w budgets ADVANCES, but fb_char paints a whole CELL and
+     * fb_text_boxed REFUSES to paint one crossing UI_CARD_TEXT_R rather than
+     * clipping it. So a tail whose advances fit can still lose its final glyph
+     * outright -- measured on "Daft Punk Is Playing at My House" at the fixed
+     * 2x title size: the walk stopped at offset 12 and painted "...at My Hous",
+     * with the marquee at rest believing it had shown everything.
+     *
+     * The painted tail is (w - last + cell), so requiring that to fit is just a
+     * tighter bound on w -- 350 against 352 for that title. Folding it in here
+     * costs one comparison; testing it inside the loop instead cost 112 bytes
+     * the image did not have. Stopping one character earlier scrolls one
+     * character FURTHER, which is what brings the last glyph inside the box. */
+    uint32_t budget = ui_text_w;
+    {
+        uint32_t cell = FB_CELL(scale);
+        uint32_t room = (UI_CARD_TEXT_R - UI_MARGIN) + last;
+        room = (room > cell) ? room - cell : 0u;
+        if (room < budget) budget = room;
+    }
+
+    uint32_t w = 0, k = i;
+    while (k) {
+        uint32_t j = u8_prev(m->text, k);
+        const char *cp = m->text + j;
+        uint32_t a = fb_adv(u8_next(&cp), scale);
+        if (w + a > budget) break;
+        w += a;
+        k = j;
+    }
+    m->endpos = k;
 }
 
 /* One step. Repaints the whole row first, because the window that follows may
@@ -2385,12 +2687,19 @@ static void ui_marq_init(ui_marquee_t *m, const char *text,
 static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 {
     if (!m->on || (int32_t)(cycles() - m->next) < 0) return;
-    m->next = cycles() + CLK_HZ / 3u;
+    m->next = cycles() + MQ_STEP;
 
-    uint32_t len = 0;
-    while (m->text[len]) len++;
-    if (++m->pos > len) m->pos = 0;
-    if (m->pos == 0) m->next = cycles() + CLK_HZ;   /* pause at the start */
+    /* Out to the tail, hold, back to the start, hold, repeat -- what a DAP
+     * does. The hold at each end is what makes it readable: the start is the
+     * most identifying part of a title, and the tail is the part you were
+     * waiting for, so both deserve a beat of stillness rather than a turn. */
+    if (m->back) {
+        if (m->pos) m->pos = u8_prev(m->text, m->pos);
+        if (!m->pos) { m->back = 0; m->next = cycles() + MQ_HOLD; }
+    } else {
+        if (m->pos < m->endpos) m->pos = u8_skip(m->text, m->pos);
+        if (m->pos >= m->endpos) { m->back = 1; m->next = cycles() + MQ_HOLD; }
+    }
 
     /* Erase the full paintable width, not just the layout budget: a glyph
      * cell reaches past the budget, and anything painted outside the erased
@@ -2425,7 +2734,7 @@ static void ui_draw_chrome(void)
      * words -- a tag encoding the parser declines to handle is our limitation
      * to state in the README, not a caption for someone's music. The filename
      * is the better answer there too, and those files always have one. */
-    char namebuf[48];
+    char namebuf[96];
     const char *title = track_title;
     if (!track_title[0]) {
         /* Last path component, extension dropped: the slot holds a full path
@@ -2443,7 +2752,7 @@ static void ui_draw_chrome(void)
          * such as "Blur - 13.mp3" must not lose its number, and a leading dot
          * is not an extension at all. */
         if (dot && n - dot <= 5u) n = dot;
-        namebuf[n] = 0;
+        namebuf[u8_trim(namebuf, n)] = 0;
 
         /* No tag and no name means APF told us nothing about the slot. Rare,
          * and still not the user's problem to diagnose. */
@@ -2517,14 +2826,16 @@ static void ui_draw_chrome(void)
      * reconnaissance is finished; the capability it demonstrated is what
      * in-core track selection will be built on. */
     if (track_album[0] || track_year[0] || track_trk[0]) {
-        char b[64], *q = b;
+        char b[112], *q = b;
         if (track_trk[0]) {
             const char *t = track_trk;
             while (*t) *q++ = *t++;
             *q++ = ' '; *q++ = '-'; *q++ = ' ';
         }
         const char *a = track_album;
+        char *seg = q;
         while (*a && q < b + sizeof(b) - 10) *q++ = *a++;
+        q = seg + u8_trim(seg, (uint32_t)(q - seg));   /* no half a character */
         if (track_album[0] && track_year[0]) { *q++ = ' '; *q++ = '-'; *q++ = ' '; }
         const char *yr = track_year;
         while (*yr && q < b + sizeof(b) - 1) *q++ = *yr++;
@@ -2737,49 +3048,60 @@ static void ui_splash(void)
  * and the meter read flat and low. Biasing it upward instead just pinned it to
  * the ceiling. Pulling it gently back toward a centre gives a mean around half
  * height with excursions either way, which held across several seeds. */
-#define WV_FPS    18u    /* 36 bars at 18 fps: ~2.0 s for one to cross */
-
-/* The level is a slow BODY plus a decaying TRANSIENT, not one walk between a
- * floor and a ceiling. A single clamped walk gave a mean of 73% but a standard
- * deviation of only 5.7 px -- everything sat in a narrow band and the contour
- * read as texture rather than as music. Music is a sustained level with hits
- * punching above it and dropping back, so that is what this generates: the body
- * wanders gently, and every seventh frame or so a transient is struck somewhere
- * in the headroom left above it and then decays away.
+#define WV_FPS    36u    /* see WV_STEP -- the pair sets the sweep length */
+/* Columns generated per FRAME. The meter scrolls in one column at a time from
+ * an EMPTY history, so the width is not populated until UI_WAVE_N columns have
+ * arrived. At 18 fps and one per frame that is 36 frames -- a full 2.0 s --
+ * and boot used to outlast it, so nobody ever saw it half-drawn.
  *
- * Simulated over 900 frames: mean 69% of height, sd 10.4, range 18..72, and the
- * ceiling is touched under 1% of the time so peaks land rather than flatten. */
+ * Boot is now a few hundred milliseconds, which showed bars on the right and
+ * bare gradient on the left. Priming the history instead cured the half-drawn
+ * look and removed the motion with it: a few columns of scroll in a short boot
+ * reads as a frozen picture.
+ *
+ * The sweep IS the animation, so keep it and make it fit: 3 columns per frame
+ * at 36 fps fills the width in 12 frames, ~0.33 s.
+ *
+ * An OSCILLOSCOPE was built for this and is the better answer -- a trace spans
+ * the full width on its first frame, so it is complete AND moving at every
+ * instant, which is the property no version of the bars gives at both ends. It
+ * came to 16 bytes over the link guard and was set aside rather than shrink a
+ * memory guard to fit an animation. The work is on the branch; revisit it when
+ * there is room. */
+#define WV_STEP    3u
+
 #define WV_BODY   53u    /* percent of full height the body settles around */
 #define WV_PULL   18u    /* body is pulled back toward it by /this per frame */
 #define WV_DRIFT   5u    /* most the body may wander between samples */
-#define WV_HIT     7u    /* a transient is struck about 1 frame in this many */
+#define WV_HIT     8u    /* a transient about 1 frame in this many -- a POWER
+                          * OF TWO so the test is a mask, not a modulo. 7 was
+                          * chosen by feel and 8 is indistinguishable. */
 #define WV_DECAY   2u    /* transient keeps DECAY/4 of itself each frame */
 #define WV_FLOOR   2u    /* a bar at zero reads as broken rather than as quiet */
 
 static uint8_t  wv_on, wv_level, wv_tr;
-static uint32_t wv_next, wv_rng;
 static unsigned char wv_h[UI_WAVE_N];
+static uint32_t wv_next, wv_rng;
 
 /* One frame at env/100 of full height. The same code draws the run and the
  * settle: winding env down pulls the whole meter with it. */
-static void ui_wave_frame(void)
+/* GENERATE one column, no drawing. Split out so a caller can advance the
+ * history without painting -- see ui_wave_frame(), which does WV_STEP of these
+ * per frame. */
+static void ui_wave_gen(void)
 {
-    uint16_t bed = ui_grad_at(UI_WAVE_Y);
-    /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
-     * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
-     * was leaving a gap for an album-art panel that does not exist yet and
-     * cannot, since no track has been opened. The panel appears when the first
-     * track turns out to have artwork, and the player narrows the meter then. */
-    uint32_t ww  = UI_INNER_W;
-
     /* Scroll left and insert at the right -- the playback meter's own shift. */
     for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) wv_h[i] = wv_h[i + 1u];
 
     /* Body. One RNG draw, mean-reverting toward WV_BODY. */
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
     int32_t body = (int32_t)((UI_WAVE_H * WV_BODY) / 100u);
+    /* Multiply-shift instead of modulo. A 0..N range from the top bits of the
+     * RNG is as uniform as the remainder for this purpose, and it drops a
+     * __umodsi3 call from a loop that runs 64 times a frame. */
     int32_t lv   = (int32_t)wv_level
-                 + (int32_t)(wv_rng % (2u * WV_DRIFT + 1u)) - (int32_t)WV_DRIFT
+                 + (int32_t)(((wv_rng & 0x7FFFu) * (2u * WV_DRIFT + 1u)) >> 15)
+                 - (int32_t)WV_DRIFT
                  - ((int32_t)wv_level - body) / (int32_t)WV_PULL;
     if (lv < (int32_t)WV_FLOOR)   lv = (int32_t)WV_FLOOR;
     if (lv > (int32_t)UI_WAVE_H)  lv = (int32_t)UI_WAVE_H;
@@ -2794,7 +3116,7 @@ static void ui_wave_frame(void)
         uint32_t head = (uint32_t)(UI_WAVE_H - wv_level);
         if (head) {
             wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
-            uint32_t hit = wv_rng % (head + 1u);
+            uint32_t hit = ((wv_rng & 0x7FFFu) * (head + 1u)) >> 15;
             if (hit > wv_tr) wv_tr = (uint8_t)hit;
         }
     }
@@ -2802,6 +3124,20 @@ static void ui_wave_frame(void)
     uint32_t smp = (uint32_t)wv_level + wv_tr;
     if (smp > UI_WAVE_H) smp = UI_WAVE_H;
     wv_h[UI_WAVE_N - 1u] = (unsigned char)smp;
+}
+
+/* One frame at env/100 of full height. The same code draws the run and the
+ * settle: winding env down pulls the whole meter with it. */
+static void ui_wave_frame(void)
+{
+    uint16_t bed = ui_grad_at(UI_WAVE_Y);
+    /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
+     * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
+     * was leaving a gap for an album-art panel that does not exist yet and
+     * cannot, since no track has been opened. */
+    uint32_t ww  = UI_INNER_W;
+
+    for (uint32_t k = 0; k < WV_STEP; k++) ui_wave_gen();
 
     for (uint32_t i = 0; i < UI_WAVE_N; i++) {
         uint32_t h   = wv_h[i];
@@ -2824,6 +3160,9 @@ static void ui_wave_anim_start(void)
     wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
     wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
     wv_tr    = 0;
+
+    /* EMPTY, deliberately -- the sweep in from the right IS the animation, and
+     * WV_STEP is what makes it finish in time to be seen whole. */
     for (uint32_t i = 0; i < UI_WAVE_N; i++) wv_h[i] = 0;
 }
 
@@ -2854,9 +3193,16 @@ static void ui_splash_anim(void)
 
     /* Minimum time on screen, then the wave carries on from the read spin for
      * as long as loading takes. Fixed length here rather than "until loaded"
-     * so a fast card still gets a boot animation instead of a flicker. */
+     * so a fast card still gets a boot animation instead of a flicker.
+     *
+     * 150, down from 350 and originally 1600. This is a FLOOR, not the
+     * animation's length -- the meter keeps running through the playlist read,
+     * the track open and the artwork decode, all of which follow and all of
+     * which animate it from inside target_read_slot()'s spin. So this number
+     * buys no animation at all; it is dead time in front of work that already
+     * animates itself, and it only has to outlast a flicker. */
     ui_wave_anim_start();
-    const uint32_t INTRO_MS = 1600u;
+    const uint32_t INTRO_MS = 150u;
     uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
     /* Redraw the card only when the fade STEP changes -- 33 times, not once per
      * spin of an unpaced loop. Repainting the title thousands of times a second
@@ -3070,7 +3416,53 @@ static inline uint32_t dt_read(uint32_t word);   /* defined with the playlist co
  * DEBUG_DIAG. In a release build this was a kilobyte of BSS taken from
  * the heap Helix mallocs its decoder out of, to feed a screen that
  * cannot be reached. */
+extern char _stack_bottom[], _stack_top[];
+
+/* The canary start.S laid 256 bytes above the stack bottom.
+ *
+ * _stack_size is sized so overflow cannot happen -- 9216 against a whole-build
+ * frame sum of 8464 -- so this should never fire. It exists because the
+ * consequence if it ever did is the worst in the firmware: the ring buffer is
+ * immediately below the stack, so an overflow corrupts compressed audio while
+ * APF is DMA-ing into it, and that presents as intermittent glitching with no
+ * fault raised -- indistinguishable from the fragment-cache stutter that cost
+ * three wrong fixes.
+ *
+ * Halting is the right response, not an over-reaction: by the time this trips
+ * only 256 bytes of runway remain, and continuing would trade a dead core for
+ * silently wrong audio. The signature matches the bitstream/firmware interlock
+ * so the two are told apart at a glance. */
+#define STACK_CANARY 0x5A5A5A5Au
+static void stack_check(void)
+{
+    const volatile uint32_t *c =
+        (const volatile uint32_t *)(uintptr_t)(_stack_bottom + 256);
+    if (*c != STACK_CANARY) {
+        REG(R_STAT0) = 0x57ACC000u; REG(R_STAT1) = 0x57ACC000u;
+        REG(R_STAT2) = 0x57ACC000u; REG(R_STAT3) = 0x57ACC000u;
+        for (;;) { }
+    }
+}
+
 #if DEBUG_DIAG
+#if STACK_PAINT
+/* How deep the stack has EVER been, in bytes.
+ *
+ * start.S painted the whole region with 0xA5A5A5A5 before main. Anything still
+ * holding the pattern was never written, so the first disturbed word from the
+ * bottom marks the deepest point reached. Measured rather than modelled:
+ * -fstack-usage gives static frames and says nothing about which chains
+ * actually run, or how deep the compiler's spills go in practice. */
+static uint32_t stack_hwm(void)
+{
+    const volatile uint32_t *p = (const volatile uint32_t *)(uintptr_t)_stack_bottom;
+    uint32_t n = (uint32_t)(((uintptr_t)_stack_top - (uintptr_t)_stack_bottom) / 4u);
+    uint32_t i = 0;
+    while (i < n && p[i] == 0xA5A5A5A5u) i++;
+    return (n - i) * 4u;
+}
+#endif
+
 static uint32_t dt_snap[256];
 #endif
 
@@ -3111,9 +3503,15 @@ static void dt_dump_boot(void)
          * MP3 slot and moves on every track change -- flagging that as damage
          * was wrong and reported a healthy table as clobbered.
          *
-         * What must never move: the slot IDs (even words), and the sizes of
-         * the three files that are fixed for the session. */
-        int may_change = (w == 3u);          /* slot 2's size */
+         * What must never move: the slot IDs (even words).
+         *
+         * SLOT 3's SIZE MOVES TOO -- measured 2026-09-10. This used to say the
+         * other sizes were "fixed for the session", which was an assumption and
+         * a wrong one: opening a playlist by name took w5 from 0x2F9 (761,
+         * playlist.m3u) to 0x65 (101, abstest.m3u), exactly. The screen then
+         * flagged a healthy table with '!', which is the same mistake this
+         * comment block was written to fix for slot 2. */
+        int may_change = (w == 3u) || (w == 5u);   /* slots 2 and 3 sizes */
         if (live != dt_snap[w] && !may_change) bad = 1;
         q = b;
         *q++ = 'w'; q = ui_dec(q, w);
@@ -3440,7 +3838,7 @@ static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
         out[n++] = nm[i];
     }
     if (dot && n - dot <= 5u) n = dot;      /* ".mp3"/".flac", not "Blur - 13" */
-    out[n] = 0;
+    out[u8_trim(out, n)] = 0;
 }
 
 /* Keeps the selection on screen after any move. */
@@ -3482,7 +3880,7 @@ static void pl_ui_row(uint32_t i)
     else
         fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, bg);
 
-    char nm[64];
+    char nm[96];
     pl_ui_label(pos, nm, sizeof(nm));
 
     /* The selected row scrolls when it does not fit. Steps by whole characters
@@ -3692,8 +4090,18 @@ static void ui_draw_dynamic(void)
      * back to rest is the movement that makes it look like a tube rather than
      * a graphic, and freezing it half-shut looks broken. eye_v counts DOWN to
      * rest, so "not yet settled" is a non-zero deflection, same as the VU. */
-    uint32_t vu_settling = ((viz_mode == VIZ_VU)  && (vu_l || vu_r)) ||
-                           ((viz_mode == VIZ_EYE) && (eye_l || eye_r));
+    /* And the cassette's reels, for exactly the same reason: they COAST to a
+     * stop rather than halting on the same frame as the audio, and a spin-down
+     * needs frames to happen in. tape_spd is non-zero only while they are
+     * still turning, so it closes the gate by itself once they reach rest --
+     * the same shape as a needle's remaining deflection.
+     *
+     * Missing this is why the coast did nothing at first: the arithmetic was
+     * right, but the meter block is gated on !paused, so pausing bought one
+     * final frame and then silence. The animation had nowhere to run. */
+    uint32_t vu_settling = ((viz_mode == VIZ_VU)   && (vu_l || vu_r)) ||
+                           ((viz_mode == VIZ_EYE)  && (eye_l || eye_r)) ||
+                           ((viz_mode == VIZ_TAPE) && tape_spd);
     if ((!paused || ui_wave_force || vu_settling) && ++ui_last_vu >= 2u) {
         ui_last_vu = 0;
 
@@ -3809,6 +4217,305 @@ static void ui_draw_dynamic(void)
                         c = UI_TRACK;
                     }
                     fb_rect(x0, y, bw, LED_BLKH, c);
+                }
+            }
+            goto viz_done;
+        }
+
+        /* ---- CASSETTE -------------------------------------------------
+         *
+         * Geometry mirrors tools/cassette_preview.py. Change it THERE first
+         * and look at the PNG.
+         *
+         * ANATOMY, learned from reference photos after the first attempt
+         * looked like a dark slab with a green bar:
+         *
+         *   A cassette is mostly BLACK SHELL plus a LARGE LIGHT LABEL. The
+         *   label dominates; the window does not. Colour lives in the label's
+         *   STRIPES -- that is where the accent goes and what flashes. The
+         *   window is a NARROW horizontal bezel cut into the label's lower
+         *   edge, holding two small toothed hubs with a dark mass of tape
+         *   between them. Front-on you never see the reels as big concentric
+         *   discs, which is what the first version drew.
+         *
+         * WIDTH is the setting that took the longest. 240 and 160 both read
+         * as stretched, and 240 nearly touched both edges whenever the art
+         * panel is up -- ui_wave_w() is only 252 then. A real cassette is
+         * 1.56:1, which at this height is about 110px; 150 is 2.1:1, chosen
+         * by eye against 120 and 180 on hardware.
+         *
+         * Redraw discipline:
+         *   face    -- shell, label, bezel, bottom panel, holes, screws. Once.
+         *   stripes -- only when the flash bucket changes.
+         *   tape    -- only when the progress step changes.
+         *   hubs    -- every frame; two 15-row mask lookups.
+         */
+        if (viz_mode == VIZ_TAPE) {
+            const uint16_t c_shell = FB_RGB(0x3E, 0x44, 0x4C);
+            const uint16_t c_edge  = FB_RGB(0x58, 0x60, 0x69);
+            const uint16_t c_label = FB_RGB(0xF2, 0xEE, 0xE4);
+            const uint16_t c_bezel = FB_RGB(0x17, 0x1A, 0x1D);
+            const uint16_t c_hub   = FB_RGB(0xCE, 0xD3, 0xD8);
+            const uint16_t c_slot  = FB_RGB(0x2A, 0x2E, 0x33);
+            const uint16_t c_tape  = FB_RGB(0x57, 0x44, 0x33);
+            const uint16_t c_tape2 = FB_RGB(0x3C, 0x2F, 0x24);
+            /* The EXPOSED tape is nearly black -- a single ribbon seen
+             * edge-on. The packs are brown because a wound reel shows
+             * many layers at once. Two different things, two tones. */
+            const uint16_t c_ribbon = FB_RGB(0x2C, 0x25, 0x21);
+            const uint16_t c_gap   = FB_RGB(0x26, 0x20, 0x1B);
+            const uint16_t c_panel = FB_RGB(0x3A, 0x3E, 0x44);
+            const uint16_t c_screw = FB_RGB(0x56, 0x5C, 0x64);
+
+            uint32_t shw = (ww > TAPE_SHELL_W + 16u) ? TAPE_SHELL_W : (ww - 16u);
+            uint32_t sx  = UI_MARGIN + (ww - shw) / 2u;
+            uint32_t y0  = UI_WAVE_Y + UI_WAVE_H - TAPE_SHELL_H;   /* 96 tall */
+            uint32_t cx0 = sx + shw / 2u;
+            uint32_t bw  = (shw * 62u) / 100u;           /* window bezel width */
+            uint32_t hdx = (bw * 28u) / 100u;            /* hub offset         */
+            /* 3px inset, not 5. A real cassette label very nearly spans
+             * the shell, and the two reclaimed pixels each side are what let
+             * one more character onto it -- "Aesop's Fables" was losing its
+             * final s. */
+            uint32_t lx  = sx + 3u, lw = (shw > 6u) ? shw - 6u : 2u;
+            uint32_t hcy = y0 + 48u;
+
+            {   /* A new playlist means a new label. Cheap identity: the
+                 * first character plus the length, which is enough to catch a
+                 * change without keeping a copy of the name. */
+                uint32_t nh = 0;
+                for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
+                    nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
+                if (nh != tape_name_h) { tape_name_h = nh; tape_face = 0; }
+            }
+            if (wf || ww != tape_face_w) tape_face = 0;
+
+            if (!tape_face) {
+                /* Per ROW, and over the TALLER band -- this is the only meter
+                 * that draws above UI_WAVE_Y, so it is the only one that needs
+                 * UI_WAVE_TOP restored. */
+                ui_bg_restore(UI_MARGIN, UI_WAVE_Y - UI_WAVE_TOP, ww,
+                              UI_WAVE_H + UI_WAVE_TOP);
+
+                fb_round_rect(sx, y0, shw, TAPE_SHELL_H, 3u, c_shell);
+                /* All FOUR sides. Only top and bottom were outlined before, so
+                 * the left and right had nothing separating the shell from the
+                 * background and read as if the cassette faded into it. Inset
+                 * by the corner radius so the lines follow the rounded shape
+                 * instead of poking out of it. */
+                fb_rect(sx + 3u, y0, shw - 6u, 1u, c_edge);
+                fb_rect(sx + 3u, y0 + TAPE_SHELL_H - 1u, shw - 6u, 1u, c_edge);
+                fb_rect(sx, y0 + 3u, 1u, TAPE_SHELL_H - 6u, c_edge);
+                fb_rect(sx + shw - 1u, y0 + 3u, 1u, TAPE_SHELL_H - 6u, c_edge);
+
+                fb_round_rect(lx, y0 + 6u, lw, 50u, 3u, c_label);
+
+                /* Static accent stripes, then the bezel OVER them -- so they
+                 * stay visible either side of the window, as on a real label.
+                 *
+                 * These used to react per band and it read as glitchy. The
+                 * cause was structural, not tuning: the bezel was redrawn
+                 * every frame while overlapping the stripe rows, so every
+                 * stripe repaint was partially overdrawn on the next frame.
+                 * Both are face furniture; neither belongs in the per-frame
+                 * path. */
+                /* The playlist's name, written on the label like a real one.
+                 * Blank for a single track opened with Load MP3 -- there is no
+                 * album to name then, and an empty label is what a blank tape
+                 * looks like anyway. */
+                if (pl_count && pl_name_full[0]) {
+                    /* Without the extension. Nobody writes ".m3u" on a
+                     * cassette label. */
+                    char nm[PL_FULL_MAX + 1u];
+                    uint32_t n = 0;
+                    while (pl_name_full[n] && n < PL_FULL_MAX) {
+                        nm[n] = pl_name_full[n]; n++;
+                    }
+                    nm[n] = 0;
+                    while (n && nm[n - 1u] != '.') n--;
+                    if (n > 1u) nm[n - 1u] = 0;
+                    /* Cannot be made smaller: the font is in the FPGA (font_rom.v) and
+                     * ts_half bottoms out at TS_1X = 16px. Lightened instead, so it
+                     * reads as writing on a label rather than a heading. */
+                    fb_set_color(FB_RGB(0x6E, 0x74, 0x7C), c_label);
+                    /* BOXED, because fb_char paints a whole 16px cell while
+                     * max_w only budgets ADVANCES -- so a glyph that advances
+                     * 11px still paints 5px further, and the last one on a
+                     * full label put a label-coloured block out on the shell.
+                     * With the art panel up the shell is narrower still and
+                     * that already happened. Bounding the painted cell at the
+                     * label's own right edge is the fix, and it is what lets
+                     * the budget be widened safely. */
+                    fb_text_boxed(lx + 3u, y0 + 14u, nm, TS_1X, TS_1X,
+                                  (lw > 6u) ? lw - 6u : 2u, lx + lw);
+                }
+
+                for (uint32_t i = 0; i < 3u; i++)
+                    fb_rect(lx, y0 + 40u + i * 6u, lw, 4u,
+                            ui_mix(c_label, ui_accent, (i == 1u) ? 3u : 2u, 4u));
+
+                fb_round_rect(cx0 - bw / 2u, y0 + 30u, bw, 36u, 9u, c_bezel);
+
+                /* The wound tape on both reels. Concentric 2px bands rather
+                 * than a flat disc, because one flat tone cannot show that it
+                 * is wound at all. Static, so it draws with the face and no
+                 * longer needs the erase-and-repaint dance that a changing
+                 * radius forced on a single-buffered framebuffer. */
+                for (uint32_t side = 0; side < 2u; side++) {
+                    uint32_t cx = side ? cx0 + hdx : cx0 - hdx;
+                    uint32_t k  = 0;
+                    for (uint32_t rr = TAPE_HUB_R + TAPE_PACK;
+                         rr > TAPE_HUB_R; rr -= 2u, k++)
+                        tape_disc(cx, hcy, rr, (k & 1u) ? c_tape2 : c_tape);
+                }
+
+                fb_round_rect(sx + 16u, y0 + 72u, (shw > 32u) ? shw - 32u : 2u,
+                              20u, 3u, c_panel);
+                {
+                    static const signed char hx[4] = { -38, -15, 15, 38 };
+                    static const unsigned char hw[4] = { 6u, 7u, 7u, 6u };
+                    for (uint32_t k = 0; k < 4u; k++)
+                        fb_rect((uint32_t)((int32_t)cx0
+                                           + hx[k] * (int32_t)shw / 150),
+                                y0 + 77u, hw[k], 8u, c_bezel);
+                }
+                for (uint32_t k = 0; k < 4u; k++) {
+                    uint32_t px = (k & 1u) ? sx + shw - 9u : sx + 4u;
+                    uint32_t py = (k & 2u) ? y0 + 86u : y0 + 5u;
+                    fb_rect(px, py, 5u, 5u, c_screw);
+                }
+                tape_face   = 1u;
+                tape_face_w = (uint16_t)ww;
+                tape_rim  = 0xFFu;
+                tape_glow = 0xFFu;
+            }
+
+
+            {   /* The shell RIM takes overall level. One thin outline round
+                 * the largest perimeter here, so it reads at a glance, and
+                 * nothing else paints those rows. */
+                uint32_t lvl = (peak_amp * 255u) / 32768u;
+                if (lvl > 255u) lvl = 255u;
+                if (paused) lvl = 0;
+                uint8_t rim = (uint8_t)(lvl >> 5);
+                if (rim != tape_rim) {
+                    tape_rim = rim;
+                    /* A THIRD of the way to the accent at most. Driving it to
+                     * full accent made the top and bottom edges read as two
+                     * flashing bars rather than as a shell catching light. */
+                    uint16_t rc = ui_mix(c_edge, ui_accent, rim, 24u);
+                    fb_rect(sx + 3u, y0, shw - 6u, 1u, rc);
+                    fb_rect(sx + 3u, y0 + TAPE_SHELL_H - 1u, shw - 6u, 1u, rc);
+                    fb_rect(sx, y0 + 3u, 1u, TAPE_SHELL_H - 6u, rc);
+                    fb_rect(sx + shw - 1u, y0 + 3u, 1u, TAPE_SHELL_H - 6u, rc);
+                }
+            }
+
+            {   /* The hubs, every frame. Both turn the SAME way at the SAME
+                 * rate: with no visible reels, different speeds only read as
+                 * the two being out of step.
+                 *
+                 * Speed is capped by aliasing, not taste. The UI redraws at
+                 * 38 Hz and a six-slot hub repeats every 60 degrees, so above
+                 * half a tooth pitch per frame it appears to turn BACKWARDS.
+                 * One pitch is 6*256 units, so 768/frame is the wall. 330 is
+                 * ~1.35 rev/s. A real cassette hub turns 0.3-0.7 rev/s.
+                 *
+                 * Constant, where it used to ease from 290 to 400 across a
+                 * track. That ease was the last consumer of the progress
+                 * fraction, and a 10% drift nobody can perceive is not worth
+                 * keeping the term alive for. */
+                /* COAST, rather than stopping dead. A tape deck's reels have
+                 * mass: they run down over a moment when you hit pause and
+                 * spin back up when you let go. Stopping on the same frame as
+                 * the audio is the one thing here that reads as a drawing
+                 * rather than a machine.
+                 *
+                 * Asymmetric on purpose: a deck's motor picks up faster than
+                 * friction brings it down.
+                 *
+                 * Rates are per METER FRAME, and the two directions run at
+                 * different rates, which is worth knowing before retuning
+                 * them. Spinning DOWN happens while paused, where the pause
+                 * loop paces at CLK_HZ/30 and the meter gate halves it: 15 Hz,
+                 * so 330 at 22/frame is ~1.0 s to rest. Spinning UP happens
+                 * while playing, at the normal meter rate, so 40/frame is a
+                 * few tenths. */
+                uint16_t want = paused ? 0u : 330u;
+                if (tape_spd < want) {
+                    tape_spd += 40u;
+                    if (tape_spd > want) tape_spd = want;
+                } else if (tape_spd > want) {
+                    tape_spd = (tape_spd > 22u) ? (uint16_t)(tape_spd - 22u) : 0u;
+                }
+                tape_ph_s += tape_spd;
+                uint32_t ph = (tape_ph_s >> 8) % TAPE_HUB_PH;
+
+                /* The hubs take the MID band. They are redrawn every frame for
+                 * the rotation anyway, so tinting them is free and cannot
+                 * tear -- and they are the brightest thing here, so a small
+                 * shift carries. */
+                uint32_t mid = ((uint32_t)spec_lvl[8] + (uint32_t)spec_lvl[9]) / 2u;
+                if (paused) mid = 0;
+                uint16_t hubc = ui_mix(c_hub, ui_accent, mid >> 5, 20u);
+
+                {   /* The exposed tape between the packs, and it GLOWS with
+                     * bass again -- that was the only thing reading as beat
+                     * and it should not have gone.
+                     *
+                     * The packs are static now, so this is the only thing
+                     * inside the window that repaints, and nothing can be
+                     * caught half-drawn by another element's schedule. */
+                    uint32_t bass = ((uint32_t)spec_lvl[SPEC_BANDS - 2u] +
+                                     (uint32_t)spec_lvl[SPEC_BANDS - 1u]) / 2u;
+                    if (paused) bass = 0;
+                    uint8_t glow = (uint8_t)(bass >> 5);
+                    if (glow != tape_glow) {
+                        tape_glow = glow;
+                        uint16_t tc = ui_mix(c_ribbon, ui_accent, glow, 20u);
+
+                        /* Contoured against both reels, row by row, because
+                         * that is what the gap between two reels looks like.
+                         *
+                         * One radius for both sides now that the wind is
+                         * fixed. Height stops one row short of it so every row
+                         * has a defined span at both ends -- at the very top
+                         * and bottom the curve reaches nothing, and the ribbon
+                         * would spill to the bezel. */
+                        uint32_t rl = TAPE_HUB_R + TAPE_PACK;
+                        uint32_t hh = rl - 1u;
+                        for (int32_t dy = -(int32_t)hh; dy <= (int32_t)hh; dy++) {
+                            /* +1 on the LEFT only. fb_rect spans xl..xr-1, so
+                             * without it the ribbon's first pixel lands on the
+                             * left reel's outermost one and the right stays
+                             * clear -- an asymmetric notch. It self-healed
+                             * while the packs repainted with progress; they
+                             * are static now, so it would be permanent. */
+                            uint32_t xl = (cx0 - hdx) + tape_hw(rl, dy) + 1u;
+                            uint32_t xr = (cx0 + hdx) - tape_hw(rl, dy);
+                            if (xr > xl)
+                                fb_rect(xl, (uint32_t)((int32_t)hcy + dy),
+                                        xr - xl, 1u, tc);
+                        }
+                    }
+                }
+
+
+                for (uint32_t side = 0; side < 2u; side++) {
+                    uint32_t cx = side ? cx0 + hdx : cx0 - hdx;
+                    tape_disc(cx, hcy, TAPE_HUB_R, hubc);
+                    for (uint32_t iy = 0; iy < TAPE_HUB_N; iy++) {
+                        uint32_t m = tape_hub[ph][iy];
+                        uint32_t y = hcy - TAPE_HUB_R + iy;
+                        for (uint32_t ix = 0; ix < TAPE_HUB_N; ) {
+                            if (!(m & (1u << ix))) { ix++; continue; }
+                            uint32_t run = 0;
+                            while (ix + run < TAPE_HUB_N &&
+                                   (m & (1u << (ix + run)))) run++;
+                            fb_rect(cx - TAPE_HUB_R + ix, y, run, 1u, c_slot);
+                            ix += run;
+                        }
+                    }
                 }
             }
             goto viz_done;
@@ -5242,6 +5949,7 @@ ui_tail:
 
 #define UNCACHED    0xC0000000u
 #define MP3_SLOT_ID 2u
+#define FONT_SLOT_ID 5u    /* mp3font.bin -- loaded straight into SDRAM by RTL */
 #define FW_SLOT_ID  1u   /* touched only to flush APF's slot cache */
 
 /* MP3 ring buffer: an APF DMA target, so firmware must read it through the
@@ -5251,6 +5959,25 @@ ui_tail:
 extern char _ring_start, _ring_size;
 #define RING_OFF     ((uint32_t)(uintptr_t)&_ring_start)
 #define RING_SIZE    ((uint32_t)(uintptr_t)&_ring_size)
+
+/* A slot identity check may only run with enough audio buffered to sit out
+ * a slow answer from the card.
+ *
+ * Rarer is not the same as safe: a blocking command issued while the decoder
+ * is already behind is the stall, however seldom it runs. So a check waits
+ * until the hardware FIFO is at least half full AND the ring holds at least
+ * half its bytes -- roughly 23 ms of decoded audio on top of a couple of
+ * hundred milliseconds of compressed. If that never comes true the check is
+ * simply skipped, which is the right answer: a core struggling to keep the
+ * buffers full has no business spending time asking the card questions.
+ *
+ * Always true while idle or paused, where there is nothing to disturb --
+ * including the moment the menu closes, which is the check that matters. */
+static int audio_cushion(void)
+{
+    if (idle || paused) return 1;
+    return pcm_level() >= 1024u && ring_fill >= RING_SIZE / 2u;
+}
 #define REFILL_CHUNK 4096u
 
 
@@ -5298,7 +6025,7 @@ static void meters_feed(const short *pcm, int n, int stereo)
          * SPEC_BANDS. One pass down the ladder per sample, and most samples
          * stop after a stage or two, because the lower stages run at a
          * fraction of the rate. */
-        if (viz_mode == VIZ_LED) {
+        if (viz_mode == VIZ_LED || viz_mode == VIZ_TAPE) {
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
                 int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
                                    : (int32_t)pcm[i];
@@ -5613,11 +6340,25 @@ static void poll_input(void)
     {
         static uint32_t a_t0;
         static uint8_t  a_fired;      /* the hold action already ran this press */
+        /* ARMED only by an edge THIS logic saw. Without it the hold trusts a
+         * timestamp another consumer may have skipped, and the playlist
+         * browser is exactly such a consumer: picking a track sets
+         * pl_ui_play_req and then masks A out of edge, fall AND keys for that
+         * pass. So a_t0 kept a timestamp from minutes earlier and a_fired kept
+         * 0, and on the very next pass -- overlay closed, nothing masking --
+         * a still-held A satisfied the hold comparison instantly and dropped
+         * the user into 1.2x on a track that had only just started.
+         *
+         * Disarming is what makes this work, and it is free: while the overlay
+         * is open `keys` is masked to SELECT, so the disarm below fires every
+         * pass and no edge can re-arm. A press that began inside the browser
+         * therefore cannot reach either action after it closes. */
+        static uint8_t  a_armed;
         const uint32_t  a_hold_cy = CLK_HZ / 1000u * SPEED_HOLD_MS;
 
-        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; }
+        if (edge & KEY_A) { a_t0 = cycles(); a_fired = 0; a_armed = 1u; }
 
-        if ((keys & KEY_A) && !a_fired &&
+        if ((keys & KEY_A) && a_armed && !a_fired &&
             (int32_t)(cycles() - a_t0) >= (int32_t)a_hold_cy) {
             a_fired = 1;
             speed_fast ^= 1u;
@@ -5631,7 +6372,10 @@ static void poll_input(void)
             ui_last_sec = 0xFFFFFFFFu;
         }
 
-        if ((fall & KEY_A) && !a_fired) {
+        /* The tap is guarded too. The same swallowed press would otherwise
+         * pause the track the browser had just started, the moment the user
+         * let go of A -- the identical hole, one action further along. */
+        if ((fall & KEY_A) && a_armed && !a_fired) {
             /* Select+A shows the boot datatable snapshot, mirroring Select+B
              * for the 0190 struct. Plain A still plays/pauses. */
 #if DEBUG_DIAG
@@ -5643,6 +6387,11 @@ static void poll_input(void)
                 if (!(paused & 1u)) stopped = 0;  /* playing is never "stopped" */
             }
         }
+
+        /* AFTER both actions, never before: on the release pass `keys` has
+         * already lost A while `fall` still carries it, so disarming first
+         * would eat every ordinary tap. */
+        if (!(keys & KEY_A)) a_armed = 0u;
     }
     if (edge & KEY_X) {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
@@ -5666,7 +6415,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_MIRROR ? "METER: MIRRORED BARS"
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
                    : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
-                                            : "METER: SPECTRUM");
+                   : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
+                                            : "METER: CASSETTE");
         settings_mark_dirty();
     }
     if (edge & KEY_Y) {
@@ -5715,7 +6465,7 @@ static void poll_input(void)
              * never surfaced, so every question about a slow load used to be
              * answered by estimating. */
             sel_used = 1;
-            char b[24];
+            char b[40];        /* 24 held HSAT; K needs the rest */
             uint32_t i = 0;
             const char *lbl = "HSAT";
             const uint16_t v[4] = { ld_head, ld_size, ld_art, ld_total };
@@ -5728,6 +6478,17 @@ static void poll_input(void)
                 b[i++] = (char)('0' + n % 10u);
                 if (k < 4u) b[i++] = ' ';
             }
+#if STACK_PAINT
+            /* K = stack bytes ever used, against _stack_size. This is the
+             * number that decides how much of the 16 KB can be handed back. */
+            {
+                uint32_t hw = stack_hwm();
+                b[i++] = 'K';
+                uint32_t d = 10000u;
+                while (d > 1u && hw < d) d /= 10u;
+                while (d) { b[i++] = (char)('0' + (hw / d) % 10u); d /= 10u; }
+            }
+#endif
             b[i] = 0;
             ui_toast_set(b, 0xFFFFFFFFu, 0);
         } else
@@ -5907,10 +6668,13 @@ static void poll_input(void)
      * closing edge below never fired. */
     if (in & IN_MENU) {
         if (!menu_was) { set_flush_now = 1u; menu_was = 1u; }
+        menu_at = cycles();             /* keeps the backstops quick nearby */
         paused |= 2u;
     } else {
-        /* CLOSING edge: the moment a Load Playlist pick has just been made. */
-        if (menu_was) { pl_check_req = 1u; menu_was = 0u; }
+        /* CLOSING edge: the moment a pick has just been made. Ask about BOTH
+         * slots -- this used to ask only about the playlist, which is why the
+         * track slot needed a poll running all through playback to cover it. */
+        if (menu_was) { pl_check_req = 1u; tk_poll_at = cycles(); menu_was = 0u; }
         paused &= ~2u;
     }
 
@@ -6010,7 +6774,35 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
      * actually goes during a playlist read. ui_boot_tick() is a single compare
      * and return unless a note is armed, which it only is around pl_load(), so
      * every other caller of this function is unaffected. */
-    while (!target_read_poll()) { ui_boot_tick(); ui_wave_anim_tick(); }
+    /* BOUNDED. This was `while (!target_read_poll())` with no way out, and a
+     * read that never completes is then a permanent hang -- the CPU spins, the
+     * screen freezes on whatever was last drawn, and the core is dead until
+     * power-cycled. That is the worst failure mode in the firmware and it sat
+     * on the hottest path: an artwork decode issues 43 reads for a typical
+     * cover and 207 for the largest on the test card, all through here, all at
+     * a track boundary.
+     *
+     * NOT the end-of-song crash, which was the cassette meter's own arithmetic
+     * (see TAPE_PACK). This bound was deployed while that was still unknown
+     * and is kept purely as defence: an unbounded wait on external hardware is
+     * wrong regardless of whether it has been observed to hang.
+     *
+     * 500 ms is ~100x a 4 KB read's real cost, so this cannot fire on a slow
+     * card -- only on one that has genuinely stopped answering. Reporting
+     * failure hands the caller a path it already has: every target_read_slot()
+     * call site checks the return. A missing cover or a failed load is
+     * recoverable; a hang is not. */
+    uint32_t rd_t0 = cycles();
+    while (!target_read_poll()) {
+        ui_boot_tick();
+        ui_wave_anim_tick();
+        if ((int32_t)(cycles() - rd_t0) > (int32_t)(CLK_HZ / 2u)) {
+            REG(R_STAT3) = 0xDEAD0000u | (slot & 0xFFu);
+            rd_pending = 0;
+            rd_ok      = 0;
+            return 0;
+        }
+    }
     rd_pending = 0;
     return rd_ok;
 }
@@ -6270,8 +7062,30 @@ static int slot_changed(void)
     return id && cur_file_id && id != cur_file_id;
 }
 
+/* End of a filename run starting at i.
+ *
+ * Printable ASCII, plus COMPLETE UTF-8 sequences so a Japanese filename is one
+ * run rather than several ASCII fragments. Deliberately strict about the high
+ * bytes: the run's offset is what the playlist writes a new name over, so a
+ * stray 0x80+ byte belonging to a neighbouring field must end the run rather
+ * than extend it. */
+static uint32_t name_run_end(const uint8_t *b, uint32_t i, uint32_t n)
+{
+    while (i < n) {
+        uint32_t c = b[i], k, j = 1u;
+        if (c >= 0x20u && c < 0x7Fu) { i++; continue; }
+        k = (c >= 0xC2u && c <= 0xDFu) ? 1u : (c >= 0xE0u && c <= 0xEFu) ? 2u
+          : (c >= 0xF0u && c <= 0xF4u) ? 3u : 0u;
+        if (!k || i + k >= n) break;
+        while (j <= k && (b[i + j] & 0xC0u) == 0x80u) j++;
+        if (j <= k) break;
+        i += k + 1u;
+    }
+    return i;
+}
+
 /* Pull the filename out of the 0190 response WITHOUT knowing its layout: the
- * longest run of printable ASCII in the struct IS the name. */
+ * longest run of filename text in the struct IS the name. */
 static void slot_filename(char *out, uint32_t out_size)
 {
     uint8_t raw[DT_WORDS * 4u];
@@ -6288,7 +7102,7 @@ static void slot_filename(char *out, uint32_t out_size)
     uint32_t best = 0, best_len = 0, i = 0;
     while (i < sizeof(raw)) {
         uint32_t start = i;
-        while (i < sizeof(raw) && raw[i] >= 0x20u && raw[i] < 0x7Fu) i++;
+        i = name_run_end(raw, i, sizeof(raw));
         if (i - start > best_len) { best_len = i - start; best = start; }
         i++;
     }
@@ -6296,7 +7110,7 @@ static void slot_filename(char *out, uint32_t out_size)
     uint32_t n = best_len;
     if (n > out_size - 1u) n = out_size - 1u;
     for (uint32_t k = 0; k < n; k++) out[k] = (char)raw[best + k];
-    out[n] = 0;
+    out[u8_trim(out, n)] = 0;
 }
 
 /* Force APF to forget what it knows about the MP3 slot. Its fragment cache is
@@ -7062,20 +7876,74 @@ static uint32_t id3_len(const uint8_t *b)
             ((uint32_t)(b[9] & 0x7Fu)));
 }
 
-/* Extracts a text frame (TIT2, TPE2, TALB, ...) from a tag already in memory.
- * Scoped deliberately: only what the caller loaded, and only ISO-8859-1/UTF-8
- * -- UTF-16 is reported as its own case rather than silently garbled. Handles
- * v2.3 (plain big-endian size) and v2.4 (syncsafe). */
-/* Decode one text frame BODY -- the encoding byte and the bytes after it -- into
- * out. Shared by the in-memory parser and the card walk so the two cannot drift
- * on what a given encoding means.
+/* Windows-1252's 0x80..0x9F, which is what "Latin-1" tags really contain: the
+ * smart quotes and dashes a tagger types sit here, where true ISO-8859-1 has
+ * only control codes. 0 = unassigned. */
+static const uint16_t cp1252_hi[32] = {
+    0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017D, 0,
+    0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+};
+
+/* Is this whole run valid UTF-8? Pure ASCII is. */
+static int u8_valid(const uint8_t *b, uint32_t n)
+{
+    uint32_t i = 0;
+    while (i < n && b[i]) {
+        uint32_t c = b[i], k;
+        if (c < 0x80u) { i++; continue; }
+        k = (c >= 0xC2u && c <= 0xDFu) ? 1u : (c >= 0xE0u && c <= 0xEFu) ? 2u
+          : (c >= 0xF0u && c <= 0xF4u) ? 3u : 0u;
+        if (!k || i + k >= n) return 0;
+        for (uint32_t j = 1; j <= k; j++)
+            if ((b[i + j] & 0xC0u) != 0x80u) return 0;
+        i += k + 1u;
+    }
+    return 1;
+}
+
+/* Single-byte tag text into UTF-8: ID3v2 encodings 0 and 3, and ID3v1.
  *
- * UTF-16 (encodings 1 and 2) used to be refused outright, surfacing as its own
- * error text. That is honest but it is still a track with no title, and UTF-16
- * is what several taggers emit by default -- one of the ten tracks on the test
- * card has every text frame in it. The font atlas is ASCII 0x20..0x7E, so
- * anything above Latin-1 could not be drawn regardless; a code unit that does
- * not fit becomes '?', which loses an accent but keeps the title. */
+ * Encoding 0 is supposed to be ISO-8859-1, but taggers write UTF-8 into it all
+ * the time, and a real Latin-1 string is almost never valid UTF-8 by accident.
+ * So a run that validates is taken as UTF-8, and anything else is read as
+ * Windows-1252. Shift-JIS, which older Japanese rips store here, is neither
+ * and will still come out wrong -- decoding it needs a table this image has
+ * no room for. */
+static uint32_t txt8_to_utf8(const uint8_t *b, uint32_t n, char *out, uint32_t cap)
+{
+    int      utf8 = u8_valid(b, n);
+    uint32_t i = 0, o = 0;
+    while (i < n && b[i]) {
+        uint32_t c = b[i], k = 1u, cp = c;
+        if (c >= 0x80u) {
+            if (utf8) {
+                k = (c >= 0xF0u) ? 4u : (c >= 0xE0u) ? 3u : 2u;
+                if (o + k >= cap) break;
+                for (uint32_t j = 0; j < k; j++) out[o++] = (char)b[i + j];
+                i += k;
+                continue;
+            }
+            if (c < 0xA0u) cp = cp1252_hi[c - 0x80u] ? cp1252_hi[c - 0x80u] : '?';
+        }
+        uint32_t o2 = u8_put(out, o, cap, cp);
+        if (o2 == o) break;
+        o = o2;
+        i += k;
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* Decode one text frame BODY -- the encoding byte and the bytes after it -- into
+ * out, as UTF-8. Shared by the in-memory parser and the card walk so the two
+ * cannot drift on what a given encoding means. Handles v2.3 and v2.4 alike;
+ * the frame size has already been decoded by the caller.
+ *
+ * UTF-16 (encodings 1 and 2) used to become '?' above Latin-1 because the font
+ * was ASCII. It is converted now; a surrogate pair is outside the font's plane
+ * and stays a single '?'. */
 static int id3_text_body(const uint8_t *b, uint32_t fsize, char *out,
                          uint32_t out_size)
 {
@@ -7091,22 +7959,23 @@ static int id3_text_body(const uint8_t *b, uint32_t fsize, char *out,
             if (b[1] == 0xFFu && b[2] == 0xFEu)      { be = 0; s = 3u; }
             else if (b[1] == 0xFEu && b[2] == 0xFFu) { be = 1; s = 3u; }
         }
-        while (s + 1u < fsize && i + 1u < out_size) {
+        while (s + 1u < fsize) {
             uint32_t u = be ? (((uint32_t)b[s] << 8) | b[s + 1u])
                             : (((uint32_t)b[s + 1u] << 8) | b[s]);
             if (!u) break;
-            out[i++] = (u < 0x100u) ? (char)u : '?';
             s += 2u;
+            if (u >= 0xD800u && u < 0xE000u) {
+                if (u < 0xDC00u) s += 2u;       /* drop the low half with it */
+                u = '?';
+            }
+            uint32_t i2 = u8_put(out, i, out_size, u);
+            if (i2 == i) break;
+            i = i2;
         }
+        out[i] = 0;
     } else {
-        if (n > out_size - 1u) n = out_size - 1u;
-        for (i = 0; i < n; i++) {
-            uint8_t c = b[1u + i];
-            if (c == 0) break;
-            out[i] = (char)c;
-        }
+        i = txt8_to_utf8(b + 1u, n, out, out_size);
     }
-    out[i] = 0;
     return i ? ID3_OK : ID3_NO_FRAME;
 }
 
@@ -7185,9 +8054,7 @@ static void id3v1_read(void)
         uint32_t n = f[k].len;
         while (n && (tagbuf[f[k].off + n - 1u] == ' ' ||
                      tagbuf[f[k].off + n - 1u] == 0)) n--;
-        if (n > cap[k] - 1u) n = cap[k] - 1u;
-        for (uint32_t i = 0; i < n; i++) dst[k][i] = (char)tagbuf[f[k].off + i];
-        dst[k][n] = 0;
+        txt8_to_utf8(tagbuf + f[k].off, n, dst[k], cap[k]);
     }
 
     if (!track_year[0]) {
@@ -7361,7 +8228,7 @@ static int read_track_head(void)
 
     int attempt = 0, have_prev = 0;
     uint32_t skip = 0, prev_skip = 0;
-    char prev_try[48];
+    char prev_try[96];
     /* PROVE THE SLOT HAS SETTLED before reading anything we will act on.
      *
      * After a 0192 the slot does not switch instantly, and the old design
@@ -7490,11 +8357,21 @@ static int read_track_head(void)
     title_status = ID3_NO_TAG;
     if (skip) {
         /* MUST happen before the audio re-read below, which overwrites ring[]
-         * with audio content. TPE2 (band/album artist) rather than TPE1. */
+         * with audio content. */
         title_status = id3_find_text(ring, ring_fill, skip, "TIT2",
                                      track_title,  sizeof(track_title));
+        /* TPE2 (band / album artist) first, TPE1 (lead performer) second.
+         *
+         * TPE1 was missing here entirely -- only the fuller walk below knew
+         * about it -- so a file whose TITLE was found early never reached
+         * that walk and its artist row stayed blank, however close to the
+         * front TPE1 sat. Found on a file carrying TPE1 at offset 29 with
+         * TPE2 past a 30 KB cover. Costs nothing: the tag is already here. */
         id3_find_text(ring, ring_fill, skip, "TPE2",
                       track_artist, sizeof(track_artist));
+        if (!track_artist[0])
+            id3_find_text(ring, ring_fill, skip, "TPE1",
+                          track_artist, sizeof(track_artist));
         id3_find_text(ring, ring_fill, skip, "TALB",
                       track_album, sizeof(track_album));
         id3_find_text(ring, ring_fill, skip, "TRCK",
@@ -7514,7 +8391,7 @@ static int read_track_head(void)
          * the in-memory parser then finds everything for free. The ring is
          * 32 KB and is reloaded with audio immediately below, so filling it
          * with tag bytes here costs nothing. */
-        if (title_status != ID3_OK && skip > ring_fill) {
+        if ((title_status != ID3_OK || !track_artist[0]) && skip > ring_fill) {
             uint32_t want = skip;
             if (want > RING_SIZE) want = RING_SIZE;
             int ok = 1;
@@ -7527,6 +8404,8 @@ static int read_track_head(void)
             title_status = id3_find_text(ring, ring_fill, skip, "TIT2",
                                          track_title,  sizeof(track_title));
             if (!track_artist[0]) id3_find_text(ring, ring_fill, skip, "TPE2",
+                                                track_artist, sizeof(track_artist));
+            if (!track_artist[0]) id3_find_text(ring, ring_fill, skip, "TPE1",
                                                 track_artist, sizeof(track_artist));
             if (!track_album[0])  id3_find_text(ring, ring_fill, skip, "TALB",
                                                 track_album, sizeof(track_album));
@@ -7571,7 +8450,7 @@ static int read_track_head(void)
             if (!track_title[i]) break;
         }
         if (same) break;                 /* two reads agree -> settled */
-        if (attempt >= 1) break;         /* 0190 gates the load; belt and braces */
+        if (attempt >= 7) break;         /* 0190 gates the load; belt and braces */
     }
 
     for (uint32_t i = 0; i < sizeof(track_title); i++) prev_try[i] = track_title[i];
@@ -7580,7 +8459,20 @@ static int read_track_head(void)
 
     reload_retries++;      /* R on screen = convergence passes, not failures */
     attempt++;
-    uint32_t until = cycles() + CLK_HZ / 4u;         /* ~250 ms, then re-read */
+    /* POLL at 30 ms, up to eight reads -- not one flat 250 ms sleep.
+     *
+     * `have_prev` is a local starting at 0, so the first pass can never take
+     * either break above: every call paid the full 250 ms whether or not the
+     * slot had settled. On boot it was pure dead time, because the settle
+     * block above is skipped there (no previous file to differ from), so
+     * there was nothing to converge against in the first place.
+     *
+     * Same worst-case budget (8 x 30 ms), but it exits the moment two reads
+     * agree, which for a settled slot is the second one. And when a slot IS
+     * mid-switch it now gets eight chances instead of two, so the check is
+     * stronger as well as faster. 30 ms is the interval the settle block
+     * above already uses for the same question. */
+    uint32_t until = cycles() + CLK_HZ / 32u;        /* ~30 ms, then re-read */
     while ((int32_t)(cycles() - until) < 0) { }
     }
 
@@ -7635,6 +8527,16 @@ static int read_track_head(void)
 
 /* Everything needed to start a track from the beginning, shared by boot and by
  * a reload. ONE function deliberately -- two copies of this drift apart. */
+/* -Os on THIS FUNCTION ONLY. It is 11 KB of genuinely cold code -- one run per
+ * track change -- and the image has been deciding design questions for want of
+ * a few hundred bytes. The ROADMAP assumed this needed the file split into a
+ * separate translation unit, with dozens of statics exported; the attribute
+ * does it without touching the structure at all.
+ *
+ * The audio path is NOT affected: main's sample loop stays at -O2, which is
+ * what build.sh's comment insists on for the 45.7 MHz of 60 the MP3 decode
+ * needs. */
+__attribute__((optimize("Os")))
 static int load_track(void)
 {
     /* Release the FLAC buffer FIRST. This runs before the format is known --
@@ -8102,6 +9004,19 @@ int main(void)
      * has to happen now; the viewing does not. Select+A shows it. */
     dt_snapshot();
 
+    /* Is the extended font in SDRAM? APF lists every slot as an {id, size} pair
+     * at the START of that same table (measured -- see core_game.vh), and the
+     * snapshot above caught it before anything of ours wrote there. The RTL
+     * loads the file; the CPU only needs to know whether to send glyph indexes
+     * or fall back to '?'.
+     *
+     * EXACT size, not merely present: a font built by a different revision of
+     * the generator would put glyphs where this firmware does not expect them,
+     * and the wrong character is worse than a '?'. */
+    for (uint32_t w = 0; w + 1u < DT_RESP_W; w += 2u)
+        if (dt_read(w) == FONT_SLOT_ID && dt_read(w + 1u) == FEXT_BYTES)
+            fext_ok = 1u;
+
     /* Settings FIRST, so the splash is drawn in the accent the user actually
      * chose. It only reads a slot -- nothing on screen depends on it -- and
      * painting before it meant the very first thing shown was always the
@@ -8249,6 +9164,7 @@ int main(void)
 
     for (;;) {
         poll_input();
+        stack_check();
 
         /* Ticks the idle counter and blanks when it reaches the timeout.
          *
@@ -8495,6 +9411,7 @@ int main(void)
             && !pl_reload_pending && !pl_reload_armed
             && !reload_pending    && !reload_armed
             && !rd_pending
+            && near_menu() && audio_cushion()
             && (int32_t)(cycles() - pl_poll_at) >= 0) {
             pl_poll_at   = cycles() + CLK_HZ * 3u;
             pl_check_req = 1u;              /* same comparison path as below */
@@ -8507,6 +9424,7 @@ int main(void)
             && !pl_reload_pending && !pl_reload_armed
             && !reload_pending    && !reload_armed
             && !rd_pending
+            && near_menu() && audio_cushion()
             && (int32_t)(cycles() - tk_poll_at) >= 0) {
             tk_poll_at = cycles() + CLK_HZ * 2u;
             if (slot_changed()) reload_pending = 1u;
@@ -9248,17 +10166,33 @@ int main(void)
             if (pl_ui_mq_sel != pl_ui_sel) {
                 pl_ui_mq_sel  = pl_ui_sel;
                 pl_ui_mq_off  = 0;
-                pl_ui_mq_next = cycles() + CLK_HZ;      /* hold at the start */
+                pl_ui_mq_back = 0;
+                pl_ui_mq_next = cycles() + MQ_HOLD;     /* hold at the start */
             } else if ((int32_t)(cycles() - pl_ui_mq_next) >= 0) {
-                char nm[64];
+                char nm[96];
                 pl_ui_label(pl_ui_sel, nm, sizeof(nm));
                 if (fb_text_width(nm, TS_1X) > PL_UI_W - 40u) {
-                    uint32_t len = 0;
-                    while (nm[len]) len++;
-                    pl_ui_mq_next = cycles() + CLK_HZ / 3u;
-                    if (++pl_ui_mq_off >= len) {
-                        pl_ui_mq_off  = 0;
-                        pl_ui_mq_next = cycles() + CLK_HZ;  /* pause, then again */
+                    pl_ui_mq_next = cycles() + MQ_STEP;
+                    /* Out to the tail, hold, back to the start, hold -- the
+                     * same bounce the info card's marquee does, and for the
+                     * same reason: the offset used to run to the string
+                     * length, so the row went BLANK for a step before it
+                     * snapped back. This row already re-measures each step, so
+                     * the tail test is free here. */
+                    /* A character at a time, not a byte: see ui_marq_init. */
+                    if (pl_ui_mq_back) {
+                        if (pl_ui_mq_off) pl_ui_mq_off = u8_prev(nm, pl_ui_mq_off);
+                        if (!pl_ui_mq_off) {
+                            pl_ui_mq_back = 0;
+                            pl_ui_mq_next = cycles() + MQ_HOLD;
+                        }
+                    } else {
+                        pl_ui_mq_off = u8_skip(nm, pl_ui_mq_off);
+                        if (fb_text_width(nm + pl_ui_mq_off, TS_1X)
+                                <= PL_UI_W - 40u) {
+                            pl_ui_mq_back = 1;
+                            pl_ui_mq_next = cycles() + MQ_HOLD;
+                        }
                     }
                     if (pl_ui_sel >= pl_ui_top &&
                         pl_ui_sel <  pl_ui_top + PL_UI_ROWS)

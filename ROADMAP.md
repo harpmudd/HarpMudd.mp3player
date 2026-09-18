@@ -237,6 +237,72 @@ to them — a file opened by name with `0192` has only just been opened and a fa
 read still fails, which is how a 30 MB track once measured 5 MB. One line
 (`if (track_secs) return 0;`) flips the trade if the tic ever matters more.
 
+## Crash to a grey screen at the end of a song — FIXED 2026-09-09
+
+The cassette meter's progress ratio was the one in the file that did not clamp:
+
+    pr = (tot && ui_sec <= tot) ? (ui_sec * 256u) / tot : 0u;
+
+At `ui_sec == tot` — the last second of the track — that is exactly **256**,
+not 255, because `<=` admits equality and the division is exact there. The pack
+radius below it is `1u + (7u * (255u - pr)) / 255u`, so `255u - 256u` wrapped to
+`0xFFFFFFFF` and the radius became **16,843,009**. The band loop then ran 8.4
+million iterations, each drawing a disc of radius 16.8 million, each of those
+looping that many rows issuing `fb_rect` with underflowed coordinates.
+
+An unbounded hang inside the draw loop, scribbling out of range into SDRAM.
+Unrecoverable — power cycle only.
+
+### Why it looked intermittent
+
+It needed a UI frame to land inside the one second where `ui_sec == tot`, so
+plenty of tracks ended without it. It also needed a known duration, which is
+why the headerless MP3s on the test card never triggered it, and it needed the
+cassette, the only meter with progress-driven geometry.
+
+### Why the first theory was wrong
+
+Reasoning said drawing was exonerated: heavy drawing causes **underruns** — an
+audible glitch with the music continuing — and this was a **freeze**, so it had
+to be the blocking SD-read path, where an artwork decode issues 43–207 reads at
+exactly a track boundary. A 500 ms bound went on that spin.
+
+That is the wrong shape of argument. "This subsystem's characteristic failure
+looks different" is not elimination. Drawing normally *steals time*; drawing can
+also *never return*. The bound was mitigation for a fault that was never there.
+
+What broke it open was one observation from the user: **it never happens on the
+other meters.** In a mode-switched UI that is a free bisection, and it was worth
+more than the twenty track-ends that did not reproduce. Ask which mode first.
+
+### The rule this establishes
+
+**Clamp every scaled ratio at the equality case.** An `x * N / total` guarded by
+`x <= total` reaches `N`, not `N - 1`. Audited afterwards: all six other ratio
+sites in `player.c` clamp on the very next line — `spec_lvl`, the wave, the
+scope column, the VU needles, the magic eye, and the progress bar
+(`if (done > UI_INNER_W) done = UI_INNER_W;`). The tape was the sole violator.
+**One clamped ratio sitting next to an unclamped one is the smell.**
+
+Corollary: any loop whose bound is unsigned arithmetic on UI state can hang
+forever, and a hang is worse than any wrong pixel.
+
+### What shipped
+
+Progress was **removed** from the meter rather than clamped, at the user's call
+— it never read as progress anyway, since `packs + packt` was invariant and the
+reels only traded thickness. Deleting the dependency removed the crash site
+outright and freed 608 bytes. The reels are now a fixed five-pixel wind drawn
+once with the cached face, which also retires the erase-and-repaint dance a
+changing radius forced on a single-buffered framebuffer. Hub rotation is a
+constant 330/frame where it used to ease with progress.
+
+The 500 ms read bound is **kept**, relabelled in the source as defence rather
+than as this fix: an unbounded wait on external hardware is wrong whether or not
+it has been seen to hang. `fb_wait()` stays unbounded, and its comment now
+records that no evidence has ever pointed at it — bounding it would not have
+caught this, because the FIFO was being fed correctly throughout.
+
 ## Playlist pick occasionally does nothing — WITHDRAWN from the README 2026-08-21
 
 **Removed from user-facing Known limitations on user report: not seen any more.**
@@ -368,6 +434,83 @@ RTL comment that stated it absolutely has been corrected.
 Documented in the README as a known limitation, so a user who does hit it
 knows to pick again rather than assuming the core is broken.
 
+## Seeking a VBR MP3 lands the CLOCK in the wrong place — found 2026-09-10
+
+Reported as "lyrics lose alignment after a seek", which is where it shows, but
+the lyrics are innocent: they read `ui_sec` and `ui_sec` is what is wrong.
+
+`ui_byte_rate()` returns a WHOLE-FILE AVERAGE:
+
+    if (track_secs && slot_size > audio_start)
+        return (slot_size - audio_start) / track_secs;
+
+and the MP3 seek turns a byte position into a time with it:
+
+    ui_sec = rate ? (file_pos - audio_start) / rate : 0u;
+
+Exact for CBR. For VBR that average is right only on average, so the seek puts
+the audio at one point and the clock at another, off by however far the bitrate
+has deviated up to that byte. The offset then PERSISTS, because playback
+advances correctly from a wrong starting value.
+
+Measured on the test card with tools/xing_check.py -- of the eight files
+carrying .lrc sidecars:
+
+| header | files | seek |
+|---|---|---|
+| Xing (VBR) | Bad Religion, Blind Melon, Death Cab, Gorillaz | estimate |
+| Info (CBR) | Dire Straits, Sea Wolf | exact |
+| none | LCD Soundsystem, Stone Temple Pilots | meas_rate, worst case |
+
+Six of eight cannot be exact. FLAC is unaffected -- its seek is
+`ui_sec = landed / fl.rate`, sample-exact.
+
+### DEFERRED from 1.5.0 — decided 2026-09-16
+
+Held until lyrics ship, because lyrics are the feature that makes it matter.
+Without them the whole symptom is a clock and a progress bar a few seconds out
+after a seek, and only on genuinely variable files.
+
+Measured on the test card, error after seeking to 25% / 50% / 75%:
+
+| file | header | error |
+|---|---|---|
+| Gorillaz - Feel Good Inc. | Xing | -3.4 / -3.1 / -1.3 s |
+| Bad Religion - A Walk | Xing | -0.3 / -0.8 / -1.4 s |
+| LCD Soundsystem, Stone Temple Pilots | none | ~0 |
+| Dire Straits - Sultans of Swing | Info (CBR) | ~0 |
+
+So the worst case on real files here is ~3 s, not the minutes a whole-file
+average might suggest -- these files simply are not that variable.
+
+**It IS testable without lyrics**, which is worth knowing before deferring
+again: seek to about a quarter into Feel Good Inc., then let it play to the
+end. The music stops while the clock still reads ~3:38 of 3:41 and the bar
+falls short. Without seeking first it ends exactly at 3:41. After the fix, the
+seeked playthrough should end full as well.
+
+### The fix is in the file format, and it is not read yet
+
+A Xing header carries a **100-entry TOC** mapping time-percentage to
+byte-percentage, which exists precisely for VBR seeking. This core parses Xing
+for the frame count and byte count but ignores the TOC.
+
+With it, seek runs the other way round: pick the target TIME, use the TOC to
+find the byte, and set `ui_sec` to the time that was asked for. The clock
+becomes correct BY CONSTRUCTION rather than by estimate, and the audio lands
+within the TOC's resolution -- 1% of duration between entries, better with
+interpolation.
+
+That fixes the progress bar and the elapsed clock too, not only lyrics.
+
+Rough cost ~280 bytes (100 of TOC in BSS, the rest parse and interpolation)
+against 256 free at the time of writing. The honest way to fund it is lever 1
+under Memory and speed -- `-Os` on `load_track`, measured at 3-5 KB -- rather
+than shaving the lyrics buffers, which are already sized to the real files.
+
+Nothing can help the two files with no header at all: with no frame count and
+no TOC there is no constant to read, and `meas_rate` is all that exists.
+
 ## Headerless VBR still estimates the total time — dropped from the README
 
 Removed from Known limitations 2026-08-12 as too narrow to be worth a user's
@@ -387,7 +530,7 @@ Restore the README line if anyone reports a wrong duration — the symptom is
 otherwise baffling, and the cause is a property of their file rather than
 anything they can see.
 
-## Picking a track in the playlist browser can start it at 1.2x — BACKLOGGED for 1.4.x
+## Picking a track in the playlist browser can start it at 1.2x — FIXED 2026-09-09
 
 User report, 2026-08-21: rare, and only when picking a track from the browser.
 Deliberately NOT listed as a README limitation and not fixed in 1.4.0.
@@ -426,6 +569,28 @@ Better still, make the hold require an edge the speed logic itself observed,
 rather than trusting a timestamp that another consumer may have skipped.
 
 The same shape should be checked anywhere else an A edge is swallowed.
+
+### FIXED — the hypothesis above was right
+
+Confirmed by reading, and the fix is the second option that entry proposed:
+require an edge the speed logic itself observed, rather than trusting a
+timestamp another consumer may have skipped.
+
+A new `a_armed` flag is set only by an A edge the handler sees, and cleared
+whenever A is not held. That disarm is what makes it work, and it is free:
+while the overlay is open `keys` is masked to SELECT, so the disarm fires on
+every pass and no edge can re-arm. A press that began inside the browser
+therefore cannot reach the hold after the overlay closes.
+
+**The tap needed the same guard, and that is a second bug the entry missed.**
+`fall & KEY_A` was checked with only `!a_fired`, so the identical swallowed
+press would toggle PAUSE the moment the user let go — pausing the very track
+the browser had just started. Same hole, one action further along. Both are
+guarded now.
+
+Ordering matters and is commented in the source: the disarm runs AFTER both
+actions, because on the release pass `keys` has already lost A while `fall`
+still carries it. Disarming first would eat every ordinary tap.
 
 ### Before fixing, reproduce it
 
@@ -492,6 +657,133 @@ is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
 
+## Japanese and accented text — BUILT for 1.5.0, 2026-09-15
+
+Requested by a user: Japanese tags and filenames showed as blanks. The font ROM
+in the bitstream is ASCII 0x20..0x7E and BRAM is at 97%, so the answer could
+never be "add glyphs to the ROM".
+
+**Where the glyphs live.** `mp3font.bin`, ~833 KB, its own data slot at bridge
+0x10000000. A second `data_loader` hands its words to `mp3_fb.sv` already in
+clk_sdram; the engine writes them to SDRAM at word 0x100000, clear of the
+framebuffer's ~184K words. The CPU never reads the font -- it sends a glyph
+number and the engine fetches the rows. Two regions, because two sources want
+two formats: 1024 glyphs of 4bpp Inter (Latin-1, Latin Ext-A, Greek, Cyrillic,
+punctuation, currency, letterlike -- the same renderer as the ROM, so an
+accented letter matches the plain one beside it), then 1bpp Unifont JP (kana,
+20,992 CJK ideographs, symbols, full/half width).
+
+**How a glyph is asked for.** CHAR with glyph 0x7F, index in the size register
+a CHAR otherwise ignores: bit 17 region, bits 16..0 glyph number. No wider FIFO
+entry, no SoC change -- the 18 bits were already there and unused.
+
+**Accented capitals do not fit a 16-row cell.** Baseline is row 12 and caps
+start at row 1, so an acute lands at rows -2..-5 and was simply cut off: E-acute
+drew as a plain E. Rendered candidates side by side: shifting the glyph down
+moves the baseline visibly, squeezing only the accent shrinks it to one row and
+it vanishes. Squashing the ink above the baseline into the cell keeps the accent
+and the baseline both, at a capital a pixel or two short, which does not read at
+16 px. 112 glyphs are touched; the rest are untouched.
+
+**Two bugs simulation caught, before any hardware.**
+
+1. *A CHAR started during the font load did not finish until the load did.*
+   Words arrive continuously, so "anything queued" was true nearly every time
+   the dispatcher looked, and composing a glyph row sits below the font branch.
+   Font bursts now wait for 64 queued words whenever drawing is pending.
+2. *Timing.* The compose path -- select a nibble from 64 bits, the weight
+   table, three multiply-adds, then block RAM setup -- was the design's tightest
+   at +1.029 ns (v1.2.0) and the extra logic tipped it to **-1.888 ns**. Split
+   into two registered stages. The last pixels of a row land up to two cycles
+   after COMPOSE returns to IDLE; the streaming write that reads them is many
+   cycles behind that.
+
+**Firmware: every string is UTF-8 now.** Decoders convert at the door and the
+draw primitives walk characters, not bytes. `fb_resolve()` is the one place a
+code point becomes a glyph, for measuring and drawing alike. Watch for:
+
+- Marquees step by CHARACTER (`u8_prev`/`u8_skip`); a byte step lands inside a
+  kanji and draws '?'.
+- Every fixed buffer trims with `u8_trim` so it cannot end mid-character.
+- ID3 encoding 0 is UTF-8 if the bytes validate, else Windows-1252 -- taggers
+  write both, and real Latin-1 is almost never valid UTF-8 by accident.
+- **Filenames were extracted as "the longest run of printable ASCII"**, which a
+  Japanese filename splits. The run now takes complete UTF-8 sequences too, but
+  stays strict about stray high bytes: the playlist writes a new name over that
+  same offset, so a run that swallows a neighbouring field breaks opening files.
+- `.m3u` files keep a UTF-8 BOM, which rode on the first entry's name.
+
+**Verified before hardware:** `sim/tb_mp3_fb.v` loads 80K words of the real file
+at 12x bridge speed with drawing and scanout interleaved (byte-identical, no
+overflow, kana pixel-exact at 1x and 2x); `tools/host/text_check.py` runs the
+EXTRACTED decoders and `fb_resolve` under rv32sim against Python's own UTF-8,
+including that each glyph index lands on inked pixels in the file.
+
+**Known gap: Shift-JIS.** Older Japanese rips store it in encoding 0. Detecting
+it is easy; converting it needs a ~14 KB table the image has no room for. In
+the README as a limitation. Korean, Thai and emoji are '?' -- Hangul alone is
+another 358 KB of font and a boot-time cost.
+
+## More scripts in the extended font — BACKLOG, 2026-09-16
+
+What ships covers Japanese, Chinese, Latin (Western, Central and Eastern
+European), Greek, Cyrillic, punctuation and symbols. Verified by rendering real
+sample text per language against the actual `mp3font.bin`, not from the range
+table. What is missing, and what each would cost:
+
+| want | glyphs | size | blocked on |
+|---|---|---|---|
+| Vietnamese + Romanian comma forms (U+1E00..1EFF) | 256 | 32 KB at 4bpp, 8 KB at 1bpp | the 4bpp region is FULL |
+| Korean (Hangul syllables) | 11172 | 349 KB at 1bpp | boot time, unmeasured |
+| Thai, Hebrew, Arabic, Devanagari | varies | small | Arabic/Hebrew also need RTL layout |
+| Emoji | - | large | outside the BMP this format addresses |
+
+**Confirmed on hardware 2026-09-17** with the generated set in
+`tools/make_lang_tests.py` -- 13 silent MP3s whose tags cover every script,
+across UTF-16, UTF-8 and Latin-1 encodings, listed in `test.m3u`. Japanese,
+Chinese, Greek, Cyrillic, Polish, Czech, Turkish, accented Latin (including
+capitals) and the symbol set all render in the browser and on the player card.
+Korean showed '?' and Vietnamese showed partial text, exactly as the table
+below predicts, so the gaps are the only gaps.
+
+**The binding constraint is not SDRAM, it is the 4bpp region's fixed size.** It
+holds 1024 glyphs and 864 are used -- 160 free -- and its size is a constant in
+BOTH `mp3_fb.sv` (FONT1_OFF) and the generator, so exceeding it is a Quartus
+compile and a hardware round, not a data change. Three ways out, cheapest
+first:
+
+1. Add only the ~134 letters Vietnamese actually uses plus Romanian's four, as
+   several small ranges. Fits the 160 free slots. Data only.
+2. Put the whole block in the 1bpp region: no RTL change, 8 KB, but those
+   accented letters render as bitmap beside anti-aliased Latin.
+3. Raise the region to 2048 glyphs and pay for the compile.
+
+The 1bpp region has no cap, so Korean is purely a size-and-boot-time question.
+
+**Measure the boot cost first.** The font is a data slot APF loads BEFORE the
+CPU starts, so the Pocket sits transferring 814 KB with nothing on screen, and
+that transfer has never been timed. Hangul would make it 1.2 MB. A stopwatch
+settles whether this matters at all; boot speed has been tuned deliberately
+before and should not be given back by accident.
+
+## Sequencing after 1.5.0 — decided 2026-09-15
+
+(Language support was pulled INTO 1.5.0 after this was written -- it turned out
+to need the draw engine and a font in SDRAM, not the CPU-side SDRAM port the
+migration is about, so it did not have to wait.)
+
+1. **1.6.0: the SDRAM migration** (see "Correction to the record: SDRAM is
+   ALREADY in use" under Memory and speed). It is the space fix that several
+   entries below are queued behind.
+2. **Then lyrics.** Built as a meter and pulled from 1.5.0 before release, to
+   keep 1.5.0 small and because it is one of the space-hungry features the
+   migration exists for. The work is parked, pushed, on **`feature/lyrics`**
+   (0c247e5): parser, `VIZ_LYRICS` meter, slot 4, slider widened to 12, and
+   `tools/host/lrc_check.py`. One fix on it is still unconfirmed on hardware --
+   lyrics appearing on a track change without a stop/start. Rebase it onto the
+   migration rather than merging it as it stands; its buffers are sized for
+   BSS, not SDRAM.
+
 ## Progressive JPEG covers are silently skipped — user report 2026-08-13
 
 picojpeg is baseline only: `case M_SOF2: return PJPG_UNSUPPORTED_MODE`. A
@@ -513,11 +805,21 @@ What the core accepts, for reference:
 - under 736 px on either axis -> full decode, both must be <= 1024;
   736+ on both -> reduce path, up to 2560
 
-**That size rule is a trap worth removing.** A 900x900 cover works and a
-1200x600 one does not, because the reduce path is only chosen when BOTH axes
-are >= 736 and full decode is capped at 1024. Nothing tells the user which
-branch they are in. Allowing reduce on a per-axis basis, or raising
-ART_FULL_MAX, would make the rule "up to 2560" flat.
+**The "1200x600 does not work" claim above is STALE -- checked 2026-09-10.**
+`art.inc` already carries the fallback:
+
+    int reduce = (((iw+7)/8) >= ART_IMG) && (((ih+7)/8) >= ART_IMG);
+    if (!reduce && (iw > ART_FULL_MAX || ih > ART_FULL_MAX))
+        reduce = 1;              /* keeps the accumulator in range */
+
+So a 1200x600 does NOT fall between the branches: it fails the both-axes test,
+then the second line catches it because 1200 > 1024, and it decodes in reduce
+mode. Nothing is rejected on aspect ratio.
+
+What survives is a QUALITY issue, not a failure: that cover reduces to 150x75,
+so the short axis lands under the 92px panel and is magnified. Worth fixing one
+day by choosing the path per axis, but it is not the silent rejection this
+entry claimed, and nobody should go hunting for one.
 
 ## ID3v2.2 tags are not read at all — NOT planned, scoped 2026-08-13
 
@@ -872,6 +1174,86 @@ a fraction of the work, and against MP3 files that already play.
 instrumented: `ld_head`, `ld_size`, `ld_art`, `ld_pre`, `ld_total`, all live,
 all one flag away (`UI_SHOW_DIAG 1`).
 
+### PARTLY ANSWERED without measuring — a flat 250 ms sleep, 2026-09-09
+
+`read_track_head()` slept an unconditional 250 ms on every call. `have_prev` is
+a local initialised to 0, so on the first pass `same` is always false and
+`attempt` is 0: **neither break could fire**, and the wait was reached every
+time regardless of whether the slot had settled. It cost boot and every track
+change alike.
+
+On boot it was waiting to converge against nothing at all -- the settle block
+above it is skipped there, because `sw_have_prev` is 0 when no previous file
+exists.
+
+Now it polls at 30 ms (the interval that settle block already uses for the same
+question) with the attempt cap raised from 2 to 8. Same worst-case budget,
+exits as soon as two reads agree, and a genuinely mid-switch slot gets four
+times the chances it had. Roughly 220 ms off every load.
+
+This did not need the timers because it was not a guess: an unconditional
+constant is readable from the source. **The disagreement below still stands and
+still needs measuring** -- this was dead time sitting in front of it, not an
+answer to it.
+
+Also dropped: the boot splash floor, 350 ms to 150 ms. It buys no animation,
+because the meter runs from inside `target_read_slot()`'s spin through the
+playlist read and the track open; the floor only has to outlast a flicker.
+
+### The playlist phase, unmeasured but visible in the source
+
+User localised the remaining wait to the LOADING PLAYLIST window, 2026-09-09.
+`ui_wave_anim_stop()` runs before `load_track()`, so "while the meter still
+moves" is exactly `ui_splash_anim()` + `pl_load()`.
+
+Boot reads **two entire files** whenever the remembered list is not
+`playlist.m3u` -- which is the normal case, since APF resets slot 3 to
+`playlist.m3u` at every core load, and any name longer than `PL_STEM_MAX` (12)
+cannot be reopened from the stored stem. So `pl_open_by_hash()` opens
+`playlists.m3u`, reads all of it through `pl_read_raw()` purely to map a hash
+back to a filename, opens the target, and `pl_read_raw()` runs again.
+
+Each read climbs a shrinking ladder, and reads past EOF fail, so the descent
+costs real commands -- `pl_read_raw()`'s own comment measures 19 for an
+846-byte playlist. Two ways out, neither taken yet:
+
+1. **Read the exact size instead of laddering.** APF's dataslot ID/size table
+   is at the start of the datatable BRAM and `dt_snapshot()` already captures
+   it. Unknown whether it survives a `0192` open-by-name -- `R_SLOT_SZ` does
+   not, and this file deliberately refuses to assume struct layouts. **One
+   boot settles it.** Do that before building on it.
+2. **Store the resolved playlist NAME**, so `playlists.m3u` is never read at
+   boot. Removes a whole file read. Needs more than the 12 characters a stem
+   allows, which means another persist slot -- and see the interact.json id
+   rules before touching that.
+
+### SETTLED 2026-09-10 — artwork dominates, the size probe is FREE
+
+Measured on hardware, load-phase toast after an MP3 load with cover art:
+
+    H363  S0  A833  T1241        (milliseconds)
+
+| phase | ms | share |
+|---|---|---|
+| head read | 363 | 29% |
+| size probe | **0** | **0%** |
+| artwork decode | **833** | **67%** |
+| total | 1241 | |
+
+**The disagreement below is resolved and the size-probe side was wrong.** The
+comment claiming "~20 blocking reads -- measured at 480 ms ... which is most of
+the hiccup" does not describe this build: scoping the probe to `track_secs == 0`
+in v1.4.0 took it to zero for any file with a duration, which is all of them
+bar the headerless ones. Do not re-optimise it.
+
+**Artwork is the load.** Two thirds, on a file whose cover is not even the large
+one. That makes the levers under "if the artwork really is the cost" the live
+list, and it re-ranks them: raising `_tag_size` is now a change with a measured
+833 ms behind it rather than a guess. See also the dataslot-size finding below,
+which may retire the probe machinery entirely.
+
+Still to measure: the same row on a FLAC load, and on the 847 KB cover.
+
 ### MEASURE FIRST — and there is a live disagreement to settle
 
 This entry used to assert "artwork decode dominates". The comment on the size
@@ -967,7 +1349,7 @@ chunks. That is correct -- no transient is lost -- but it does read very
 slightly higher, so a small part of the pegging is new in v1.3.0 rather than
 inherited.
 
-## Absolute paths in a playlist — supported in code, NEVER tested
+## Absolute paths in a playlist — TESTED 2026-09-10, half of it works
 
 `pl_open_into()` treats an entry beginning with `/` as absolute and replaces
 the template path outright, and the README documented that with an example
@@ -976,7 +1358,43 @@ v1.3.0 release audit: the code path has never once been run, and it compounds a
 second unknown -- whether APF will open anything outside
 `/Assets/mp3player/common/` at all.
 
-Both questions settle in one hardware session: put one absolute entry in a test
+### RESULT, and it is a platform boundary worth knowing
+
+`abstest.m3u`, two absolute entries, one hardware session:
+
+| entry | outcome |
+|---|---|
+| `/Assets/mp3player/common/MP3s/Dire Straits - Sultans of Swing.mp3` | **PLAYS** |
+| `/Music/Blind Melon - Galaxie.mp3` | **does not open** |
+
+The second file was verified present on the card at 5,136,384 bytes, so this is
+APF declining to open it, not a missing file or a malformed request --
+`pl_open_try()` replaces the whole path for an entry starting with `/`, so the
+0192 it sent was well-formed with an absolute path.
+
+**So: absolute paths work, but only INSIDE the core's own asset folder.** APF
+appears to sandbox a core to `/Assets/<core>/common/`. One clean negative is
+not a specification, but the mechanism is plausible and the result is
+unambiguous.
+
+**What can come back to the README:** nothing that matters. An absolute path
+that must stay inside the core's folder is equivalent to the relative one users
+already write, so documenting it adds a rule without adding a capability. Leave
+the README as it is.
+
+**What this KILLS, which is the useful half.** "Music can live anywhere on the
+card" is not possible and should stop being proposed. The same boundary applies
+to anything else that might want to live outside: a shared music library, a
+`/Lyrics` folder beside the core, a scrobble log written elsewhere. The lyrics
+plan is unaffected -- `.lrc` sidecars sit beside their tracks, inside the
+folder -- but only by luck, so check this boundary before designing anything
+that reaches outward.
+
+**Incidental confirmation:** the playlist did not stop dead at the entry that
+would not open; it stayed listed and was skipped. That is the v1.2.0
+bad-filename fix still holding, observed rather than assumed.
+
+Both questions settled in one hardware session: put one absolute entry in a test
 playlist, once inside the core's folder and once outside it. If the inside case
 works the claim can come back for relative-to-root paths; if the outside case
 works too, the "music can live anywhere on the card" line can come back with
@@ -1024,15 +1442,200 @@ the decoder is allocated, which means reordering the function that carries the
 "one FLAC attempt broke every load after it" history. Possible, not cheap, and
 not to be attempted on a hunch.
 
+### FULL AUDIT 2026-09-10 — where the bytes are, measured
+
+Slack at this point was **272 bytes**, and three features in one session were
+degraded or abandoned at the ceiling. Everything below is measured, not
+estimated: `nm --size-sort -S` for size, `-fstack-usage` for frames.
+
+**1. THE STACK IS 16 KB AND THE PEAK IS ABOUT 1.2 KB.** Nobody had measured it.
+
+`-fstack-usage` over every TU, including `flac.c` and `picojpeg.c` which
+`build.sh` compiles with their own flags and which the default build therefore
+misses. Largest single frames: `flac_decode_frame` 656, `xmp3_PolyphaseStereo`
+480, `main` 352, `load_track` 304, `pl_open_try` 320, `pjpeg_decode_mcu` 112.
+
+Deepest chains, summing along the path:
+
+| path | chain | peak |
+|---|---|---|
+| FLAC decode | main 352 -> flac_decode_frame 656 -> refill 32+32+48 | ~1120 |
+| MP3 decode  | main 352 -> MP3Decode 64 -> PolyphaseStereo 480 | ~896 |
+| art load    | main 352 -> load_track 304 -> pjpeg_decode_mcu 112 -> upsample 80 -> read 48 | ~1000 |
+| playlist    | main 352 -> pl_load 256 -> pl_open_try 320 | ~930 |
+
+Nothing recurses. `start.S` installs no trap vector and there is no ISR, so
+nothing runs on this stack asynchronously. `_stack_size` is a one-line change
+in `link.ld` and it sits directly above `_ring_start`, so every byte cut is
+handed straight to the image.
+
+**Even at 4x the measured peak, 8 KB is free -- thirty times the current
+slack.** This is the single largest reclaim available and the cheapest to take.
+
+**CONFIRM ON HARDWARE FIRST, because static frames are a model.** Paint the
+stack region with a known pattern at boot, run a FLAC and an MP3 through a
+track change with artwork, then read back how far the pattern was disturbed.
+That is the high-water mark. A model that cannot fail is not a test -- see the
+simulation-seeding note -- so do not cut 12 KB on the strength of the table
+above alone.
+
+**2. Cold text at -Os.** `load_track` is 11268 bytes and genuinely cold, one
+run per track change. At the -Os ratio measured on flac.c (0.58) that is
+roughly 4-5 KB. `pl_load` 2508 and `ui_draw_chrome` 1216 are cold too. See the
+correction under lever 1 about `main`, which is NOT cold.
+
+**3. `art_acc` is 11040 bytes** -- `ART_ACC_ROWS` 20 x `ART_IMG` 92 x 3 x
+uint16. Its own comment says 17 rows is the requirement and 20 "leaves margin".
+18 would save 1104 bytes. Modest, and it is cutting a stated margin, so take it
+only after the free wins above.
+
+**4. `arena` has 752 bytes spare** over Helix's measured 23824 peak. Trimming
+it is available and NOT recommended: it is the margin that stops a larger
+future decoder failing at runtime rather than at link.
+
+### PROVEN 2026-09-10: the dataslot table carries a LIVE, EXACT file size
+
+Measured on hardware with the Select+A table view. Every figure matched a real
+file byte-for-byte:
+
+| word | table | actual |
+|---|---|---|
+| w1 (slot 1) | 160688 | `mp3player.rom`, exact |
+| w3 (slot 2) | **0 at boot -> 5226602 live** | `Sea Wolf - You're A Wolf.mp3`, exact |
+| w5 (slot 3) | 761 | `playlist.m3u`, exact |
+
+**Slot 2 was opened by 0192 and the table knows its exact size.** That is the
+important half. `R_SLOT_SZ` is a REGISTER latched only on an 008A reload edge,
+which a 0192 never raises -- hence `force_size_probe` and the whole in-playback
+size search. The dataslot TABLE is a different mechanism, maintained by APF in
+its own BRAM, and it evidently tracks 0192 opens.
+
+**What this potentially retires:** the size probe. It is ~20 blocking reads on
+a load, it is the leading suspect for the load time nobody has broken down, and
+its far reads on the STREAMING slot are what caused the v1.4.0 FLAC stutter --
+the single most expensive defect in this project's history. If the exact size
+is two MMIO reads away, that entire mechanism and its hazard class go away for
+any 0192-opened track.
+
+**Do not build on this without settling three things:**
+
+1. **SCAN for the slot id, never hardcode w3.** The layout is {slot_id, size}
+   pairs at stride 2 and slot 2 currently lands at w2/w3, but that ordering is
+   observed, not specified. Walk the pairs looking for the id.
+2. **WHEN does it become valid?** It must be read after the 0192 reports done,
+   and `done` is a sticky LEVEL here. A read taken too early returns the
+   previous file's size, which is worse than no size at all -- it is a
+   confident wrong answer, and `audio_start + track_bytes` arithmetic would
+   inherit it silently.
+3. **Slot 3 is LIVE TOO -- confirmed 2026-09-10.** With `abstest.m3u` open,
+   w5 read `000002F9 ! 00000065`: boot 761 (`playlist.m3u`), live 101
+   (`abstest.m3u`), both exact. So the table tracks 0192 opens on BOTH slots.
+
+   The `!` was the table view's own whitelist being incomplete -- it marked
+   only w3 as allowed to move -- not damage. Fixed.
+
+   **This is what collapses `pl_read_raw`.** Knowing the exact size turns the
+   shrinking ladder into `ceil(size / TAG_SIZE)` reads with no failures: 19 APF
+   commands down to 1 for an 846-byte playlist, and **boot pays that twice**
+   (playlists.m3u, then the list itself). Roughly 36 cluster-chain walks
+   removed from every launch.
+
+Table integrity also confirmed: every other word read `=`, and the struct area
+at w64/w128 held `2F417373` ("/Ass"), so the response and parameter structs are
+living above the table and no longer overwriting it.
+
+### Recommended ORDER, and why this one
+
+Each step pays for the next, which is the point of the ordering.
+
+1. **Measure the stack high-water mark.** One boot, dev build. Costs nothing
+   permanent and gates the largest reclaim. Until this exists, every figure
+   about the stack is a model.
+2. **Cut `_stack_size` to the measured peak x4.** One line. Hands 8-12 KB
+   straight to the image.
+3. **Add a stack guard word** at the new bottom, checked periodically. The
+   stack grows DOWN toward the ring buffer, so an overflow smashes audio DMA
+   and presents as corrupt sound or a wild crash -- the exact failure class
+   this project has spent the most time on. A canary turns that into something
+   detectable. Do this WITH step 2, not after it.
+4. **`-Os` on `load_track`.** 4-5 KB, cold code, no design compromise.
+5. **Raise `_tag_size`**, funded by 2 and 4. Halves artwork reads on every
+   load. **Prove a >4 KB target read in isolation first** -- it has never been
+   done on this hardware.
+6. **Then** revisit what the ceiling has been deciding for us: the boot
+   oscilloscope (16 bytes over), the asymmetric marquee hold (32 over), lyrics,
+   the 13th meter, the 256-track cap.
+
+Do NOT start at step 6.
+
+### Speed, from the same pass
+
+**`pl_read_raw`'s shrinking ladder is the worst remaining I/O cost.** Reads past
+EOF fail, so it halves from 4 KB down until one succeeds -- its own comment
+measures **19 APF commands for an 846-byte playlist**, each a cluster-chain
+walk. Boot pays this TWICE (playlists.m3u, then the list itself). A size source
+turns it into one read. See the playlist-phase note under boot.
+
+**Artwork is 43-207 blocking reads per cover**, in `TAG_SIZE` chunks. Raising
+`_tag_size` halves them -- and `_tag_size` comes out of the same region the
+stack reclaim would free, so item 1 above is what makes this affordable.
+Halving it was tried and was a measured regression; RAISING it is the untried
+direction.
+
+**Already good, do not re-litigate:** `art_xmap`/`art_yslot` replaced a divide
+per source pixel -- 207,025 divisions on a 455px cover at ~34 cycles each --
+with two lookup tables. That is why they are 1 KB each and they earn it.
+
 ### Still available, ranked
 
 1. **Split the cold half of player.c into its own -Os translation unit.**
-   `load_track` + `main` are 25.6 KB of text and neither is hot -- one runs per
-   track change, the other once. At the -Os ratio measured elsewhere that is
-   roughly 6-8 KB. The obstacle is mechanical, not conceptual: both reach dozens
-   of file-scope statics, so splitting means exporting them.
-2. **Drop a meter.** `ui_draw_dynamic` is the single largest text symbol at 19
-   KB for ten meters. Cheap in effort, unpopular, last resort.
+   `load_track` + `main` are 25.6 KB of text. At the -Os ratio measured
+   elsewhere that is roughly 6-8 KB. The obstacle is mechanical, not
+   conceptual: both reach dozens of file-scope statics, so splitting means
+   exporting them.
+
+   **CORRECTION 2026-09-10: "neither is hot" is wrong about `main`.** It runs
+   once, but its BODY is the per-sample output loop -- the `REG(R_AUDIO)` push
+   and the FIFO-full wait that services input and I/O live inside it. That is
+   the hottest code in the firmware, and `build.sh` keeps the MP3 path at -O2
+   precisely because it "needs 45.7 MHz of 60 and cannot afford the loss".
+   Compiling `main` at -Os risks the decode budget.
+
+   So take `load_track` (11.9 KB) and the boot paths, which ARE cold, and leave
+   the sample loop at -O2. Less than 6-8 KB, but safe. If `main` is ever wanted
+   too, lift the sample loop out into its own -O2 unit FIRST rather than
+   trusting -Os not to touch it.
+2. **Drop a meter -- MEASURED PER METER 2026-09-10, and it is a bad trade.**
+   Each block was dead-coded in turn and the image diffed, against a 155576
+   baseline:
+
+   | meter | bytes | | meter | bytes |
+   |---|---|---|---|---|
+   | magic eye | **4860** | | spectrum | 760 |
+   | cassette | **3992** | | peak dots | 600 |
+   | VU needles | **3004** | | mirrored bars | 596 |
+   | oscilloscope | 1116 | | waveform | 532 |
+   | phase scope | 1048 | | waterfall | 520 |
+   | L/R levels | 940 | | bars | fall-through |
+
+   **Three meters are 73% of the cost.** Eye + cassette + VU = 11856 of ~18000.
+
+   Which inverts the intuition about dropping "the older, simpler ones": the
+   eight cheapest together come to ~6100, so removing ALL EIGHT buys less than
+   removing the magic eye and the cassette. And the expensive ones are the
+   characterful, hand-built ones with cached faces -- exactly the ones worth
+   keeping. The cheap ones are simple bar and line draws.
+
+   **It also is not free of risk, which "cheap in effort" hid.** `viz_mode`
+   persists as an INDEX. Removing a meter from the middle shifts every later
+   index down, so every saved preference silently repoints at a different
+   meter -- the same hazard as reordering the enum, which this file already
+   forbids. Narrowing interact.json's meter max from 11 is the same class of
+   edit that has broken persistence twice.
+
+   **Verdict: do not.** After the stack cut there are 7056 bytes free and the
+   largest queued item needs 4500. Dropping meters buys little, costs features,
+   and risks a settings migration.
 3. **`pl_text` 16 KB -> SDRAM.** Only if the CPU can address SDRAM directly,
    which is UNVERIFIED -- the framebuffer and art stash are reached through the
    drawing engine, not by load/store. Settle that question before planning
@@ -1210,11 +1813,21 @@ is PAUSE: pressing pause with any deliberation crosses it. The toast says
 SPEED 1.2x, but a user who was not looking at the screen just hears the music
 speed up for no reason.
 
-Options, cheapest first: a longer threshold for A alone (say 800 ms, since
-nothing about speed needs to be quick); require Select+A; or drop the gesture
-and put speed in Core Settings, which costs a slot but cannot be hit by
-accident. Confirm the cause before changing anything -- the user was asked and
-has not answered yet.
+**LIKELY ALREADY FIXED, 2026-09-09 -- do not change the threshold yet.** The
+browser-pick defect above engaged 1.2x on a track that had only just started,
+with no gesture the user would recognise as a hold. "A track playing at double
+speed" is exactly how that presents, and it needed nothing more than pressing A
+on a playlist entry and not letting go instantly. That is a far better fit for
+the report than a deliberate pause press crossing a 400 ms threshold.
+
+Two other candidates were also fixed in the meantime: the MPEG-2 clock ran at
+literally double speed until v1.4.0, and 1.2x already gained a longer hold and
+an on-screen marker in that release.
+
+So: wait for a fresh report before touching PL_HOLD_MS. Options if one comes,
+cheapest first -- a longer threshold for A alone (say 800 ms, since nothing
+about speed needs to be quick); require Select+A; or drop the gesture and put
+speed in Core Settings, which costs a slot but cannot be hit by accident.
 
 ## Scrobble log (.scrobbler.log) — requested by a user 2026-08-11
 
@@ -1340,6 +1953,263 @@ Step 2 is useful on its own, and steps 3-4 do not invalidate it. Only if
 seamless export is wanted after all does `0184` come back into the picture,
 with the safeguards listed above.
 
+## Lyrics — requested 2026-09-10
+
+**Parked on `feature/lyrics`, scheduled after the 1.6.0 SDRAM migration** --
+see Sequencing at the top of Enhancements.
+
+Fits this core better than most features on the list: the screen is otherwise
+idle during playback, the player already knows the elapsed second, and people
+listening to a whole album on a handheld are exactly the audience for it.
+
+### Where lyrics actually live, and which sources are worth supporting
+
+- **ID3v2 `USLT`** (unsynchronised lyrics), MP3. The realistic MP3 source.
+  **It is NOT a plain text frame**, so `id3_find_text()` cannot read it as-is:
+  the payload is `encoding byte | 3-byte language | NUL-terminated descriptor |
+  text`. A `USLT` variant of the existing walker is a small, well-understood
+  change -- the frame FINDING is already solved, only the payload layout
+  differs.
+- **Vorbis comment `LYRICS` / `UNSYNCEDLYRICS`**, FLAC. `vorbis_comments()` in
+  `flac.c` already walks these, so this is the cheapest source of the three:
+  another key match beside the ones it already recognises.
+- **`.lrc` sidecar file**, either format. This is what lyric tools actually
+  produce, it carries `[mm:ss.xx]` timestamps, and it needs no tag parsing at
+  all -- `0192` open-by-name is HW-proven and the playlist code already opens
+  files by name. **Probably the best first target**, because it decouples the
+  feature from tag layout entirely and gives synchronisation for free.
+- **ID3v2 `SYLT`** (synchronised). Rare enough in the wild to skip; `.lrc`
+  covers the same need from files people can actually obtain.
+
+### Synchronised lyrics are NOT an MP3-only capability — checked 2026-09-10
+
+Worth stating plainly, because `SYLT` being MP3-only makes it look that way and
+this card is mostly FLAC.
+
+`SYLT` is the only purpose-built BINARY synced container, and it is MP3's. But
+it is not how synced lyrics usually travel. The common mechanism is **LRC text
+-- `[mm:ss.xx]` per line -- pasted into a plain text field**, and both formats
+have one: `USLT` for MP3, `LYRICS` / `UNSYNCEDLYRICS` for FLAC. A field named
+"unsynced" very often holds synced content, which is confusing but is what
+taggers actually write.
+
+**So one LRC parser covers every source on both formats:** the sidecar, the MP3
+tag and the FLAC comment. `SYLT` can be skipped with no loss of capability --
+which is a stronger version of what the bullet above already said. Do not build
+a second, binary parser for it.
+
+**One concrete blocker on the FLAC side.** `vorbis_comments()` keeps only the
+head of each entry:
+
+    char e[80];
+    uint32_t keep = n < sizeof(e) ? n : (uint32_t)sizeof(e);
+    ... for (i = keep; i < n; i++) (void)bits(f, 8);   /* skipped in place */
+
+Eighty bytes, because the longest key of interest is ALBUMARTIST and values are
+truncated to the tag buffers anyway. A lyric sheet is 2-4 KB, so it cannot ride
+that path: the key match is fine (`key_is` is already case-insensitive, and
+adding `LYRICS` is one more `else if`), but the VALUE needs streaming to a
+larger buffer instead of the 80-byte head. That is the change, and it is
+localised.
+
+### What already exists to build on
+
+- The ID3 frame walker (`id3_find_text` and the `skip`/`avail` scan around it).
+- `vorbis_comments()` for the FLAC side.
+- **The playlist browser is the display model**: `pl_ui_draw()` with
+  `PL_UI_ROWS` 9, scrolling, follow-the-selection, and an open/close gesture
+  that already coexists with playback. A lyrics pane is that overlay with a
+  different data source, not a new UI subsystem.
+- `ui_sec` for line-level sync. Finer position is derivable the way the clock
+  accumulator already does it, from `frames` with `samp_per_frame` and
+  `samprate` -- so `.lrc` centiseconds are reachable if second-granularity
+  proves too coarse.
+
+### The three constraints that decide the shape
+
+1. **SPACE, and it is the binding one.** 528 bytes of image free at v1.5.0, and
+   BRAM is at 97%. A lyric sheet is 2-4 KB of text; `pl_text` is 12 KB and in
+   use for the playlist. There is no room for both a lyrics buffer and the
+   parser today. **Read the "five items blocked on space" note under Memory and
+   speed before scoping this** -- lyrics joins that queue rather than jumping
+   it.
+
+2. **The fragment-cache rule, which this project has already paid for once.**
+   A far read on the STREAMING slot corrupts the sequential refills behind it,
+   with no underrun recorded -- it presents as a light stutter and cost three
+   wrong fixes. So lyrics must be read at **LOAD time**, alongside the artwork
+   decode, never lazily when the user opens the pane mid-track. A `.lrc`
+   sidecar is a *different* slot, which makes it safer than an in-file tag
+   read, but the rule still governs when the read happens.
+
+3. **The font is ASCII-only and 16px, and it lives in the FPGA.** `FONT_FIRST`
+   is 0x20 and `FONT_LAST` 0x7E, so accented characters and smart quotes have
+   no glyph -- and a U+2019 in metadata has already broken things twice in this
+   project. Lyrics are far more likely to contain them than a filename is.
+   Decide the substitution policy up front, and note that `ts_half` bottoms out
+   at 16px: about 36 characters per line across the panel, so real lyric lines
+   will wrap or clip.
+
+### Overlay vs meter — compared 2026-09-10
+
+**The display is the SMALLER half of this feature either way.** The lyrics
+source -- the read, the parser and a 2-4 KB text buffer -- is identical for
+both and is the bulk of the cost. So pick on behaviour, not on bytes; the two
+are within a few hundred bytes of each other.
+
+|                        | Overlay (playlist-browser style) | Meter (`VIZ_LYRICS`) |
+|---|---|---|
+| Lines visible          | 9 rows at `PL_UI_ROW_H` 20 | 4 at 72px, 6 if it claims `UI_WAVE_TOP` |
+| Line width             | ~360px, ~36 chars | 360, or **252 with art up** (~25 chars) |
+| Gesture                | **needs a new binding, and none is free** | none -- X already cycles meters |
+| While it is up         | covers art, meters and the info card | coexists with all of them |
+| Persistence            | new state to add | `viz_mode`, free (widen interact.json max 11->12) |
+| Scrolling              | page/row redraw, no tricks | smooth via `fb_copy`, see below |
+| New display code       | ~500-900 B (pl_ui's own is ~2.2 KB, but it carries selection, dead entries and ordinals that lyrics do not need) | ~300-600 B |
+
+**The gesture is what actually decides it.** Every button is bound: A
+(play/pause + hold 1.2x), B, X (meters), Y (EQ), Select (browser), Start, L/R
+(seek), Up/Down. An overlay needs a Select combo, and this file already argues
+that each one "costs more than it saves". The meter costs nothing to reach.
+
+**What the overlay buys** is a page rather than a window: 9 lines against 4-6.
+That matters if the goal is READING a lyric; it matters much less if the goal
+is following along while a track plays, which is the usual one on a handheld.
+
+**They are not exclusive, and share everything expensive.** The same buffer and
+parser feed both. Build the meter first; add the overlay later only if the
+4-6 line window proves too small in practice.
+
+### If it is built as a meter — two things checked in the RTL, not assumed
+
+**APPEND to the enum and widen the interact.json Meter slider max from 11 to
+12** -- the rule that has caught this project twice already.
+
+**1. Upward vertical scrolling with `fb_copy` is SAFE.** No meter does a
+vertical block copy today -- the waterfall scrolls horizontally, same rows,
+shifting x -- so this was unproven. Reading `mp3_fb.sv`: the engine walks rows
+DOWNWARD (`char_addr <= char_addr + 512` and `copy_src <= copy_src + 512` in
+A_WRWAIT) and reads each source row fully into `glyphbuf` before writing it.
+For a copy moving content UP, destination row `dy+i` is strictly above every
+remaining source row `sy+j, j>i`, because `dy < sy`. So a write can never
+clobber a row still to be read.
+
+    Scrolling DOWN is NOT safe by the same argument -- it would need the walk
+    reversed. Lyrics only scroll up, so this does not matter, but do not reuse
+    the technique for anything that scrolls the other way.
+
+Bound the copy to the box: source `UI_WAVE_Y + n`, dest `UI_WAVE_Y`, height
+`UI_WAVE_H - n`. An unbounded copy writes above `UI_WAVE_Y` and lands in the
+album art and info card. `fb_copy` already splits spans at `FB_COPY_MAX` 127,
+so the 360px width costs three commands a step.
+
+**2. The font is what stops it being FULLY smooth.** `fb_char` paints a whole
+16px cell and `ts_half` bottoms out at TS_1X, so a line cannot be drawn
+half-in. Existing pixels slide continuously; NEW lines can only appear in whole
+16px steps, popping in at the bottom edge rather than sliding up into view.
+
+Options, none free:
+
+- **Accept the pop.** Lines slide smoothly and each new one appears at the
+  bottom boundary. Probably fine, and it is the only zero-cost answer.
+- **Mask it** -- darken the bottom rows so a line fades in where it appears.
+  Cheap, and the gradient is already per-row.
+- **Vertical clipping in the engine.** The Y Bresenham accumulator for scaling
+  is already there, so a partial-row CHAR may be reachable -- but it is RTL,
+  which means a Quartus round trip, and it is the only item here that does.
+
+**Geometry is tight.** The box is 72px, or 96 if it claims `UI_WAVE_TOP` the
+way the cassette does: 4 lines at 16px, 6 with the taller box. Width is 360,
+or 252 when the art panel is up -- about 36 characters, 25 with art. That is
+enough to show the current line and a little context, and NOT enough for a
+lyric sheet. Design for a moving focus line, not a page.
+
+### What it would cost to build TODAY — costed 2026-09-10
+
+Slack at v1.5.0 is **272 bytes**. This does not fit, and the gap is not close.
+
+| item | bytes | where |
+|---|---|---|
+| lyric text buffer | 2000-3000 | BSS. ~40 lines x ~40 chars plus `[mm:ss.xx]` per line |
+| line index (offset + seconds) | ~160 | BSS, 40 lines x 4 |
+| `.lrc` parser | 300-500 | text |
+| meter draw block | 300-600 | text |
+| open-by-name + read at load | ~150 | text, reuses the `pl_open_into` pattern |
+| enum, toast name | ~50 | text |
+| **total** | **~3000-4500** | |
+
+**Funding it.** The stack cut is the only one that covers it outright and it
+covers it three times over: 12 KB measured, one line, leaves 8 KB spare.
+`-Os` on `load_track` (3-5 KB) would also do it. `art_acc` 20->18 (1104) and
+dropping one meter (~2000) do not, singly.
+
+**The READ is free, which is the good news.** A 2 KB `.lrc` is a single 4 KB
+target read against artwork's 43-207, so it adds nothing measurable to a load
+that currently runs 1241 ms. This is purely a memory problem, not a speed one.
+
+### Three blockers that are NOT bytes
+
+1. ~~There is no spare data slot.~~ **CLEARED 2026-09-10.** Slot 4 "Lyrics"
+   added to `data.json`, shaped like slot 2 -- `deferload: true`, no filename,
+   `extensions: ["lrc"]` -- so APF loads nothing at boot and the core fills it
+   by name. **Shipped ALONE with the firmware untouched**, per the input.json
+   incident, and hardware-confirmed: the core loads, playback is unchanged, and
+   the new picker appears in the Analogue menu.
+
+   Reusing an existing slot was rejected: slot 2 is the streaming slot, and
+   slot 3 carries a periodic `0190` identity check plus a re-read whenever a
+   list is picked.
+
+   Reusing slot 3 was considered and rejected: the periodic identity check is a
+   deliberate `0190` on slot 3, and `pl_load()` re-reads it whenever a list is
+   picked, so parking an `.lrc` there breaks both.
+
+2. **interact.json Meter slider max 11 -> 12**, or `viz_mode` silently stops
+   persisting while the firmware looks correct throughout. Third time this rule
+   applies.
+
+   **Do this WITH the meter, not before it.** Widening the slider while only 12
+   meters exist lets a user select index 12, which is `VIZ_COUNT` -- out of
+   range. `settings_load()` rejects it on the way in, so it would not persist,
+   but it is a setting that silently does nothing until the firmware catches
+   up. The data file and the enum change belong in the same build.
+
+3. **Read at LOAD, never lazily.** Opening the pane mid-track and fetching then
+   is the far-read-on-another-slot pattern that drops the fragment cache. It
+   presents as a light stutter with no underrun recorded, and it cost three
+   wrong fixes in v1.4.0.
+
+### A staged plan, cheapest first
+
+1. **`.lrc` sidecar, unsynchronised display.** Open `<track>.lrc` by name at
+   load, strip timestamps, show the text. No tag parsing, no clock coupling.
+   Proves the read path, the buffer size and the display before anything harder.
+
+   **The naming convention is SETTLED, so build to it:**
+
+       <track>.mp3   ->   <track>.lrc      same folder, same basename
+
+   Compare case-INSENSITIVELY. FAT is case-insensitive and APF reports paths in
+   whatever case it likes, which has already bitten the playlist stem code.
+
+   `tools/lrc_manifest.py` reports which tracks on a card have a sidecar and
+   names the ones that do not, and warns about two files that would collide
+   once case is folded. Run against the test card 2026-09-10: **0 of 71**.
+2. **Synchronise it.** Keep the timestamps, highlight the current line, scroll
+   to follow. This is where the clock work lands.
+3. **In-file tags.** `USLT` for MP3, `LYRICS`/`UNSYNCEDLYRICS` for FLAC, so
+   files that carry their own lyrics work with no sidecar.
+
+Stage 1 alone is a real feature and is testable on the card without touching
+the decode path at all.
+
+### What would make it affordable
+
+The same thing that unblocks the other five stalled items: image space.
+`load_track` is 11 KB and `main` is 14 KB, neither of them hot, and `-Os` has
+never been aimed at them specifically. That work buys lyrics, the thirteenth
+meter, the boot oscilloscope and the 256-track playlist cap at once.
+
 ## Gapless playback
 
 Track changes currently have a short silence — the new file has to be opened,
@@ -1351,8 +2221,9 @@ Memory is the constraint, not logic.
 ## More meters — idea bank (user, 2026-08-12)
 
 "I'd occasionally like to slip a new one in every once in a while." So this is
-a standing list, not a task. Nine exist: bars, waterfall, L/R levels, phase
-scope, oscilloscope, VU needles, scrolling waveform, mirrored bars, peak dots.
+a standing list, not a task. TWELVE exist: bars, waterfall, L/R levels, phase
+scope, oscilloscope, VU needles, scrolling waveform, mirrored bars, peak dots,
+magic eye, 16-band spectrum, and the cassette.
 
 **APPEND to the `VIZ_*` enum, never reorder it.** `viz_mode` persists as an
 INDEX, so inserting a meter in the middle silently repoints every user's saved
@@ -1400,14 +2271,33 @@ Two follow-on traps from the same episode:
 - **Vinyl platter and tonearm** -- platter spins, arm creeps inward with track
   progress, highlight pulses with level. Uses elapsed/total, which no current
   meter visualises.
-- **Tape reels** -- same data. The supply reel speeding up as it empties is the
-  detail that sells it.
+- **Tape reels** -- BUILT in v1.5.0, as the cassette meter. What actually sold
+  it was not the speeding-up reel: the geometry gives only 7px of pack travel,
+  and a 7px outline moving against a same-coloured neighbour reads as nothing.
+  Concentric 2px BANDS made the wind countable -- four on a full reel, one on
+  an empty one -- and that is the cue that works.
+
+  Three other things learned there, all the hard way:
+
+  * The exposed tape between the reels CANNOT show progress. packs + packt is
+    1+x and 1+(7-x), so the gap is constant and only shifts. A cue that moves
+    without meaning anything looks worse than no cue.
+  * Overlapping regions on independent redraw schedules is the recurring fault
+    in this UI -- it broke the label stripes and then the pack/tape boundary.
+    Either draw them together or make them geometrically disjoint.
+  * A clear must cover the FULL extent of what it erases. The pack clear was
+    3px short, so a SHRINKING reel kept its outermost arc forever and looked
+    frozen at maximum. Three rounds of reasoning missed it; one on-screen
+    readout of the actual values found it immediately.
 - **Radar sweep** -- a line sweeps a circle painting level as radius, with a
   decaying trail. Polar version of the scrolling waveform.
 
-### Needs one enabler: a bass proxy
+### Needs one enabler: a bass proxy -- ALREADY BUILT
 
-A **one-pole lowpass in the existing per-sample loop** -- a shift and an add.
+The v1.4.0 octave cascade IS this, and it was gated to the spectrum meter. The
+cassette widened that gate in one line and read its lowest band. Anything below
+can do the same; the enabler is no longer outstanding.
+
 Unlocks:
 
 - **Beating speaker cone** -- user's idea, and it NEEDS this. Driven by overall

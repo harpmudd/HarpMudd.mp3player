@@ -5,7 +5,7 @@ SD card, with album art, tags and meters.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
-Current version **v1.4.0**. Release history: [CHANGELOG.md](CHANGELOG.md).
+Current version **v1.5.0**. Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Installing
 
@@ -19,17 +19,17 @@ Pocket's SD card, merging with what's already there. Then drop your `.mp3` and
 
 They can live in subfolders under that path — an `Artist/Album` layout works
 without rearranging. `mp3player.rom` is the firmware and has to stay in that
-folder — the core won't start without it.
+folder — the core won't start without it. `mp3font.bin` sits beside it and
+carries the Japanese and accented characters; without it those titles fall back
+to `?`, and everything else still works.
 
 ## Playing
 
 At launch the core loads **`playlist.m3u`** — that name specifically, not any
 playlist it finds. Choose a different one with **Load Playlist** and it becomes
-the one that loads from then on, so you only have to pick it once.
-
-With no `playlist.m3u` and nothing remembered you get a getting-started screen;
-press **Analogue** and choose **Load MP3** or **Load Playlist**. The same menu
-switches either at any time, and whatever you pick starts playing.
+the one that loads from then on. With nothing to load you get a getting-started
+screen; press **Analogue** and choose **Load MP3** or **Load Playlist**, which
+you can do at any time.
 
 The controls:
 
@@ -43,7 +43,7 @@ The controls:
 | **Select** + **Left** / **Right** | Seek one second |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter (ten styles) |
+| **X** | Cycle the meter (twelve styles) |
 | **Y** | Cycle the EQ preset (eight) |
 | **Select** | *Tap* — playlist browser; *Hold* — show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
@@ -56,15 +56,35 @@ moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset carry over
-between sessions, in step with **Core Settings**. **Where you were in a
-playlist can be remembered too** — switch on **Resume playback** in Core
-Settings. It holds one place, for the last playlist you used, and **Load MP3**
-records no position at all — so for an audiobook, use a playlist; a one-line
-`.m3u` is enough.
+between sessions, in step with **Core Settings**; the album art panel and
+screen-blank timeout reset each launch. Switch on **Resume playback** there and
+the core also remembers where you were — one place, for the last playlist you
+used. **Load MP3** records no position, so for an audiobook use a playlist; a
+one-line `.m3u` is enough.
 
-The album art panel and screen-blank timeout reset each launch. Everything
-saved lives in `/Settings/HarpMudd.Mp3Player/` — delete that folder to reset.
-Nothing is written to your music folder.
+Saved settings live in `/Settings/HarpMudd.Mp3Player/` — delete that folder to
+reset. Nothing is written to your music folder.
+
+## Languages
+
+Titles, artists and filenames display in most of the world's widely used
+scripts, in the player and in the playlist browser alike — 22,800 characters,
+checked against real text rather than a list of ranges:
+
+| | |
+|---|---|
+| **Japanese** | Kanji, hiragana, katakana, fullwidth forms, 「」、。 |
+| **Chinese** | Simplified and Traditional |
+| **Western European** | English, French, German, Spanish, Portuguese, Italian, Dutch, Nordic — é è ê ü ö ñ ç ß å ø æ |
+| **Central and Eastern European** | Polish, Czech, Slovak, Hungarian, Croatian, Slovenian, Turkish, Latvian, Lithuanian, Estonian |
+| **Greek** | Ελληνικά |
+| **Cyrillic** | Russian, Ukrainian, Bulgarian, Serbian, Belarusian, Macedonian |
+| **Punctuation and symbols** | Curly quotes, dashes, ellipsis, € ™ °, ♪ ♫ ★ ♥ → ● ■ ½ ± |
+
+Accented capitals keep their accents — Édith, Ólafur, ŠKODA — which a 16-pixel
+line normally clips. Tags are read as UTF-8 or UTF-16, whichever the file uses,
+and filenames work too, so an untagged file still reads as itself. The
+characters come from `mp3font.bin`, which the core loads at startup.
 
 ## What it shows
 
@@ -75,9 +95,10 @@ Nothing is written to your music folder.
 - **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
   cover show no panel; a cover that can't be decoded shows the panel with the
   reason in it.
-- **Eleven meters**, cycled with **X**: bars, waterfall, L/R levels, phase
+- **Twelve meters**, cycled with **X**: bars, waterfall, L/R levels, phase
   scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
-  bars, peak dots, a magic eye and a 16-band spectrum analyser.
+  bars, peak dots, a magic eye, a 16-band spectrum analyser and an animated
+  cassette whose reels wind as the track plays.
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
@@ -143,13 +164,12 @@ order.<br clear="right">
 
 ### Remembering which playlist you were using
 
-The core reopens the list you last used at the next launch. It has one
-settings word to remember it in, which holds twelve characters — so on its
-own, `Shenanigans.m3u` comes back and `Goose - Shenanigans Nite Club.m3u`
-does not.
+The core reopens the list you last used. It remembers the name in twelve
+characters, so `Shenanigans.m3u` comes back on its own and
+`Goose - Shenanigans Nite Club.m3u` does not.
 
-**List a playlist in `playlists.m3u` and the limit goes away.** It's a plain
-list of the playlists on the card, and only the ones listed are remembered:
+**List a playlist in `playlists.m3u` and the limit goes away** — a plain list of
+playlist names, saved beside them in `/Assets/mp3player/common/`:
 
 ```text
 Crash Test Dummies - God Shuffled His Feet.m3u
@@ -157,18 +177,11 @@ Goose - Shenanigans Nite Club.m3u
 Live/Phish - Hampton 1997.m3u
 ```
 
-Write it in any text editor and save it beside your playlists, in
-`/Assets/mp3player/common/`. The core searches it by name at boot, so a
-playlist can be called anything you like. Order doesn't matter and you can add
-or remove lines freely — entries are matched by name, not by position.
+Only listed playlists are remembered; order doesn't matter. Without the file,
+short names still work as they always did.
 
-Without the file nothing changes: names of twelve characters or fewer are still
-remembered on their own, so an existing card keeps working exactly as it did.
-
-Resume follows the same path. The core remembers the track and the second you
-stopped on, but it finds them through the playlist it reopens — so if the
-playlist can't be reopened, resume comes back at the start of `playlist.m3u`
-instead. Resume covers the whole playlist, all 256 tracks.
+Resume finds your place through that same playlist, so if the playlist can't be
+reopened it starts at the beginning of `playlist.m3u`.
 
 Tracks advance automatically. **Repeat**: off stops at the end, *all* loops,
 *one* repeats the current track. **Shuffle** plays in a random order and never
@@ -247,20 +260,26 @@ framework bugs that had to be found first — is in
 
 - **FLAC up to 48 kHz.** Hi-res files are turned away with the reason on
   screen; see [FLAC](#flac) for why, and what to convert them to.
-- **Baseline JPEG album art only,** and a cover that can't be shown says so
-  rather than silently going missing. A progressive JPEG shows **PROG. JPEG**
-  in the art panel; anything else that won't decode — a PNG cover, a damaged
-  image — shows **COVER ERROR**. Re-saving the cover as a baseline JPEG fixes
-  it. A track with no embedded cover at all shows no panel, which is different
-  and intended. See [ROADMAP.md](ROADMAP.md).
+- **Baseline JPEG album art only.** A progressive JPEG shows **PROG. JPEG**,
+  anything else that won't decode shows **COVER ERROR**, and re-saving the
+  cover as a baseline JPEG fixes both. A track with no cover simply shows no
+  panel.
 - **Playlists are capped at 256 tracks**, or 12 KB of `.m3u` text — whichever
   comes first, which allows about 48 characters per line. A playlist that runs
   past either says so instead of quietly playing fewer.
-- **A playlist with a name longer than 12 characters needs a `playlists.m3u`
-  entry to be remembered.** Without one it plays fine but won't be the list
-  that loads next launch, and resume won't follow it. A `playlists.m3u` that
-  exists but doesn't list that playlist has the same effect as none at all. See
+- **A playlist named longer than 12 characters needs a `playlists.m3u` entry
+  to be remembered** — see
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
+  It plays fine either way.
+- **The most demanding FLAC files can stutter** — 24-bit/48 kHz at a high
+  bitrate, or a maximum-compression encode. Decoding runs on a 60 MHz CPU
+  inside the FPGA and those need about three quarters of it, leaving too little
+  for the screen and the card. Re-encoding at the default compression setting,
+  or to 16-bit/44.1 kHz, fixes it.
+- **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
+  UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
+  carry, and converting it needs a lookup table the firmware has no room for.
+  Re-saving the tags as UTF-8 fixes it.
 - **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
   60 available, so the decoder occasionally can't keep up. Normal speed is
   unaffected.
@@ -291,6 +310,12 @@ from that source file's own copyright header.
   ([rsms](https://github.com/rsms)) — SIL Open Font License 1.1, bundled at
   [`third_party/font/OFL.txt`](third_party/font/OFL.txt). The font ROM the core
   draws with is generated from it and is a derivative under the same license.
+- **[GNU Unifont](https://unifoundry.com/unifont/)** — Roman Czyborra, Paul
+  Hardy and the Unifont contributors, dual licensed under the SIL Open Font
+  License 1.1 and the GNU GPL 2+ with the font embedding exception, bundled at
+  [`third_party/unifont/OFL-1.1.txt`](third_party/unifont/OFL-1.1.txt). Its
+  Japanese variant supplies the kana, CJK ideographs and symbols in
+  `mp3font.bin`, which is a derivative under the same license.
 - **Core, firmware, UI and integration** —
   [HarpMudd](https://github.com/harpmudd).
 

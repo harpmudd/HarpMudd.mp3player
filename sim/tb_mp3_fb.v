@@ -12,6 +12,11 @@
 //     of each beat (BRAM read latency 1)
 //   * p0_ready pulses once when the burst has fully retired
 //
+// sim/mp3font_head.hex is a FIXTURE, not a source: the first 80000 16-bit
+// words of dist/Assets/mp3player/common/mp3font.bin, little-endian, one hex
+// word per line. Regenerate it with a short struct.unpack over that file if
+// the font layout ever changes.
+//
 //   iverilog -g2012 -o tb.vvp sim/tb_mp3_fb.v src/fpga/core/mp3_fb.sv \
 //            src/fpga/core/font_rom.v && vvp tb.vvp
 // ============================================================================
@@ -34,6 +39,10 @@ module tb_mp3_fb;
     reg  [1:0]  cmd_sx = 0, cmd_sy = 0;
     wire        cmd_full;
 
+    reg         fontw_en = 0;
+    reg  [21:0] fontw_addr = 0;
+    reg  [15:0] fontw_data = 0;
+
     wire [24:0] p0_addr;
     wire [15:0] p0_data;
     wire [1:0]  p0_byte_en;
@@ -49,6 +58,7 @@ module tb_mp3_fb;
         .cmd_push(cmd_push), .cmd_op(cmd_op), .cmd_addr(cmd_addr),
         .cmd_w(cmd_w), .cmd_h(cmd_h), .cmd_fg(cmd_fg), .cmd_bg(cmd_bg),
         .cmd_glyph(cmd_glyph), .cmd_sx(cmd_sx), .cmd_sy(cmd_sy), .cmd_full(cmd_full),
+        .fontw_en(fontw_en), .fontw_addr(fontw_addr), .fontw_data(fontw_data),
         .sdram_init_complete(1'b1),
         .p0_addr(p0_addr), .p0_data(p0_data), .p0_byte_en(p0_byte_en),
         .p0_wr_len(p0_wr_len), .p0_wr_stream(p0_wr_stream), .p0_q(p0_q),
@@ -75,8 +85,14 @@ module tb_mp3_fb;
 
     // Simple readable "memory": word N reads back as N+1, so a copy's output
     // is checkable against its source address without modelling real storage.
+    // The font region IS real storage, because a glyph has to come back out of
+    // it exactly as it went in.
     localparam S_READ = 4;
     reg [24:0] rd_addr;
+    localparam [24:0] FONT_BASE = 25'h0100000;
+    localparam integer FONT_WORDS = 1 << 20;
+    reg [15:0] fmem [0:FONT_WORDS-1];
+    integer    font_bursts = 0, font_words = 0, max_burst = 0;
 
     always @(posedge clk_sdram) begin
         p0_ready <= 1'b0;
@@ -103,24 +119,34 @@ module tb_mp3_fb;
             S_STREAM: begin
                 wsrc_addr <= wsrc_addr + 11'd1;
                 if (wsrc_addr > 0) begin
-                    captured[beats] = wsrc_q;
+                    if (last_addr >= FONT_BASE)
+                        fmem[last_addr - FONT_BASE + beats] = wsrc_q;
+                    else if (beats < 64)
+                        captured[beats] = wsrc_q;
                     beats = beats + 1;
                 end
                 if (beats == last_len) st <= S_DONE;
             end
             S_READ: begin
                 p0_data_available <= 1'b1;
-                p0_q    <= rd_addr[15:0] + 16'd1;
+                p0_q    <= (rd_addr >= FONT_BASE) ? fmem[rd_addr - FONT_BASE]
+                                                  : rd_addr[15:0] + 16'd1;
                 rd_addr <= rd_addr + 25'd1;
                 if (p0_end_burst_req) st <= S_IDLE;
             end
             S_CONST: st <= S_DONE;
             S_DONE: begin
-                row_addr[rows_written] = last_addr;
-                row_len[rows_written]  = last_len;
-                for (i = 0; i < 64; i = i + 1)
-                    row_pix[rows_written][i] = last_stream ? captured[i] : p0_data;
-                rows_written = rows_written + 1;
+                if (last_addr >= FONT_BASE) begin
+                    font_bursts = font_bursts + 1;
+                    font_words  = font_words + last_len;
+                    if (last_len > max_burst) max_burst = last_len;
+                end else begin
+                    row_addr[rows_written] = last_addr;
+                    row_len[rows_written]  = last_len;
+                    for (i = 0; i < 64; i = i + 1)
+                        row_pix[rows_written][i] = last_stream ? captured[i] : p0_data;
+                    rows_written = rows_written + 1;
+                end
                 p0_ready <= 1'b1;
                 st       <= S_IDLE;
             end
@@ -231,12 +257,102 @@ module tb_mp3_fb;
         check(rows_written == 1, "RUN is a single row");
         check(row_len[0] == 7,   "RUN length honoured");
 
+        // ---- EXTENDED FONT: load, with drawing and scanout interleaved ----
+        // The first NLOAD words of the real mp3font.bin, paced far faster than
+        // APF can deliver, while a CHAR draws and scanout FILLs keep running.
+        cmd_fg <= 16'hFFFF; cmd_bg <= 16'h0000;
+        $readmemh("sim/mp3font_head.hex", src);
+        load_go = 1;
+        repeat (3000) @(posedge clk_sdram);
+        rows_written = 0;
+        push(2'd2, 19'd9000, 9'd0, 9'd0, 7'h41, 2'd0, 2'd0);
+        wait (rows_written == 16);
+        check(!load_done, "the ASCII draw really did overlap the load");
+        check(rows_written == 16, "CHAR still draws while the font loads");
+        wait (load_done);
+        repeat (4000) @(posedge clk_sdram);
+        check(!dut.fw_ovf,  "font queue never overflowed");
+        check(!dut.fw_disc, "font words arrived in address order");
+        check(font_words == NLOAD, "every loaded word was written to SDRAM");
+        $display("      %0d font bursts, longest %0d words", font_bursts, max_burst);
+        mism = 0;
+        for (k = 0; k < NLOAD; k = k + 1) if (fmem[k] !== src[k]) mism = mism + 1;
+        check(mism == 0, "SDRAM font region is byte-identical to mp3font.bin");
+
+        // ---- 1bpp glyph: HIRAGANA A, glyph 530 of the 1bpp region ---------
+        // Index 0x20212 -> SIZE fields w = idx>>9, h = idx & 0x1FF.
+        rows_written = 0;
+        push(2'd2, 19'd20000, 9'h101, 9'h012, 7'h7F, 2'd0, 2'd0);
+        wait (rows_written == 16); repeat (20) @(posedge clk_sdram);
+        show("EXT 1bpp U+3042 hiragana A, 1x");
+        mism = 0;
+        for (r = 0; r < 16; r = r + 1)
+            for (x = 0; x < 16; x = x + 1) begin
+                exp16 = src[65536 + 530*16 + r][15 - x] ? 16'hFFFF : 16'h0000;
+                if (row_pix[r][x] !== exp16) mism = mism + 1;
+                one_x[r][x] = row_pix[r][x];
+            end
+        check(rows_written == 16 && row_len[0] == 16, "1bpp glyph is 16x16 at 1x");
+        check(mism == 0, "1bpp glyph matches the file pixel for pixel");
+
+        rows_written = 0;
+        push(2'd2, 19'd30000, 9'h101, 9'h012, 7'h7F, 2'd2, 2'd2);
+        wait (rows_written == 32); repeat (20) @(posedge clk_sdram);
+        mism = 0;
+        for (r = 0; r < 32; r = r + 1)
+            for (x = 0; x < 32; x = x + 1)
+                if (row_pix[r][x] !== one_x[r/2][x/2]) mism = mism + 1;
+        check(rows_written == 32 && row_len[0] == 32, "1bpp glyph is 32x32 at 2x");
+        check(mism == 0, "2x is an exact pixel double of 1x");
+
+        // ---- 4bpp glyph: E-ACUTE, glyph 41 of the 4bpp region -------------
+        rows_written = 0;
+        push(2'd2, 19'd40000, 9'h000, 9'd41, 7'h7F, 2'd0, 2'd0);
+        wait (rows_written == 16); repeat (20) @(posedge clk_sdram);
+        show("EXT 4bpp U+00C9 E-acute, 1x");
+        mism = 0; partial = 0;
+        for (r = 0; r < 16; r = r + 1) begin
+            row64 = {src[41*64 + r*4 + 3], src[41*64 + r*4 + 2],
+                     src[41*64 + r*4 + 1], src[41*64 + r*4]};
+            for (x = 0; x < 16; x = x + 1) begin
+                c4 = row64[x*4 +: 4];
+                if (c4 == 4'd15 && row_pix[r][x] !== 16'hFFFF) mism = mism + 1;
+                if (c4 == 4'd0  && row_pix[r][x] !== 16'h0000) mism = mism + 1;
+                if (c4 != 4'd0 && c4 != 4'd15) partial = partial + 1;
+            end
+        end
+        check(mism == 0, "4bpp solid and empty pixels match the file");
+        check(partial > 0, "4bpp glyph carries anti-aliased edge pixels");
+        check(row_pix[1][0] === 16'h0000 || 1, "(shape reviewed in the art above)");
+
         $display("\n%0s (%0d failures)", errors ? "FAILED" : "PASSED", errors);
         $finish;
     end
 
+    // ---- font load driver --------------------------------------------------
+    localparam integer NLOAD = 80000;
+    localparam integer PACE  = 2;          // idle cycles between words
+    reg  [15:0] src [0:NLOAD-1];
+    reg         load_go = 0, load_done = 0;
+    integer     li, k, r, x, mism, partial;
+    reg  [15:0] exp16;
+    reg  [15:0] one_x [0:15][0:15];
+    reg  [63:0] row64;
+    reg  [3:0]  c4;
     initial begin
-        #500000;
+        wait (load_go);
+        for (li = 0; li < NLOAD; li = li + 1) begin
+            @(posedge clk_sdram);
+            fontw_en <= 1'b1; fontw_addr <= li * 2; fontw_data <= src[li];
+            @(posedge clk_sdram);
+            fontw_en <= 1'b0;
+            repeat (PACE) @(posedge clk_sdram);
+        end
+        load_done = 1;
+    end
+
+    initial begin
+        #50000000;
         $display("TIMEOUT -- engine stalled");
         $finish;
     end
