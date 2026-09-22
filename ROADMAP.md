@@ -1078,9 +1078,15 @@ them in about a minute.
 Do not attempt the port and the decoder in the same change. The RAM ceiling
 would turn into a week of mysterious failures.
 
-Unsettled detail found on the way: `mp3_fb.sv` says *"~360 KB of 32 MB SDRAM"*
-while `_mister_pocket_lib/core/mem/README.md` says the Pocket's part is
-512 Mbit x16 = **64 MB**, hardware-validated 2026-06-02. One is stale.
+SETTLED 2026-09-22 (was recorded here as an open contradiction): the part is
+**64 MB** (512 Mbit x16), hardware-validated 2026-06-02, and `mp3_fb.sv` now
+says so too -- its comment reads "~360 KB of 64 MB SDRAM". The framebuffer
+therefore uses **0.6% of the device**.
+
+Which reframes this whole section: **capacity was never the constraint, and
+no buffer move is gated on space.** What is scarce is the CPU-side PORT and
+its arbitration against a scanout FILL that must never miss its deadline --
+plus M10K blocks at 300/308, which is what moving a buffer OUT of BRAM buys.
 
 ## Raise the 128-track playlist cap — requested 2026-08-13
 

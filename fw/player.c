@@ -1288,8 +1288,13 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 /* TEMPORARY, with IO_BENCH: shows the throughput figure. Back to 0 before
  * anything ships -- no diagnostic is ever shown to users. */
 /* 0 for any build a user sees -- the standing rule is that no diagnostic ever
- * reaches one. Set to 1 to bring the D/O/U/F row back while investigating. */
+ * reaches one. Set to 1 to bring the D/O/U/F row back while investigating,
+ * which no longer needs an edit to this file:
+ *     EXTRA_CFLAGS="-DUI_SHOW_SPEED_DIAG=1 -Os" bash fw/build.sh
+ * The -Os is not optional, for the same reason the resume row needs it. */
+#ifndef UI_SHOW_SPEED_DIAG
 #define UI_SHOW_SPEED_DIAG 0
+#endif
 /* Resume instrumentation. EXTRA_CFLAGS="-DUI_SHOW_RESUME_DIAG=1 -Os"
  *
  * The -Os is not optional: the normal build has under 1 KB of heap left and
@@ -5845,14 +5850,18 @@ ui_tail:
          * decoder is not fast enough. Those need opposite fixes, and without
          * this row the two are indistinguishable from the couch. */
         /* L/R/P are retired: they did their job -- the 48 kHz gate is set
-         * from the numbers they produced -- and FLAC_PROFILE is now 0. What
-         * remains is what the one OPEN defect needs: F names why a load
-         * failed. */
+         * from the numbers they produced -- and FLAC_PROFILE is now 0.
+         *
+         * F (fl_open_err/fl_open_fails) is retired too, and less gracefully:
+         * b63644d deleted both variables on 2026-08-15 but left this row
+         * referencing them, so UI_SHOW_SPEED_DIAG=1 did not COMPILE for over
+         * a month. Nothing caught it because the flag ships at 0. If a field
+         * is removed, remove its use here in the same commit -- a diagnostic
+         * that cannot be built is worse than no diagnostic, because it is
+         * discovered at the moment it is needed. */
         *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
-        *q++ = ' '; *q++ = 'F'; q = ui_dec(q, fl_open_err);
-        *q++ = '/'; q = ui_dec(q, fl_open_fails);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);

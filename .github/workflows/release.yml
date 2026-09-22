@@ -23,6 +23,7 @@ jobs:
             dist/Cores/HarpMudd.Mp3Player/bitstream.rbf_r \
             dist/Cores/HarpMudd.Mp3Player/core.json \
             dist/Assets/mp3player/common/mp3player.rom \
+            dist/Assets/mp3player/common/mp3font.bin \
             dist/Platforms/mp3player.json
           do
             if [ ! -s "$f" ]; then
