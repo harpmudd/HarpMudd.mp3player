@@ -12,6 +12,121 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
+# v1.6.0 -- FLAC performance
+
+**Scope set 2026-09-22, and it was re-scoped MID-PLANNING on measurement.** The
+release was going to be the SDRAM migration with fixes attached. Three readings
+taken on hardware that afternoon moved it.
+
+## What was measured
+
+Diagnostic build (`UI_SHOW_SPEED_DIAG=1`, built `-O2` so decode timing matches
+the shipping build), three tracks, D/O/U read ~20 s in.
+
+| track | cassette meter | bars meter |
+|---|---|---|
+| Dire Straits (MP3, control) | D6 O0 U0 | **D12** O0 U0 |
+| The Blue Hearts (16/44.1, order-12, ~1027 kbps) | D0 O0 U1 | **D0-5** |
+| Mandrake Handshake (24/48, ~1814 kbps) | D0 O0 U2 | **D0** |
+
+Three things follow, and they are not what the README currently says.
+
+**1. The per-sample octave cascade costs ~6% of the CPU.** The control moved
+D6 -> D12 on bars, landing on the historical D11-13 baseline, which validates
+the instrument at the same time. `VIZ_LED` (16-band spectrum) and `VIZ_TAPE`
+(cassette) are the only two meters that run `SPEC_OCT` = 8 filter stages on
+EVERY sample at 44.1 kHz, inside `meters_feed`, competing with the decoder --
+to drive a label flash and a display that both update at ~30 Hz.
+
+**2. The two stuttering files are two different problems.** Blue Hearts
+recovers real margin on bars: it is MARGINAL, and the meter tips it over.
+Mandrake does not move: it is genuinely at the decode ceiling.
+
+**3. Neither is I/O-bound.** O reads 0 on both. At 1814 kbps Mandrake wants
+~227 KB/s against the 736 KB/s the card was measured at.
+
+### Correction: the "hardware ceiling" conclusion was not established
+
+These files were pronounced a hardware ceiling because they behaved identically
+on v1.4.0. That comparison never controlled for the METER. The cascade is not
+new in 1.5.0 -- the spectrum meter runs the same loop and shipped in v1.4.0 --
+so if a cascade meter was showing for both tests, both builds paid the same
+cost and the comparison proves nothing. The standing rule applies: with an
+intermittent, mode-switched UI, establish which MODE was active before
+concluding anything -- including before concluding it is the hardware.
+
+### Correction: the SDRAM migration is NOT a prerequisite for the FLAC work
+
+Recorded earlier here as though it were. From `ap_core.fit.summary`:
+
+    Logic utilization (ALMs) :  5,894 / 18,480  ( 32 % )   -- 12,586 free
+    Total DSP Blocks         :     11 /     66  ( 17 % )   -- 55 free
+    Total RAM Blocks         :    301 /    308  ( 98 % )   --  7 free
+
+**Only M10K is scarce.** A Rice decoder is priority encoders, barrel shifters
+and leading-zero counts -- ALM-heavy and BRAM-light if residuals stream out in
+chunks instead of buffering a whole block. It needs the resource there is most
+of. The migration frees the one it needs least.
+
+And the I/O column is not a separate obstacle: O rises BECAUSE D reaches 0 and
+prefetch stops being issued (established in docs/FLAC.md). Making decode
+cheaper collapses O for free, without the SDRAM ring.
+
+## The phases
+
+**Phase 0 -- prerequisites. DONE 2026-09-22** (commit 64a5721). Six merged
+branches deleted; `release.yml` now verifies `mp3font.bin`; the SDRAM 32/64 MB
+contradiction closed. And the diagnostic that gates all of this was REPAIRED:
+b63644d deleted `fl_open_err`/`fl_open_fails` on 2026-08-15 but left the D/O/U/F
+row printing them, so `UI_SHOW_SPEED_DIAG=1` had not compiled for a month --
+undiscovered because the flag ships at 0. `UI_SHOW_SPEED_DIAG` now sits behind
+`#ifndef` so a measurement build needs no source edit.
+
+**Phase 1 -- cheap and near-certain.**
+
+- Decimate the octave cascade. ~6%, measured. Self-contained firmware, no RTL,
+  no SDRAM. Caveat to settle in `rv32sim` and NOT on hardware: decimating
+  without pre-filtering aliases the top bands of the spectrum meter.
+- Re-test `feature/flac-lpc-speedup` on a clean `-O2` build. 5-11%. It was
+  parked as aimed at the wrong thing, correct when the files looked I/O-bound
+  and needed a large gain; they are decode-bound and marginally over, so the
+  premise changed. The listening test that rejected it ran on a contaminated
+  build with the per-sample click detector active.
+- Re-measure hi-res with the 48 kHz gate temporarily lifted. The 157 and 191
+  figures predate the 64-bit reservoir and clz `unary()` -- the same change
+  that took the Furs 95 -> 80. We are planning against stale, pessimistic
+  numbers.
+
+**Phase 2 -- clk_sys 60 -> 75 MHz.** +25% on everything. VexRiscv's fmax was
+measured at 141 MHz in STAGE0, so the CPU is nowhere near its limit; the
+question is whether video, SDRAM and the bridge still close. **One Quartus run
+and the timing report answer it -- no hardware needed** -- and it reverts
+cleanly. Best payoff per unit of risk on the list. Note every clk_sys-derived
+constant moves with it, firmware `CLK_HZ` included.
+
+**Phase 3 -- Rice decoder in fabric.** The headline. 60-76% of decode into the
+resource the device has most of.
+
+**Phase 4 -- raise the 48 kHz gate** to what the combination actually supports,
+measured rather than hoped. Rewrite the README limitation, which today frames a
+meter cost as a hardware ceiling and tells users to re-encode files that would
+play on bars.
+
+**Phases 1, 2 and 4 are independently shippable.** If Phase 3 is harder than it
+looks, 1.6.0 still ships as "FLAC got faster and more files play" on ~30% from
+the cheap items and the clock alone -- which on these numbers should clear
+Mandrake and everything below it.
+
+## Deliberately out
+
+- **The SDRAM migration**, moved to 1.7.0 and correctly positioned as groundwork
+  for lyrics and AAC rather than for FLAC. The analysis stands; the ordering
+  argument for it did not.
+- **Lyrics**, after the migration.
+- **Hi-res FLAC rejected at boot, boots stopped** -- user, 2026-09-22: not now.
+- **Issue #3 (black screen on missing mp3player.rom)** and the interlock bump.
+  Interlock stays at rev 21, so no new black-screen exposure is created.
+- **24/192.** Double 24/96 again; nothing on this list reaches it.
 # Releasing
 
 **Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
