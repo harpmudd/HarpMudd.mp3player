@@ -26,8 +26,8 @@ the shipping build), three tracks, D/O/U read ~20 s in.
 | track | cassette meter | bars meter |
 |---|---|---|
 | Dire Straits (MP3, control) | D6 O0 U0 | **D12** O0 U0 |
-| The Blue Hearts (16/44.1, order-12, ~1027 kbps) | D0 O0 U1 | **D0-5** |
-| Mandrake Handshake (24/48, ~1814 kbps) | D0 O0 U2 | **D0** |
+| The Blue Hearts (16/44.1, order-12, ~1027 kbps) | D0 O0 U1 | **D0-5 O0 U0-1** |
+| Mandrake Handshake (24/48, ~1814 kbps) | D0 O0 U2 | **D0 O0 U1-2** |
 
 Three things follow, and they are not what the README currently says.
 
@@ -38,9 +38,16 @@ the instrument at the same time. `VIZ_LED` (16-band spectrum) and `VIZ_TAPE`
 EVERY sample at 44.1 kHz, inside `meters_feed`, competing with the decoder --
 to drive a label flash and a display that both update at ~30 Hz.
 
-**2. The two stuttering files are two different problems.** Blue Hearts
-recovers real margin on bars: it is MARGINAL, and the meter tips it over.
-Mandrake does not move: it is genuinely at the decode ceiling.
+**2. The meter is a CONTRIBUTOR, not the cause -- and that is the corrected
+reading.** On the first (cassette) pass it looked as though Blue Hearts might
+be a file the meter alone tips over. The bars pass says otherwise: U falls
+from 1 to 0-1 and from 2 to 1-2, so BOTH files still underrun with the
+cascade off. Blue Hearts sits within a few percent of adequate (D fluctuates
+0-5); Mandrake stays pinned at D0. The ~6% is worth having and is not enough
+on its own for either file.
+
+That is what makes Phase 2 the decisive item rather than Phase 1: +25% from
+the clock covers the gap these readings show, where 6% does not.
 
 **3. Neither is I/O-bound.** O reads 0 on both. At 1814 kbps Mandrake wants
 ~227 KB/s against the 736 KB/s the card was measured at.
@@ -114,8 +121,9 @@ play on bars.
 
 **Phases 1, 2 and 4 are independently shippable.** If Phase 3 is harder than it
 looks, 1.6.0 still ships as "FLAC got faster and more files play" on ~30% from
-the cheap items and the clock alone -- which on these numbers should clear
-Mandrake and everything below it.
+the cheap items and the clock together. Phase 1 ALONE does not clear either
+measured file -- that is measured, not assumed -- so the clock is load-bearing
+for the release having a user-visible result at all.
 
 ## Deliberately out
 
