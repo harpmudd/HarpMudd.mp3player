@@ -2,6 +2,19 @@
 
 What changed in each release, newest first.
 
+## v1.5.1 — 23 September 2026
+
+- **Demanding FLAC files stutter about half as often.** The core now runs at
+  66.7 MHz instead of 60, which gives every track more room. Files that were
+  close to the edge are comfortably clear of it; the most demanding 24-bit
+  ones still drop the occasional sample.
+- Fixed: **the cassette's shell rim never reacted to the music.** It was
+  reading a level that sits near maximum on almost anything, so it stayed the
+  same colour throughout.
+- **A part-finished update now says so** instead of showing a black screen.
+  Copying only some of the core's files used to leave it playing at the wrong
+  speed with nothing to explain why.
+
 ## v1.5.0 — 18 September 2026
 
 - **Titles and artists now display in Japanese, Chinese, Greek, Cyrillic and

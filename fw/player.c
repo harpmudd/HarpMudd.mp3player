@@ -168,14 +168,23 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * everything else works. Old firmware on new RTL never sends it. No MMIO
  * register changed meaning.
  *
- * Bump this only when the MMIO contract itself changes, where running on is
- * genuinely worse than stopping. */
-#define EXPECT_VERSION 0x4D503315u   /* rev 21: 16 setting slots          */
+ * Bump this when running on the wrong pair is worse than stopping. That test
+ * used to be read narrowly as "the MMIO map changed", and rev 21 was kept
+ * through the 1.5.0 font work on that basis -- correctly, because the change
+ * was additive and the failure mode was then a BLACK SCREEN, which is worse
+ * than non-ASCII text silently falling back to spaces.
+ *
+ * Rev 22 is the clk_sys change, and it inverts both halves of that reasoning.
+ * The MMIO map is untouched, but a mismatched pair runs 11% off pitch with
+ * every timer wrong and NOTHING on screen to say so -- silent wrongness is
+ * exactly what this exists to prevent. And the failure mode is no longer a
+ * black screen: ui_mismatch_screen() now says what happened and what to do. */
+#define EXPECT_VERSION 0x4D503316u   /* rev 22: clk_sys 60 -> 66.667 MHz   */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.5.0"
+#define APP_VER "1.5.1"
 
 /* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
  * Select+A (APF slot table, boot vs live), Select+B (the framework's file
@@ -4413,8 +4422,28 @@ static void ui_draw_dynamic(void)
 
             {   /* The shell RIM takes overall level. One thin outline round
                  * the largest perimeter here, so it reads at a glance, and
-                 * nothing else paints those rows. */
-                uint32_t lvl = (peak_amp * 255u) / 32768u;
+                 * nothing else paints those rows.
+                 *
+                 * It used to read peak_amp scaled LINEARLY, and the user's
+                 * report was that it never glows -- correct, and the same fault
+                 * the spectrum had before v1.4.0: "a linear meter spends nearly
+                 * all its range on the top 6 dB". peak_amp is a per-frame PEAK,
+                 * and modern masters sit near full scale almost continuously,
+                 * so lvl>>5 was pinned at 7 and the colour never changed.
+                 *
+                 * It now averages the published bands instead. They are the
+                 * same numbers the hubs and the tape glow use, which visibly DO
+                 * react, so they come already log-scaled and already carrying
+                 * the attack/decay ballistics -- rather than a second curve
+                 * fitted by hand to a different quantity.
+                 *
+                 * ONLY the four bands SPEC_TAPE_STAGES actually computes are
+                 * averaged. Averaging all sixteen would be wrong on this meter:
+                 * the cascade skips the split for every stage the cassette does
+                 * not read, so the other twelve entries are stale by however
+                 * long it has been showing. */
+                uint32_t lvl = ((uint32_t)spec_lvl[8]  + (uint32_t)spec_lvl[9] +
+                                (uint32_t)spec_lvl[14] + (uint32_t)spec_lvl[15]) / 4u;
                 if (lvl > 255u) lvl = 255u;
                 if (paused) lvl = 0;
                 uint8_t rim = (uint8_t)(lvl >> 5);
@@ -9003,21 +9032,69 @@ static int load_track(void)
     return 1;
 }
 
+/* Centred line, for the one screen that runs before any UI state exists.
+ * Deliberately not ui_gs_line(): that reads ui_accent and the gradient, which
+ * are loaded later, and this has to work when the RTL underneath may be the
+ * wrong revision. Flat background, fixed colours, nothing else. */
+static void ui_mid_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
+{
+    uint32_t w = fb_text_width(s, ts);
+    uint32_t x = (w < FB_W) ? ((FB_W - w) / 2u) : 0u;
+    fb_set_color(fg, UI_BG);
+    fb_text_clipped(x, y, s, ts, ts, FB_W - x);
+}
+
+/* The firmware and the bitstream did not ship together.
+ *
+ * This REPLACED a silent halt. The old version wrote a pattern to R_STAT0..3
+ * and spun -- but those are status registers, not the framebuffer, so nothing
+ * reached the screen; and it ran BEFORE the clear below, so what the user got
+ * was uninitialised SDRAM noise or black, with no hint that anything was
+ * wrong. It was indistinguishable from the core being broken.
+ *
+ * Wording is deliberately install-method neutral. Some users update through
+ * pupdate or the openFPGA library, others copy the zip by hand; "reinstall"
+ * is the one instruction that is right for all of them. The revisions are
+ * there for bug reports, small and last, not as the message. */
+static void ui_mismatch_screen(uint32_t got, uint32_t want)
+{
+    char b[48], *q = b;
+    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_15X);
+    ui_mid_line(168u, "Some core files are from a",     UI_WHITE, TS_1X);
+    ui_mid_line(186u, "different version.",             UI_WHITE, TS_1X);
+    ui_mid_line(220u, "Reinstall MP3 Player.",          UI_WHITE, TS_1X);
+    { const char *t = "core r";      while (*t) *q++ = *t++; }
+    q = ui_dec(q, got  & 0xFFu);
+    { const char *t = "   firmware r"; while (*t) *q++ = *t++; }
+    q = ui_dec(q, want & 0xFFu);
+    *q = 0;
+    ui_mid_line(300u, b, UI_DIM, TS_1X);
+}
+
 int main(void)
 {
-    /* Bitstream/firmware interlock. On mismatch paint an unmistakable pattern
-     * and stop, rather than running on stale RTL and presenting it as a
-     * mysterious hardware fault. */
+    /* Clear the screen FIRST. SDRAM powers up holding garbage and the scanout
+     * engine displays it the moment video comes alive, so anything slow before
+     * the first fill is visible as a screenful of noise.
+     *
+     * It also has to happen before the interlock below, which now DRAWS.
+     * That ordering is the whole fix. */
+    fb_rect(0, 0, FB_W, FB_H, UI_BG);
+
+    /* Bitstream/firmware interlock. Say what is wrong and what to do, then
+     * stop -- rather than running on stale RTL and presenting it as a
+     * mysterious hardware fault.
+     *
+     * Safe to draw here even though the RTL may be the wrong revision: the
+     * draw engine runs on clk_sdram and the RUN/RECT/CHAR commands have not
+     * changed. If some future revision did break drawing, this lands on the
+     * black screen it replaced -- never worse, usually far better. */
     if (REG(R_VERSION) != EXPECT_VERSION) {
         REG(R_STAT0) = 0xAAAAAAAAu; REG(R_STAT1) = 0x55555555u;
         REG(R_STAT2) = 0xAAAAAAAAu; REG(R_STAT3) = 0x55555555u;
+        ui_mismatch_screen(REG(R_VERSION), EXPECT_VERSION);
         for (;;) { }
     }
-
-    /* Clear the screen FIRST. SDRAM powers up holding garbage and the scanout
-     * engine displays it the moment video comes alive, so anything slow before
-     * the first fill is visible as a screenful of noise. */
-    fb_rect(0, 0, FB_W, FB_H, UI_BG);
 
     vol_apply();
 
