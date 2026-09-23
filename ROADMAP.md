@@ -180,10 +180,42 @@ EQ presets, UI pacing and 1.2x all confirmed good at the new clock -- the EQ
 check matters because the hardcoded eq_biquad CLK_HZ was the one bug here
 that would have shipped silently.
 
-**Mandrake is now ~5% short of clean.** That is inside the range Phase 1b's
-LPC branch might cover (5-11% quoted, expect 2-4% after the 3x discount the
-cascade established), which makes it worth a re-test it would not have been
-worth an hour ago.
+### The underruns are VARIANCE, not average shortfall -- 2026-09-23
+
+Controlled readings at 1:00 into each track, matched 66.667 MHz pair:
+
+    Blue Hearts  D4 O0 U2        Mandrake  D0 O0 U3
+
+First, the counting: U is CUMULATIVE from track start, so these cannot be
+compared with the earlier ~20 s readings as counts. As rates, both roughly
+halved -- Blue Hearts 3/min -> 2/min, Mandrake 6/min -> 3/min. Improved,
+neither eliminated. The earlier "Blue Hearts is fixed" was wrong, and so was
+the brief alarm that it had got worse.
+
+**O0 on both**, so the decoder never waits on the card: faster decode does
+NOT outrun the SD supply, and that theory is dead.
+
+**The finding is D4 with underruns.** There is average headroom on Blue
+Hearts and it still drops samples, so the shortfall is episodic:
+
+    one FLAC frame = 4608 samples = 104 ms of audio
+    the PCM FIFO   = 2048 entries =  46 ms
+
+The decoder can work at most ~46 ms ahead, and that is the whole shock
+absorber. At 96% average it banks ~4 ms per frame up to that cap; one
+expensive frame -- high LPC order, dense residual -- spends it all. **A
+variance problem cannot be fixed by average throughput**, which is why more
+clock would not reliably close it either.
+
+Deepening the FIFO is the direct fix and does not fit: 2048x32 is 8 M10K at
+256x32 per block, doubling needs 8 more, and 7 are free (301/308). Misses by
+one.
+
+**Which reverses the correction above.** This file says the SDRAM migration
+is not a prerequisite for the FLAC work. That holds for the Rice decoder,
+which wants logic. It is FALSE here: moving pl_text and art_acc out of BRAM
+is exactly what frees the blocks a deeper FIFO needs. The migration is back
+on the FLAC path for a different reason than it was first put there.
 
 **The consequence for Phase 3:** the clock is capped at +11.1% permanently.
 There is no second helping later without redesigning the video timing, so
