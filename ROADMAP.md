@@ -148,11 +148,14 @@ so real fmax is ~75.4 MHz and 75 lands under it by luck. Note the worst setup
 corner here is Slow **0C**, not 85C.
 
 **66.67 MHz is viable** with ~1.5 ns of setup margin, same order as shipping.
-One caveat to re-check on the real build rather than on this experimental fit:
-hold at Fast 0C drops to +0.017 ns, 82 ps worse than baseline. That is not
-noise -- a tighter setup constraint makes the fitter shorten paths, which works
-AGAINST hold. It is positive at the corner that signs hold off, so it passes,
-but it is thin.
+
+The experimental fit showed hold at Fast 0C down to +0.017 ns and this file
+claimed that was structural -- "a tighter setup constraint makes the fitter
+shorten paths, which works against hold". **That was wrong.** The real Phase 2
+build (2026-09-23) lands at +0.107 ns, marginally BETTER than the 60 MHz
+baseline's +0.099. Across three fits hold ranges 0.017-0.107 with no relation
+to the constraint: it is placement noise. One datapoint plus a plausible
+mechanism is not a finding.
 
 **The consequence for Phase 3:** the clock is capped at +11.1% permanently.
 There is no second helping later without redesigning the video timing, so

@@ -424,7 +424,12 @@ module mp3_soc #(
     // clk_74a through its own sync_fifo and this sits on the near side of that.
     // Preset 0 is a true bypass inside eq_biquad, so with the EQ off the audio
     // path is bit-identical to what it was before this existed.
-    eq_biquad #(.CLK_HZ(60_000_000), .RATE_HZ(48_000)) u_eq (
+    // CLK_HZ MUST track clk_sys. It only feeds DIV = CLK_HZ / RATE_HZ, the
+    // divider that paces the biquad, so a stale value here does not fail to
+    // build or to run -- it silently moves every filter corner. Left at
+    // 60 MHz while clk_sys ran at 66.67 the EQ would process at 53.3 kHz
+    // instead of 48, shifting every preset up by 11%.
+    eq_biquad #(.CLK_HZ(66_666_667), .RATE_HZ(48_000)) u_eq (
         .clk    (clk),
         .rst    (rst),
         .in_l   (fifo_l),
@@ -452,9 +457,11 @@ module mp3_soc #(
             fb_cmd_w  <= 9'd0; fb_cmd_h    <= 9'd0;
             fb_cmd_fg <= 16'd0; fb_cmd_bg  <= 16'd0;
             fb_cmd_glyph <= 7'd0; fb_cmd_sx <= 2'd0; fb_cmd_sy <= 2'd0;
-            // Default to 48 kHz at 50 MHz so a plain sample write still makes
-            // sound before firmware programs the real rate.
-            pcm_rate <= 32'd3435974;   // 48 kHz at clk_sys = 60 MHz
+            // Default to 48 kHz so a plain sample write still makes sound
+            // before firmware programs the real rate. sample_rate * 2^32 /
+            // CLK_HZ, so it moves with clk_sys -- the old comment said both
+            // "50 MHz" and "60 MHz" and the value was for 60.
+            pcm_rate <= 32'd3092376;   // 48 kHz at clk_sys = 66.666667 MHz
             eq_preset <= 3'd0;         // FLAT: bypass until asked otherwise
             set_idx <= 4'd0; set_wdata <= 32'd0;
         end else if (d_req & d_is_mmio & dWE) begin

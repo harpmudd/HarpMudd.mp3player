@@ -139,7 +139,11 @@
 extern unsigned int arena_limit(void);
 #define ARENA_LIMIT (arena_limit())
 
-#define CLK_HZ      60000000u   /* clk_sys; UI timing needs it before playback does */
+#define CLK_HZ      66666667u   /* clk_sys = VCO 600 / 9. See ROADMAP Phase 2:
+ * 60, 66.67 and 75 are the ONLY values the PLL can make, because the 12 MHz
+ * pixel clock and the 100 MHz SDRAM clock pin the VCO at 600 MHz. Changing
+ * this alone is not enough -- eq_biquad CLK_HZ and the pcm_rate reset value
+ * in mp3_soc.v are hardcoded to match, and both fail SILENTLY if they do not. */
 
 /* Free-running cycle counter. Up here because the UI uses it for its own
  * timing (marquee, paused-state throttle) well before the playback code does. */
@@ -3172,7 +3176,7 @@ static void ui_wave_anim_start(void)
     /* cycles(), not 0 -- ui_wave_anim_tick() compares
      * (int32_t)(cycles() - wv_next) < 0, which against 0 is just the sign of
      * the counter, so this animation was dead for the same half of every
-     * 71.6 s wrap as the loading dots beside it. */
+     * 64.4 s wrap as the loading dots beside it. */
     wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
     wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
     wv_tr    = 0;
@@ -3306,7 +3310,7 @@ static void ui_boot_note(const char *msg)
     ui_boot_t    = 0;
     /* cycles(), not 0. The tick tests (int32_t)(cycles() - ui_boot_next) < 0,
      * which with 0 reduces to the SIGN OF THE COUNTER -- so for the half of
-     * every 71.6 s wrap where cycles() is above 2^31 the tick returned early,
+     * every 64.4 s wrap where cycles() is above 2^31 the tick returned early,
      * never painted, and never updated the deadline either. The dots were dead
      * for the whole of roughly every other load, which is why they were
      * "rarely seen". Same fault as fl_ui_next and pl_poll_at in c501764. */
@@ -6161,8 +6165,8 @@ static uint32_t ui_dump_mode;            /* dump screen is up; drawing paused  *
 /* Arm the idle timer. Called on every button press and whenever the timeout
  * setting changes. */
 /* Counts SECONDS, deliberately. A cycles() deadline cannot express this: the
- * counter is 32-bit at 60 MHz, so it wraps every 71.6 s and the usual
- * (int32_t)(cycles() - deadline) >= 0 idiom only spans 35.8 s. One minute is
+ * counter is 32-bit at 66.67 MHz, so it wraps every 64.4 s and the usual
+ * (int32_t)(cycles() - deadline) >= 0 idiom only spans 32.2 s. One minute is
  * already past that and two minutes overflows the multiply outright, so the
  * first version could not have worked at any setting. Every other timeout in
  * this core is sub-second, which is why nothing had hit the ceiling before.
@@ -8606,7 +8610,7 @@ static int load_track(void)
     /* Arm the free-running-counter deadlines from NOW.
      *
      * Both are compared as `(int32_t)(cycles() - deadline) >= 0`, which is the
-     * right way to handle a 32-bit counter that wraps every 71.6 s -- but only
+     * right way to handle a 32-bit counter that wraps every 64.4 s -- but only
      * once the deadline holds a real timestamp. Left at 0, the comparison
      * reduces to the sign of cycles() itself, so a track loaded while the
      * counter sits in its upper half reads NEGATIVE and the timer does not
