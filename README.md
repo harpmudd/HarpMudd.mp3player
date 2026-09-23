@@ -276,10 +276,10 @@ framework bugs that had to be found first — is in
   for nearly all of it, leaving little for the screen and the card.
 
   Two things help, in order of effort. **Switch to a simpler meter** — the
-  cassette and the 16-band spectrum analyse the audio as it plays, which costs
-  roughly as much again as the screen; bars does not, and it can be the
-  difference on a file that is close. Failing that, re-encode at the default
-  compression setting or to 16-bit/44.1 kHz.
+  magic eye, the cassette and the 16-band spectrum are the most demanding of
+  the twelve, and on a file that is close to the edge that alone can be the
+  difference. Bars is among the cheapest. Failing that, re-encode at the
+  default compression setting or to 16-bit/44.1 kHz.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.

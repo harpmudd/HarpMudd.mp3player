@@ -31,6 +31,17 @@ the shipping build), three tracks, D/O/U read ~20 s in.
 
 Three things follow, and they are not what the README currently says.
 
+**0. Three meters are the expensive ones, for TWO different reasons.** User,
+2026-09-23, from listening: magic eye, spectrum and cassette. The spectrum and
+the cassette are the cascade below -- per-sample DSP. The magic eye is not in
+that gate at all and must be DRAW-bound: it paints its background one fb_rect
+PER ROW rather than as a flat fill, deliberately, because it is the first
+meter with large empty areas and a flat slab on a per-row gradient reads as a
+visible rectangle -- plus per-column circle geometry for the tube. Most of
+that sits behind `if (!eye_face)` and is therefore cached, which is worth
+confirming before anyone optimises it. NOT measured: taken from the user's
+ear, and sizing it needs a D reading on a diag build.
+
 **1. The per-sample octave cascade costs ~6% of the CPU.** The control moved
 D6 -> D12 on bars, landing on the historical D11-13 baseline, which validates
 the instrument at the same time. `VIZ_LED` (16-band spectrum) and `VIZ_TAPE`
