@@ -91,9 +91,21 @@ undiscovered because the flag ships at 0. `UI_SHOW_SPEED_DIAG` now sits behind
 
 **Phase 1 -- cheap and near-certain.**
 
-- Decimate the octave cascade. ~6%, measured. Self-contained firmware, no RTL,
-  no SDRAM. Caveat to settle in `rv32sim` and NOT on hardware: decimating
-  without pre-filtering aliases the top bands of the spectrum meter.
+- **DONE 2026-09-23 (f0d6b60), and it under-delivered.** Not decimated -- the
+  split and accumulate are now GATED to the stages the active meter reads
+  (cassette: 4 and 7 of 8). Exact, no aliasing, no visual change; the
+  cassette was confirmed unchanged on hardware.
+
+  `tools/host/cascade_bench.py` measured the band work down 55%, 1,078,189
+  instructions per second of audio, which is ~3% of the CPU at 36.4M instr/s.
+  **Hardware says about 1 point of D** (MP3 control 6 -> 6.5-7 with the
+  cassette showing), and the FLAC files barely moved: Blue Hearts D0 -> D0-1,
+  Mandrake D0 -> D0.
+
+  **The instruction count over-predicted the hardware gain by about 3x.**
+  Worth more than the 1% is: apply the same discount to anything else costed
+  from instruction counts alone, the LPC branch's 5-11% included. Instruction
+  counts are a lower bound on cost, not a predictor of recovered time.
 - Re-test `feature/flac-lpc-speedup` on a clean `-O2` build. 5-11%. It was
   parked as aimed at the wrong thing, correct when the files looked I/O-bound
   and needed a large gain; they are decode-bound and marginally over, so the
