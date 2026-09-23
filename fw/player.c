@@ -4424,26 +4424,28 @@ static void ui_draw_dynamic(void)
                  * the largest perimeter here, so it reads at a glance, and
                  * nothing else paints those rows.
                  *
-                 * It used to read peak_amp scaled LINEARLY, and the user's
-                 * report was that it never glows -- correct, and the same fault
-                 * the spectrum had before v1.4.0: "a linear meter spends nearly
-                 * all its range on the top 6 dB". peak_amp is a per-frame PEAK,
-                 * and modern masters sit near full scale almost continuously,
-                 * so lvl>>5 was pinned at 7 and the colour never changed.
+                 * peak_amp scaled LINEARLY, and it stays that way. This reads
+                 * like a bug and is not one: peak_amp is a per-frame PEAK and
+                 * modern masters sit near full scale almost continuously, so
+                 * lvl>>5 spends most of its life pinned at 7 and the rim barely
+                 * changes colour. That is the same fault the spectrum had before
+                 * v1.4.0 -- "a linear meter spends nearly all its range on the
+                 * top 6 dB" -- so the obvious fix is to drive it from the
+                 * published bands, which are already log-scaled and already
+                 * carry the ballistics.
                  *
-                 * It now averages the published bands instead. They are the
-                 * same numbers the hubs and the tape glow use, which visibly DO
-                 * react, so they come already log-scaled and already carrying
-                 * the attack/decay ballistics -- rather than a second curve
-                 * fitted by hand to a different quantity.
+                 * TRIED, 2026-09-23, on hardware. It works, and the user did not
+                 * like how it looked: a rim that moves competes with the tape
+                 * glow instead of framing it. Reverted on preference, not on
+                 * fault. Do not re-derive this -- if it is revisited, the
+                 * question is whether the rim should react AT ALL, not which
+                 * number drives it.
                  *
-                 * ONLY the four bands SPEC_TAPE_STAGES actually computes are
-                 * averaged. Averaging all sixteen would be wrong on this meter:
-                 * the cascade skips the split for every stage the cassette does
-                 * not read, so the other twelve entries are stale by however
-                 * long it has been showing. */
-                uint32_t lvl = ((uint32_t)spec_lvl[8]  + (uint32_t)spec_lvl[9] +
-                                (uint32_t)spec_lvl[14] + (uint32_t)spec_lvl[15]) / 4u;
+                 * (If it ever is driven from the bands, only the four that
+                 * SPEC_TAPE_STAGES computes are valid here. The cascade skips
+                 * the split for every stage the cassette does not read, so the
+                 * other twelve are stale by however long it has been showing.) */
+                uint32_t lvl = (peak_amp * 255u) / 32768u;
                 if (lvl > 255u) lvl = 255u;
                 if (paused) lvl = 0;
                 uint8_t rim = (uint8_t)(lvl >> 5);

@@ -271,11 +271,15 @@ framework bugs that had to be found first — is in
   to be remembered** — see
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
   It plays fine either way.
-- **The most demanding FLAC files can stutter** — 24-bit/48 kHz at a high
-  bitrate, or a maximum-compression encode. Decoding runs on a 60 MHz CPU
-  inside the FPGA and those need about three quarters of it, leaving too little
-  for the screen and the card. Re-encoding at the default compression setting,
-  or to 16-bit/44.1 kHz, fixes it.
+- **The most demanding FLAC files can still stutter** — 24-bit at a high
+  bitrate, mainly. Decoding runs on a CPU inside the FPGA and those files ask
+  for nearly all of it, leaving little for the screen and the card.
+
+  Two things help, in order of effort. **Switch to a simpler meter** — the
+  cassette and the 16-band spectrum analyse the audio as it plays, which costs
+  roughly as much again as the screen; bars does not, and it can be the
+  difference on a file that is close. Failing that, re-encode at the default
+  compression setting or to 16-bit/44.1 kHz.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.
