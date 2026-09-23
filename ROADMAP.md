@@ -102,6 +102,12 @@ undiscovered because the flag ships at 0. `UI_SHOW_SPEED_DIAG` now sits behind
   cassette showing), and the FLAC files barely moved: Blue Hearts D0 -> D0-1,
   Mandrake D0 -> D0.
 
+  **U did not move at all: Blue Hearts U1, Mandrake U2, the same as before
+  the change.** So this bought ~1% of headroom and did not touch the fault.
+  Keep it -- it is free and costs nothing visually, and the hubs were
+  confirmed still reacting, so stage 4 earns its keep and there is no
+  further gating available. But it is NOT a changelog line.
+
   **The instruction count over-predicted the hardware gain by about 3x.**
   Worth more than the 1% is: apply the same discount to anything else costed
   from instruction counts alone, the LPC branch's 5-11% included. Instruction
