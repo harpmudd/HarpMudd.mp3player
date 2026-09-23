@@ -6033,6 +6033,36 @@ static int audio_cushion(void)
     if (idle || paused) return 1;
     return pcm_level() >= 1024u && ring_fill >= RING_SIZE / 2u;
 }
+
+/* The same idea as audio_cushion(), for the METERS: a core that is about to run
+ * out of decoded audio has no business spending CPU analysing it.
+ *
+ * Only two meters call this -- the 16-band spectrum and the cassette, the only
+ * ones that run the per-sample octave cascade, measured at ~6% of the CPU. That
+ * 6% is the same order as the margin the most demanding FLAC files are short
+ * of, so on those files it is the difference between clean playback and
+ * dropped samples, and on every other file this never fires.
+ *
+ * TWO thresholds, deliberately. A single level would sit right where the buffer
+ * hovers and the meter would start and stop every frame, which reads as a
+ * broken meter rather than a busy one. Stop at a third full, do not resume
+ * until two thirds -- so it yields in stretches, not in flickers.
+ *
+ * What the user sees on a struggling file is an animation updating perhaps 15
+ * times a second instead of 38. What they would otherwise hear is the track
+ * breaking up. That trade only happens when it has to. */
+#define METER_STOP  (2048u / 3u)        /* FIFO is 2048 entries -- see pcm_fifo.v */
+#define METER_GO    ((2048u * 2u) / 3u)
+static uint8_t meter_yield;
+
+static int meter_afford(void)
+{
+    if (idle || paused) { meter_yield = 0; return 1; }
+    uint32_t lv = pcm_level();
+    if (meter_yield) { if (lv >= METER_GO)   meter_yield = 0; }
+    else             { if (lv <  METER_STOP) meter_yield = 1; }
+    return !meter_yield;
+}
 #define REFILL_CHUNK 4096u
 
 
@@ -6080,7 +6110,7 @@ static void meters_feed(const short *pcm, int n, int stereo)
          * SPEC_BANDS. One pass down the ladder per sample, and most samples
          * stop after a stage or two, because the lower stages run at a
          * fraction of the rate. */
-        if (viz_mode == VIZ_LED || viz_mode == VIZ_TAPE) {
+        if ((viz_mode == VIZ_LED || viz_mode == VIZ_TAPE) && meter_afford()) {
             const uint32_t need = (viz_mode == VIZ_LED) ? 0xFFu
                                                         : SPEC_TAPE_STAGES;
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
