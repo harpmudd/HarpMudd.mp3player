@@ -1331,7 +1331,9 @@ plus M10K blocks at 300/308, which is what moving a buffer OUT of BRAM buys.
 
 `_heap_start` (end of BSS) is 0x2ACC0 and `_tag_start` — the first reserved DMA
 buffer, which the linker ASSERTs the image must stay below — is 0x33000. So
-**33,600 bytes are free**, and the link fails rather than silently overlapping
+**33,600 bytes were free when this was written; 3,536 as of 2026-09-23** --
+the unicode work and the widened buffers spent the rest. Re-measure with nm
+rather than quoting this. The link fails rather than silently overlapping
 if that is exceeded.
 
 **Do not use build.sh's "% of usable RAM" to judge this.** It compares the ROM
@@ -2179,8 +2181,23 @@ horizontal span of same-coloured modules -- a QR row has ~20-30 spans, so v27 is
 ~3,000 commands for a screen drawn once. Nothing.
 
 The real cost is the QR encoder itself, **~3-6 KB, mostly Reed-Solomon**. That
-does not fit in the 5,008 bytes currently free, so this waits behind the SDRAM
+does not fit in the free space, so this waits behind the SDRAM
 buffer work in the AAC entry above -- the same space problem, and the same fix.
+
+#### RAM as of 2026-09-23: 3,536 bytes free, not 5,008
+
+Measured with nm on the shipping build (_heap_start 0x35E30, _tag_start
+0x36C00). Step 3's encoder was already out of reach and is further out now.
+Step 2 -- the log plus a text export screen -- is ~2 KB of log for 32 entries
+plus its screen, so it would consume essentially all remaining RAM. It fits
+only at a reduced entry count, and leaves nothing behind it.
+
+**The RTC dependency in step 1 can be removed entirely.** Log RELATIVE
+seconds -- how long ago each track played -- and let the decoding page
+subtract them from the SCAN time, which it knows. Absolute timestamps come
+out correct, no RTC is routed, and one RTL change and its compile disappear
+from the plan. The scan happens minutes after listening, so the error is
+seconds.
 
 #### Staged so nothing is wasted
 
