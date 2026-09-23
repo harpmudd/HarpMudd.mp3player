@@ -157,6 +157,34 @@ baseline's +0.099. Across three fits hold ranges 0.017-0.107 with no relation
 to the constraint: it is placement noise. One datapoint plus a plausible
 mechanism is not a finding.
 
+### HARDWARE RESULT 2026-09-23 -- and the control validates the model
+
+Cassette meter, diag build, matched 66.667 MHz pair:
+
+| track | at 60 MHz | at 66.667 | implied demand at 60 MHz |
+|---|---|---|---|
+| Dire Straits (control) | D6-7 | **D15** | ~94% |
+| Blue Hearts | D0-1, U1 | **D5-6** | ~105% |
+| Mandrake | D0, U2 | **D0-1, U1** | ~110% |
+
+The control lands where arithmetic says it should: 93.5% busy / 1.111 =
+84.2% busy, so 15.8% idle, observed 15. **D is linear and can be trusted to
+back out a file's true demand**, which is how the last column is derived --
+a file pinned at D0 is not at 100%, it is at whatever it needs, and the
+headroom it gains at a faster clock reveals how far over it was.
+
+That also explains why the cascade's ~1% did nothing: both files were 5-10%
+short, and 1% crosses neither gap.
+
+EQ presets, UI pacing and 1.2x all confirmed good at the new clock -- the EQ
+check matters because the hardcoded eq_biquad CLK_HZ was the one bug here
+that would have shipped silently.
+
+**Mandrake is now ~5% short of clean.** That is inside the range Phase 1b's
+LPC branch might cover (5-11% quoted, expect 2-4% after the 3x discount the
+cascade established), which makes it worth a re-test it would not have been
+worth an hour ago.
+
 **The consequence for Phase 3:** the clock is capped at +11.1% permanently.
 There is no second helping later without redesigning the video timing, so
 whatever 66.67 plus the cascade fix (~6%, so ~17% together) does not reach,
