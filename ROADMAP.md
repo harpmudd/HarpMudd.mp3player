@@ -104,12 +104,45 @@ undiscovered because the flag ships at 0. `UI_SHOW_SPEED_DIAG` now sits behind
   that took the Furs 95 -> 80. We are planning against stale, pessimistic
   numbers.
 
-**Phase 2 -- clk_sys 60 -> 75 MHz.** +25% on everything. VexRiscv's fmax was
-measured at 141 MHz in STAGE0, so the CPU is nowhere near its limit; the
-question is whether video, SDRAM and the bridge still close. **One Quartus run
-and the timing report answer it -- no hardware needed** -- and it reverts
-cleanly. Best payoff per unit of risk on the list. Note every clk_sys-derived
-constant moves with it, firmware `CLK_HZ` included.
+**Phase 2 -- clk_sys 60 -> 66.67 MHz. MEASURED 2026-09-23, three compiles.**
+
+**clk_sys is quantised, and the step size is the finding.** All four outputs
+share one VCO. The 12 MHz pixel clock has to give exactly 60.000 Hz (500x400
+total, the 400x360 image an exact 4x integer scale of the Pocket panel) and
+sdram_fb needs 100 MHz, which pins the VCO at 600 MHz. So clk_sys can only be
+600/N: **60 (/10), 66.67 (/9), 75 (/8) and nothing between**. Asking for 70
+fails the fit outright -- *"output_clock_frequency is set to an illegal value
+of '70.0 MHz'"* -- it is not a timing failure, the PLL simply cannot make it.
+
+| clk_sys | Slow 0C setup | Slow 85C setup | Fast 0C hold | ALMs |
+|---|---|---|---|---|
+| 60.00 (shipping) | +2.168 | +2.065 | +0.099 | 5,903 |
+| **66.67 (+11.1%)** | **+1.546** | **+1.683** | **+0.017** | 5,856 |
+| 75.00 (+25%) | +0.069 | +0.508 | +0.100 | 5,865 |
+
+The 60 MHz row reproduces the +2.07 ns recorded in commit 7051046 for the
+shipped v1.5.0 build, which is why the other two rows can be compared against
+it at all -- run it as a CONTROL, not as a revert afterthought.
+
+**75 MHz is out.** It closes on paper, but 69 ps at Slow 0C is 0.5% of the
+period against the 2.07 ns v1.5.0 ships with. The critical path is ~13.26 ns,
+so real fmax is ~75.4 MHz and 75 lands under it by luck. Note the worst setup
+corner here is Slow **0C**, not 85C.
+
+**66.67 MHz is viable** with ~1.5 ns of setup margin, same order as shipping.
+One caveat to re-check on the real build rather than on this experimental fit:
+hold at Fast 0C drops to +0.017 ns, 82 ps worse than baseline. That is not
+noise -- a tighter setup constraint makes the fitter shorten paths, which works
+AGAINST hold. It is positive at the corner that signs hold off, so it passes,
+but it is thin.
+
+**The consequence for Phase 3:** the clock is capped at +11.1% permanently.
+There is no second helping later without redesigning the video timing, so
+whatever 66.67 plus the cascade fix (~6%, so ~17% together) does not reach,
+the Rice decoder has to carry alone.
+
+Not yet done: every clk_sys-derived constant moves with the clock, firmware
+`CLK_HZ` included, and the 71.6 s cycle-counter wrap moves with it too.
 
 **Phase 3 -- Rice decoder in fabric.** The headline. 60-76% of decode into the
 resource the device has most of.
