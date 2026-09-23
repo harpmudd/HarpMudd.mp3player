@@ -92,6 +92,8 @@ fw/*.su
 tools/font_ext_preview.png
 # tools/host/text_check.py generates it
 tools/host/text_gen.c
+# tools/host/cascade_bench.py generates it
+tools/host/cascade_bench.c
 tools/host/*.elf
 # sim fixture: extracted from mp3font.bin, see the testbench
 sim/mp3font_head.hex

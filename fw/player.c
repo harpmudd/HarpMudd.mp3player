@@ -1788,6 +1788,17 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
 #define SPEC_BANDS (SPEC_OCT * 2u)         /* each octave split in half     */
 #define SPEC_SH    1u                      /* octave split                  */
 #define SPEC_SH2   2u                      /* the half-octave split within  */
+/* Stages whose BANDS the cassette actually reads: spec_lvl[8]/[9] (stage 4,
+ * the shell rim) and spec_lvl[14]/[15] (stage 7, the bass glow). The chain's
+ * low-passes still all run -- stage 7 cannot be reached without them -- but
+ * the split, the two abs and the two accumulates are skipped for the six
+ * stages nothing reads. Stage 0 is among those six and runs on EVERY sample,
+ * which is where the cost was: measured at ~6% of the CPU (MP3 control read
+ * D6 on the cassette and D12 on bars, 2026-09-22). Exact, not decimated --
+ * feeding the cascade at a lower rate would move every band's corner
+ * frequency down an octave and alias the top, which is a visible wrong
+ * answer rather than a cheaper right one. */
+#define SPEC_TAPE_STAGES ((1u << 4) | (1u << 7))
 
 static int32_t  spec_lp[SPEC_OCT];        /* the cascade's filter state      */
 static int32_t  spec_slp[SPEC_OCT];       /* the half-octave splitter        */
@@ -6035,11 +6046,14 @@ static void meters_feed(const short *pcm, int n, int stereo)
          * stop after a stage or two, because the lower stages run at a
          * fraction of the rate. */
         if (viz_mode == VIZ_LED || viz_mode == VIZ_TAPE) {
+            const uint32_t need = (viz_mode == VIZ_LED) ? 0xFFu
+                                                        : SPEC_TAPE_STAGES;
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
                 int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
                                    : (int32_t)pcm[i];
                 for (uint32_t o = 0; o < SPEC_OCT; o++) {
                     spec_lp[o] += (x - spec_lp[o]) >> SPEC_SH;
+                  if (need & (1u << o)) {
                     int32_t hp = x - spec_lp[o];
 
                     /* Split the octave in two. Extending the cascade instead
@@ -6055,6 +6069,7 @@ static void meters_feed(const short *pcm, int n, int stereo)
 
                     spec_acc[o * 2u]      += (uint32_t)(sh < 0 ? -sh : sh);
                     spec_acc[o * 2u + 1u] += (uint32_t)(sl < 0 ? -sl : sl);
+                  }
 
                     if (++spec_cnt[o] & 1u) break;   /* half rate below here */
                     x = spec_lp[o];
@@ -6407,6 +6422,13 @@ static void poll_input(void)
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
         viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        /* The cascade skips the split for stages the OUTGOING meter did not
+         * read, so their splitter state and accumulators are stale by however
+         * long that meter was up. Clear them, or the first window after a
+         * switch into the spectrum publishes whatever was left behind. */
+        for (uint32_t z = 0; z < SPEC_OCT; z++) spec_slp[z] = 0;
+        for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_acc[z] = 0;
+        spec_n = 0;
         ui_wave_clear();                 /* modes do not share a screen layout */
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
