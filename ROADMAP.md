@@ -1315,6 +1315,19 @@ decode, and a third tag parser for `moov/udta/meta/ilst` + `covr`.
 Against that: **11 `.m4a` files out of 7,180 in the library.** `ffmpeg` converts
 them in about a minute.
 
+**A TEST CASE exists and is kept deliberately, 2026-09-28.** The curated
+Hi-Fi library on the NAS (`Media/Hi-Fi`, 97 artists) holds exactly one .m4a
+album: *Tommy Guerrero -- Loose Grooves and Bastard Blues*, 12 files. It came
+up during a sweep that deleted every album with missing tracks -- it was the
+one album the FLAC-tag scanner could not read, so it was neither checked nor
+touched, and the user chose to keep it against possible .m4a support rather
+than convert or remove it.
+
+Two things follow. It is the only real-world m4a to develop against, so do
+not let a later tidy-up take it. And it CONFIRMS the scarcity argument above
+from a second direction: one album in a 133-album curated library, which is
+the library this core is actually pointed at.
+
 #### If it is done anyway, this order
 
 1. Build the CPU↔SDRAM window and move `pl_text` only. One cold buffer, no
