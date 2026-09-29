@@ -6864,6 +6864,17 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
      * failure hands the caller a path it already has: every target_read_slot()
      * call site checks the return. A missing cover or a failed load is
      * recoverable; a hang is not. */
+    /* Poison the LAST word of the destination before the command goes out, so
+     * the wait below has something to watch. Safe for every caller: the region
+     * is about to be overwritten by the read, and on failure they all check the
+     * return. Last word, not first -- a sequential transfer fills word 0 early
+     * and the tail last, so watching word 0 clears while the tail is in
+     * flight. */
+    volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)
+                              (UNCACHED + dst_off + ((len - 1u) & ~3u));
+    const uint32_t POISON = 0xA5A5A5A5u;
+    if (len >= 4u) *tail = POISON;
+
     uint32_t rd_t0 = cycles();
     while (!target_read_poll()) {
         ui_boot_tick();
@@ -6876,6 +6887,34 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
         }
     }
     rd_pending = 0;
+
+    /* COMPLETION IS NOT ARRIVAL. The sequence counter says the command
+     * finished; it does not say the last bytes have reached the landing zone.
+     * Callers here read the buffer on the very next instruction, and at
+     * 66.667 MHz that is too soon -- which is what broke FLAC seek, where a
+     * stale tail became a wrong frame number and sent the search to the wrong
+     * part of the file. At 60 MHz every caller happened to be late enough.
+     *
+     * Fixed HERE rather than in the one caller where the symptom showed,
+     * because the exposure is everywhere: ID3v1 and ID3v2 parsing, the FLAC
+     * metadata walk, the identity polls, the ring prefill, and artwork at
+     * 43-207 reads a track. A stale tail in a cover is a subtly wrong image,
+     * not an obvious fault, and nobody would connect it to this.
+     *
+     * Waits on the CONDITION, so there is no constant to re-tune when the
+     * clock next moves, and it costs nothing when the data is already there.
+     * Bounded, because a genuine 0xA5A5A5A5 at the tail or a short read must
+     * fall through rather than wedge -- falling through is what the code did
+     * unconditionally before. */
+    if (rd_ok && len >= 4u) {
+        fl_probe_reads++;
+        if (*tail == POISON) {
+            fl_probe_stale++;          /* S on the diag row: how often it fires */
+            uint32_t w0 = cycles();
+            while (*tail == POISON &&
+                   (int32_t)(cycles() - w0) < (int32_t)(CLK_HZ / 1000u)) { }
+        }
+    }
     return rd_ok;
 }
 
@@ -7517,23 +7556,9 @@ static int flac_probe_pull(void *ctx, uint8_t *dst, int n)
     if (fl_probe_pos + want > slot_size) want = slot_size - fl_probe_pos;
     if (!want) return 0;
 
-    volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)
-                              (UNCACHED + TAG_OFF + ((want - 1u) & ~3u));
-    uint32_t poison = 0xA5A5A5A5u;
-    if (want >= 4u) *tail = poison;
-
+    /* The landing-zone wait lives in target_read_slot() now -- this path is
+     * where the fault was FOUND, not where it was unique. */
     if (!target_read_slot(MP3_SLOT_ID, fl_probe_pos, TAG_OFF, want)) return 0;
-
-    if (want >= 4u) {
-        uint32_t t0 = cycles();
-        fl_probe_reads++;
-        if (*tail == poison) {
-            fl_probe_stale++;
-            while (*tail == poison &&
-                   (int32_t)(cycles() - t0) < (int32_t)(CLK_HZ / 1000u)) { }
-        }
-    }
-
     for (uint32_t i = 0; i < want; i++) dst[i] = tagbuf[i];
     fl_probe_pos += want;
     return (int)want;
