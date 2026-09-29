@@ -748,6 +748,8 @@ static uint32_t clk_max;                 /* largest jump seen, any time */
 static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
 static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
 static uint8_t  fl_idle_pct, fl_io_pct;
+static uint32_t fl_probe_stale;      /* poison survived a "complete" read   */
+static uint32_t fl_probe_reads;      /* probes issued, for the ratio        */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -5908,6 +5910,10 @@ ui_tail:
         *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
+        /* Seek-probe staleness, 2026-09-23: S = poison survived a read the
+         * hardware called complete, P = probes issued. S0 clears the theory. */
+        *q++ = ' '; *q++ = 'S'; q = ui_dec(q, fl_probe_stale);
+        *q++ = '/'; q = ui_dec(q, fl_probe_reads);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -7468,6 +7474,40 @@ static void flac_scan_metadata(void)
  * thrown away would cost far more than the 512 bytes a probe needs. */
 static uint32_t fl_probe_pos;
 
+/* Waits for the data to LAND, not merely for the command to report complete.
+ *
+ * Seek broke at 66.667 MHz and worked at 60, on identical files. Three
+ * observations, all consistent:
+ *
+ *   clean firmware @ 66.667   fails
+ *   the same @ 60             works
+ *   an INSTRUMENTED build @ 66.667, which added an uncached read between the
+ *                             completion and the copy, works
+ *
+ * The third is the telling one: a few cycles of delay in exactly that gap is
+ * the difference. The completion tells us the command finished, not that the
+ * last bytes have arrived in the landing zone -- so the copy below was reading
+ * a partly stale buffer. A stale probe yields a wrong frame number, the
+ * false-position search converges on the wrong bracket, and the seek lands
+ * somewhere arbitrary. "It jumps around" is that, exactly. At 60 MHz the CPU
+ * reached the copy late enough to be safe by accident.
+ *
+ * The guard poisons the LAST word and waits for it to change. The last word,
+ * not the first: a sequential transfer fills word 0 early and the tail last,
+ * so watching word 0 would clear while the tail was still in flight. The
+ * instrumentation that led here made exactly that mistake and would have
+ * reported all-clear with the bug live -- it only appeared to work because
+ * reading word 0 was itself the delay that let the tail land.
+ *
+ * Waiting on the CONDITION rather than pausing a fixed amount is the point: no
+ * constant to re-tune when the clock moves again, and it costs nothing once the
+ * data is already there. Bounded at 1 ms so a genuine 0xA5A5A5A5 in the file --
+ * or a short read -- cannot wedge it; falling through with what arrived is what
+ * the old code did unconditionally.
+ *
+ * Only the PROBE path needs this. The streaming refill consumes the ring
+ * through a different route that never reads straight off a just-signalled
+ * completion. */
 static int flac_probe_pull(void *ctx, uint8_t *dst, int n)
 {
     (void)ctx;
@@ -7476,7 +7516,24 @@ static int flac_probe_pull(void *ctx, uint8_t *dst, int n)
     if (want > 512u) want = 512u;
     if (fl_probe_pos + want > slot_size) want = slot_size - fl_probe_pos;
     if (!want) return 0;
+
+    volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)
+                              (UNCACHED + TAG_OFF + ((want - 1u) & ~3u));
+    uint32_t poison = 0xA5A5A5A5u;
+    if (want >= 4u) *tail = poison;
+
     if (!target_read_slot(MP3_SLOT_ID, fl_probe_pos, TAG_OFF, want)) return 0;
+
+    if (want >= 4u) {
+        uint32_t t0 = cycles();
+        fl_probe_reads++;
+        if (*tail == poison) {
+            fl_probe_stale++;
+            while (*tail == poison &&
+                   (int32_t)(cycles() - t0) < (int32_t)(CLK_HZ / 1000u)) { }
+        }
+    }
+
     for (uint32_t i = 0; i < want; i++) dst[i] = tagbuf[i];
     fl_probe_pos += want;
     return (int)want;
