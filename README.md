@@ -23,6 +23,13 @@ folder — the core won't start without it. `mp3font.bin` sits beside it and
 carries the Japanese and accented characters; without it those titles fall back
 to `?`, and everything else still works.
 
+**When you update, replace both files.** The firmware
+(`/Assets/mp3player/common/mp3player.rom`) and the bitstream
+(`/Cores/HarpMudd.Mp3Player/bitstream.rbf_r`) are built as a matched pair and
+check each other at startup. Copying a whole release over the top does that
+correctly. Update only one and the core stops with a message saying the update
+is incomplete — copy the rest of the release across and it starts normally.
+
 ## Playing
 
 At launch the core loads **`playlist.m3u`** — that name specifically, not any
