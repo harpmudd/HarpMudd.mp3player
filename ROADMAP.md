@@ -312,6 +312,70 @@ smooth edges. At 4x nearest it buys grey blocks. Recorded because the premise
 deserves re-examining on this display, not because the change is recommended:
 it would hurt curves and diagonals at other sizes.
 
+## Held seek on a FLAC wedges and jumps back -- OPEN, not reproducible
+
+**User, 2026-09-30, and it was reliable at the time:** hold seek-forward on a
+FLAC; somewhere around 3-4 minutes in it stops advancing and starts jumping
+BACKWARDS, and will not recover -- only restarting the track clears it.
+Reproduced "every time" on Circles Around the Sun, Widespread Panic and Phish.
+Played from a PLAYLIST. Never seen on MP3.
+
+**It then stopped reproducing and has not come back**, including on a build
+byte-identical to the one it was reliable on (d245dabe, bitstream a433d2b4)
+and across many combinations the user tried. So the trigger is STATE, not the
+build.
+
+### What was ruled out, and one mistake worth not repeating
+
+Two instruments were tried and neither reproduced it:
+
+* `UI_SHOW_SEEK_DIAG` repaints a text row every second through the font
+  engine -- real work inside the path under test.
+* A six-store trace with no drawing. Also did not reproduce, which is what
+  first suggested the instrument was NOT the variable.
+
+**The control was then run against the wrong build.** 54a7c1cc was called
+"the shipping build" and treated as the baseline, but the build in the
+user's hands when it was reliable was d245dabe, which also carries the
+cassette label fix. Two of the three "cannot reproduce" results were
+therefore worthless. Rebuilt byte-identical afterwards; still no repro.
+
+### Where to look when it returns
+
+The seek path's own comment says the state that matters: a track opened from
+a playlist arrives with NO SIZE, because pl_arm_load() zeroes slot_size and
+sets force_size_probe -- the file is opened by name rather than mounted as a
+sized slot. Measured on one 30 MB FLAC: **5,307 KB via a playlist against
+30,856 KB via Load MP3**. A seek bracket built on a short size can only aim
+short, and "will not go past a point, jumps backwards" is what aiming short
+looks like. The user confirms it was playing from a playlist.
+
+Two candidate mechanisms in the code, distinguishable from one SEEK_TRACE
+dump:
+
+1. **The intent window is exactly the step size.** The hold acceleration sets
+   `seek_secs = 30` after 8 repeats, and the base-tracking guard is
+   `fl_seek_intent - ui_sec < 30u`. Any lag at all puts the intent >= 30
+   ahead, the guard fails, and base snaps back to ui_sec. Two constants that
+   must disagree, set to the same number. This block is inside
+   `if (track_fmt == FMT_FLAC ...)`, which is consistent with MP3 being
+   unaffected -- MP3 uses the byte path below and has no intent tracking.
+2. **`if (at && at != file_pos)`** skips the whole update when the locate
+   returns the same offset, so ui_sec never moves while fl_seek_intent keeps
+   climbing.
+
+### Status for the release
+
+NOT claimed as fixed in 1.5.1 and deliberately absent from the changelog. The
+landing-zone guard in target_read_slot is a real race with a real mechanism
+and the narrow form was hardware-confirmed against a DIFFERENT symptom (seek
+landing wrong on long albums). Whether it also addresses this one is unknown,
+and a fault that cannot be reproduced cannot be called fixed.
+
+Build with `EXTRA_CFLAGS="-DSEEK_TRACE=1"` the moment it recurs, hold seek
+until it misbehaves, release, and photograph the dump. Capture the track, the
+time it wedges at, and whether the core had just booted.
+
 # Releasing
 
 **Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
