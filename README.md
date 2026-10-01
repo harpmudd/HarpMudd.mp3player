@@ -242,7 +242,7 @@ is out, along with 32-bit and multichannel. Anything the core can't play says
 so on screen and names the file's own format, so you aren't left guessing.
 
 The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
-80% of the time available, and the same music at 96 kHz needs nearly twice what
+72% of the time available, and the same music at 96 kHz needs nearly twice what
 the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
 on headphones from a handheld it isn't a difference you're going to hear.
 
@@ -284,9 +284,6 @@ framework bugs that had to be found first — is in
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.
   Re-saving the tags as UTF-8 fixes it.
-- **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
-  60 available, so the decoder occasionally can't keep up. Normal speed is
-  unaffected.
 
 ## Credits
 

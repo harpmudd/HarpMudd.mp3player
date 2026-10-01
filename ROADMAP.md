@@ -2854,7 +2854,8 @@ not a speed bug at all. See the Fixed entry below; the short version is that
 three files were CBR with no Xing header, so the exact rate was available and
 being discarded in favour of a measurement. HW-confirmed at 1.2x and 1.0x.
 
-**2. Occasional distortion when engaging 1.2x — STILL OPEN.** Consistent with
+**2. Occasional distortion when engaging 1.2x — RESOLVED in v1.5.1 by the
+66.667 MHz clock (HW-confirmed 2026-10-01); the original entry follows.** Consistent with
 the budget table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of
 60, so a dense passage can miss and underrun the FIFO. Likely inherent, and a
 disclosable limitation rather than a fault -- which is what makes the
@@ -2882,6 +2883,8 @@ by whoever picks this up. What that would require:
   Nothing about a bad session survives into the next one.
 - **Distortion is disclosed, not fixed.** 1.2x needs up to 54.8 MHz of the
   60 available, so a dense passage can underrun. That is the budget, not a bug.
+  **(v1.5.1: the budget grew to 66.667 MHz and the distortion went away. The
+  reasoning held — it WAS the budget, and raising it was the fix.)**
 
 The seek defect is the one that decides it. Distortion is a known cost a user
 can hear and accept; a clock that walks backwards looks broken.

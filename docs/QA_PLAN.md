@@ -80,9 +80,11 @@ Off by default and not remembered; it resets every launch.
 | 3.5 | At 1.2×, hold **Left/Right** to seek. | Position tracks correctly. **Test the headerless files from §0 specifically.** |
 | 3.6 | Same seek test at **1.0×** on those files. | Also correct. This path was latently broken before, not just at speed. |
 
-**Known limitation — do not file:** occasional distortion when engaging 1.2×,
-more likely in dense passages. 1.2× needs up to 54.8 MHz of the 60 available,
-so the decoder can miss. It is the budget, not a bug.
+**RESOLVED in v1.5.1 — now a regression check.** 1.2× used to distort in dense
+passages: it needs up to 54.8 MHz worst case, which was 91% of the old 60 MHz
+budget. At 66.667 MHz that is 82%, and the distortion is gone (HW-confirmed by
+the user, 2026-10-01). Listen to a dense passage at 1.2× and file it if it
+returns.
 
 ---
 

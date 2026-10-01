@@ -9,6 +9,8 @@ What changed in each release, newest first.
   edge stutter less.
 - **Text is sharper**, with cleaner edges on every letter.
 - **An incomplete update now says so** instead of showing a black screen.
+- Fixed: **1.2× playback distorted in dense passages.** The faster core has
+  the headroom it was short of.
 - Fixed: **the cassette's label showed the last playlist's name** when you
   played a single track with Load MP3. It is blank now, like a tape nobody
   has written on.
