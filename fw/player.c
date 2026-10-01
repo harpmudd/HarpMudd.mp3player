@@ -501,6 +501,8 @@ static uint16_t def_ms_max;    /* longest single episode, ms -- THE number   */
 static uint32_t def_ms_tot;    /* total starved time, ms                     */
 static uint32_t def_t0;        /* cycles() at the start of the open episode  */
 static uint8_t  def_in;        /* currently starved                          */
+static void def_sample(void);  /* defined by und_sample(); called from
+                                * flac_emit, which is earlier in the file  */
 #endif
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
 /* Samples per frame, taken from the decoder rather than assumed. MPEG-1 Layer
@@ -7898,6 +7900,21 @@ static uint32_t fl_meter_n;
 static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
 {
     (void)ctx;
+#if FIFO_DEFICIT
+    /* HERE, not in the frame loop. The first attempt sampled once per loop
+     * iteration, and an iteration IS a frame -- so the finest empty period it
+     * could report was one frame period, and it duly reported exactly that
+     * (X104 on two different files). That was the sampling interval, not the
+     * fault.
+     *
+     * flac_emit runs every 64 samples, ~1.45 ms, which is 70x finer and fast
+     * enough to resolve a real episode. It is also the right PLACE: emission
+     * only runs while the SECOND channel is decoded, so the window where the
+     * FIFO drains unreplenished is precisely the gap between consecutive
+     * calls here. Sampling on entry, before this call's pushes, catches the
+     * trough rather than the refill. */
+    def_sample();
+#endif
     /* Safe here: ui_draw_dynamic() performs no I/O and cannot re-enter the
      * decoder. It reads position from `frames`, which has not been advanced
      * for the frame in flight, so the clock trails by at most one frame.
@@ -10720,9 +10737,6 @@ int main(void)
              * hiccup actually happened rather than was imagined. */
 #if UI_SHOW_DIAG
             und_sample();
-#endif
-#if FIFO_DEFICIT
-            def_sample();
 #endif
             if (!under_shadow && pcm_underrun()) {
                 under_shadow = 1u;
