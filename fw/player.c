@@ -4313,10 +4313,21 @@ static void ui_draw_dynamic(void)
 
             {   /* A new playlist means a new label. Cheap identity: the
                  * first character plus the length, which is enough to catch a
-                 * change without keeping a copy of the name. */
+                 * change without keeping a copy of the name.
+                 *
+                 * A track picked with Load MP3 hashes to 0, the same as having
+                 * no playlist at all. That is not just so the guard below
+                 * blanks the label -- it is what INVALIDATES the cached face.
+                 * pl_name_full still holds the last playlist's name after a
+                 * Load MP3 (nothing clears it, by design: the remembered
+                 * playlist survives playing a one-off track), so hashing the
+                 * name alone gives the same value either way, tape_face is
+                 * never cleared, and the stale label stays painted however the
+                 * guard reads. */
                 uint32_t nh = 0;
-                for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
-                    nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
+                if (track_from_pl)
+                    for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
+                        nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
                 if (nh != tape_name_h) { tape_name_h = nh; tape_face = 0; }
             }
             if (wf || ww != tape_face_w) tape_face = 0;
@@ -4353,8 +4364,17 @@ static void ui_draw_dynamic(void)
                 /* The playlist's name, written on the label like a real one.
                  * Blank for a single track opened with Load MP3 -- there is no
                  * album to name then, and an empty label is what a blank tape
-                 * looks like anyway. */
-                if (pl_count && pl_name_full[0]) {
+                 * looks like anyway.
+                 *
+                 * track_from_pl is the test, not pl_count. pl_count is only
+                 * ever zeroed by the playlist PARSER, so after a Load MP3 it
+                 * still holds the previous list's length and this guard passed
+                 * -- the intent above was written but never took effect, and
+                 * the tape carried the last playlist's name over a track that
+                 * had nothing to do with it. track_from_pl is already the
+                 * flag for "the playlist started this track"; resume uses it
+                 * the same way. */
+                if (track_from_pl && pl_count && pl_name_full[0]) {
                     /* Without the extension. Nobody writes ".m3u" on a
                      * cassette label. */
                     char nm[PL_FULL_MAX + 1u];
