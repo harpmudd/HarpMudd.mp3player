@@ -494,6 +494,14 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
  * C requires a declaration to be visible before first use. */
 static HMP3Decoder dec;
 static uint32_t frames, errs, rate_set, min_level;
+#if FIFO_DEFICIT
+static uint16_t def_min;       /* lowest FIFO level seen this track          */
+static uint16_t def_eps;       /* starved episodes                           */
+static uint16_t def_ms_max;    /* longest single episode, ms -- THE number   */
+static uint32_t def_ms_tot;    /* total starved time, ms                     */
+static uint32_t def_t0;        /* cycles() at the start of the open episode  */
+static uint8_t  def_in;        /* currently starved                          */
+#endif
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
 /* Samples per frame, taken from the decoder rather than assumed. MPEG-1 Layer
  * III is 1152; MPEG-2 and 2.5 are 576. Hardcoding 1152 ran the elapsed clock at
@@ -1310,6 +1318,33 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #ifndef UI_SHOW_SPEED_DIAG
 #define UI_SHOW_SPEED_DIAG 0
 #endif
+/* FIFO deficit measurement. EXTRA_CFLAGS="-DFIFO_DEFICIT=1 -Os"
+ *
+ * Answers ONE question, asked 2026-10-01 before committing to the 1.6.0
+ * SDRAM migration: would a DEEPER PCM FIFO actually have caught the FLAC
+ * dropouts, or would it just make them rarer?
+ *
+ * The FIFO is 2048 entries = 46 ms. Doubling it to 4096 adds 46 ms of shock
+ * absorber and costs 8 M10K the design does not have -- which is what the
+ * whole migration exists to free. So the number that decides it is **how
+ * long the FIFO actually sits EMPTY**: that is exactly the audio the decoder
+ * failed to supply, and therefore exactly the extra buffering that would
+ * have covered it.
+ *
+ *   X < 46 ms   a 4096-entry FIFO absorbs it. Build the migration.
+ *   X > 46 ms   it does not. The Rice decoder (E2) is the only thing that
+ *               closes a gap that size, and the migration is the wrong
+ *               target -- three sessions saved.
+ *
+ * Row: L<min level> E<episodes> X<longest, ms> T<total, ms>, per track.
+ * Measured off pcm_level() rather than the underrun flag, because that flag
+ * is STICKY until a flush and so cannot time anything.
+ *
+ * Replaces the D/O/U row rather than joining it -- that row already clips
+ * past 296px at two digits, and these are separate investigations. */
+#ifndef FIFO_DEFICIT
+#define FIFO_DEFICIT 0
+#endif
 /* Resume instrumentation. EXTRA_CFLAGS="-DUI_SHOW_RESUME_DIAG=1 -Os"
  *
  * The -Os is not optional: the normal build has under 1 KB of heap left and
@@ -1477,6 +1512,9 @@ static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
 static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
+#if FIFO_DEFICIT
+static uint32_t ui_last_def = 0xFFFFFFFFu;   /* FIFO deficit row, 1 Hz */
+#endif
 /* One marquee per scrollable line. Title and artist can both overflow, and
  * they scroll independently -- a shared position would drag the shorter one
  * around for no reason. */
@@ -2937,6 +2975,9 @@ static void ui_draw_chrome(void)
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
     ui_last_spd   = 0xFFFFFFFFu;   /* or the diag row dies on the first reload */
+#if FIFO_DEFICIT
+    ui_last_def   = 0xFFFFFFFFu;   /* same, and the same trap */
+#endif
     /* THIRD entry to be forgotten from this list, after ui_last_stall and the
      * mode row. A toast is drawn only when its fade step CHANGES, so once
      * chrome has painted over one, ui_toast_step still says "already drawn"
@@ -5968,6 +6009,32 @@ ui_tail:
     }
 #endif
 
+#if FIFO_DEFICIT
+    /* Same row and cadence as the speed diag, drawn instead of it.
+     *
+     * X is the whole point: the longest single stretch the FIFO sat empty.
+     * Against the 46 ms a 2048-entry FIFO holds, X says whether doubling it
+     * covers the gap or merely narrows it.
+     *
+     * L is the companion reading, and it matters on the tracks that do NOT
+     * drop out: one that never goes below L800 has margin, one that grazes
+     * L20 is a dropout that happened not to land. Judging the fix on the
+     * failures alone would miss how close the rest are running. */
+    if (ui_sec != ui_last_def) {
+        ui_last_def = ui_sec;
+        char b[48], *q = b;
+        *q++ = 'L'; q = ui_dec(q, def_min == 0xFFFFu ? 0u : def_min);
+        *q++ = ' '; *q++ = 'E'; q = ui_dec(q, def_eps);
+        *q++ = ' '; *q++ = 'X'; q = ui_dec(q, def_ms_max);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, def_ms_tot);
+        *q = 0;
+        uint16_t dbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), dbg);
+        fb_set_color(UI_RED, dbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
 #if UI_SHOW_RESUME_DIAG
     {
         char b[40], *q = b;
@@ -7995,6 +8062,34 @@ static void und_sample(void)
 }
 #endif
 
+#if FIFO_DEFICIT
+/* Times how long the PCM FIFO sits at zero. Called from both decode loops.
+ *
+ * Sampling is opportunistic -- the loop only runs while decoding -- which is
+ * exactly right here: during a starvation the decoder is working flat out, so
+ * the loop iterates and the episode is seen. It would UNDER-report a stall
+ * that also stopped the decoder, and that is a different fault with its own
+ * symptom (O, not U).
+ *
+ * cycles() wraps every ~64 s at 66.667 MHz. Unsigned subtraction survives one
+ * wrap, and no starved episode approaches a minute -- if one ever did, the
+ * core would have stopped, not stuttered. */
+static void def_sample(void)
+{
+    uint32_t lvl = pcm_level();
+    if (lvl < def_min) def_min = (uint16_t)lvl;
+    if (lvl == 0u) {
+        if (!def_in) { def_in = 1u; def_t0 = cycles(); def_eps++; }
+    } else if (def_in) {
+        def_in = 0u;
+        uint32_t ms = (cycles() - def_t0) / (CLK_HZ / 1000u);
+        def_ms_tot += ms;
+        if (ms > 65535u) ms = 65535u;
+        if ((uint16_t)ms > def_ms_max) def_ms_max = (uint16_t)ms;
+    }
+}
+#endif
+
 static void refill_pump(void)
 {
     if (rd_pending) {
@@ -8796,6 +8891,10 @@ static int load_track(void)
     pcm_flush();
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+#if FIFO_DEFICIT
+    def_min = 0xFFFFu; def_eps = 0u; def_ms_max = 0u;
+    def_ms_tot = 0u; def_in = 0u;
+#endif
     /* A NEW track starts at 0:00, and this is the one place that knows one
      * started. ui_draw_chrome used to do it, which caught every repaint too. */
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
@@ -10622,6 +10721,9 @@ int main(void)
 #if UI_SHOW_DIAG
             und_sample();
 #endif
+#if FIFO_DEFICIT
+            def_sample();
+#endif
             if (!under_shadow && pcm_underrun()) {
                 under_shadow = 1u;
                 pcm_under_n++;
@@ -10758,6 +10860,9 @@ int main(void)
          * licence to underrun. */
 #if UI_SHOW_DIAG
         und_sample();
+#endif
+#if FIFO_DEFICIT
+        def_sample();
 #endif
         if (!under_shadow && pcm_underrun()) {
             under_shadow = 1u;
