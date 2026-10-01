@@ -16,7 +16,8 @@
 // =============================================================================
 
 // -- 1. PLL / clocks ----------------------------------------------------------
-// outclk_0 = 60 MHz  CPU/system.  Stage 0 measured 45.7 MHz as the worst-case
+// outclk_0 = 66.667 MHz  CPU/system (VCO 600 / 9). Stage 0 measured 45.7 MHz
+//            as the worst-case
 //            requirement (320 kbps) at 0 wait states. Bring-up ran at 50 MHz,
 //            which left too little headroom once UI drawing and SD reads shared
 //            the CPU with the decoder -- audible tics under load. 60 MHz is the

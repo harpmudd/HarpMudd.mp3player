@@ -141,7 +141,7 @@ hear*, because it changes how much risk is worth taking.
 
 | | |
 |---|---|
-| available | 60 MHz |
+| available | 60 MHz (66.667 since v1.5.1) |
 | MP3 decode at 1× | ~45.7 MHz |
 | headroom | **~14 MHz** |
 

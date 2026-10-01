@@ -12,6 +12,370 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
+# v1.6.0 -- FLAC performance
+
+**Scope set 2026-09-22, and it was re-scoped MID-PLANNING on measurement.** The
+release was going to be the SDRAM migration with fixes attached. Three readings
+taken on hardware that afternoon moved it.
+
+## What was measured
+
+Diagnostic build (`UI_SHOW_SPEED_DIAG=1`, built `-O2` so decode timing matches
+the shipping build), three tracks, D/O/U read ~20 s in.
+
+| track | cassette meter | bars meter |
+|---|---|---|
+| Dire Straits (MP3, control) | D6 O0 U0 | **D12** O0 U0 |
+| The Blue Hearts (16/44.1, order-12, ~1027 kbps) | D0 O0 U1 | **D0-5 O0 U0-1** |
+| Mandrake Handshake (24/48, ~1814 kbps) | D0 O0 U2 | **D0 O0 U1-2** |
+
+Three things follow, and they are not what the README currently says.
+
+**0. Three meters are the expensive ones, for TWO different reasons.** User,
+2026-09-23, from listening: magic eye, spectrum and cassette. The spectrum and
+the cassette are the cascade below -- per-sample DSP. The magic eye is not in
+that gate at all and must be DRAW-bound: it paints its background one fb_rect
+PER ROW rather than as a flat fill, deliberately, because it is the first
+meter with large empty areas and a flat slab on a per-row gradient reads as a
+visible rectangle -- plus per-column circle geometry for the tube. Most of
+that sits behind `if (!eye_face)` and is therefore cached, which is worth
+confirming before anyone optimises it. NOT measured: taken from the user's
+ear, and sizing it needs a D reading on a diag build.
+
+**1. The per-sample octave cascade costs ~6% of the CPU.** The control moved
+D6 -> D12 on bars, landing on the historical D11-13 baseline, which validates
+the instrument at the same time. `VIZ_LED` (16-band spectrum) and `VIZ_TAPE`
+(cassette) are the only two meters that run `SPEC_OCT` = 8 filter stages on
+EVERY sample at 44.1 kHz, inside `meters_feed`, competing with the decoder --
+to drive a label flash and a display that both update at ~30 Hz.
+
+**2. The meter is a CONTRIBUTOR, not the cause -- and that is the corrected
+reading.** On the first (cassette) pass it looked as though Blue Hearts might
+be a file the meter alone tips over. The bars pass says otherwise: U falls
+from 1 to 0-1 and from 2 to 1-2, so BOTH files still underrun with the
+cascade off. Blue Hearts sits within a few percent of adequate (D fluctuates
+0-5); Mandrake stays pinned at D0. The ~6% is worth having and is not enough
+on its own for either file.
+
+That is what makes Phase 2 the decisive item rather than Phase 1: +25% from
+the clock covers the gap these readings show, where 6% does not.
+
+**3. Neither is I/O-bound.** O reads 0 on both. At 1814 kbps Mandrake wants
+~227 KB/s against the 736 KB/s the card was measured at.
+
+### Correction: the "hardware ceiling" conclusion was not established
+
+These files were pronounced a hardware ceiling because they behaved identically
+on v1.4.0. That comparison never controlled for the METER. The cascade is not
+new in 1.5.0 -- the spectrum meter runs the same loop and shipped in v1.4.0 --
+so if a cascade meter was showing for both tests, both builds paid the same
+cost and the comparison proves nothing. The standing rule applies: with an
+intermittent, mode-switched UI, establish which MODE was active before
+concluding anything -- including before concluding it is the hardware.
+
+### Correction: the SDRAM migration is NOT a prerequisite for the FLAC work
+
+Recorded earlier here as though it were. From `ap_core.fit.summary`:
+
+    Logic utilization (ALMs) :  5,894 / 18,480  ( 32 % )   -- 12,586 free
+    Total DSP Blocks         :     11 /     66  ( 17 % )   -- 55 free
+    Total RAM Blocks         :    301 /    308  ( 98 % )   --  7 free
+
+**Only M10K is scarce.** A Rice decoder is priority encoders, barrel shifters
+and leading-zero counts -- ALM-heavy and BRAM-light if residuals stream out in
+chunks instead of buffering a whole block. It needs the resource there is most
+of. The migration frees the one it needs least.
+
+And the I/O column is not a separate obstacle: O rises BECAUSE D reaches 0 and
+prefetch stops being issued (established in docs/FLAC.md). Making decode
+cheaper collapses O for free, without the SDRAM ring.
+
+## The phases
+
+**Phase 0 -- prerequisites. DONE 2026-09-22** (commit 64a5721). Six merged
+branches deleted; `release.yml` now verifies `mp3font.bin`; the SDRAM 32/64 MB
+contradiction closed. And the diagnostic that gates all of this was REPAIRED:
+b63644d deleted `fl_open_err`/`fl_open_fails` on 2026-08-15 but left the D/O/U/F
+row printing them, so `UI_SHOW_SPEED_DIAG=1` had not compiled for a month --
+undiscovered because the flag ships at 0. `UI_SHOW_SPEED_DIAG` now sits behind
+`#ifndef` so a measurement build needs no source edit.
+
+**Phase 1 -- cheap and near-certain.**
+
+- **DONE 2026-09-23 (f0d6b60), and it under-delivered.** Not decimated -- the
+  split and accumulate are now GATED to the stages the active meter reads
+  (cassette: 4 and 7 of 8). Exact, no aliasing, no visual change; the
+  cassette was confirmed unchanged on hardware.
+
+  `tools/host/cascade_bench.py` measured the band work down 55%, 1,078,189
+  instructions per second of audio, which is ~3% of the CPU at 36.4M instr/s.
+  **Hardware says about 1 point of D** (MP3 control 6 -> 6.5-7 with the
+  cassette showing), and the FLAC files barely moved: Blue Hearts D0 -> D0-1,
+  Mandrake D0 -> D0.
+
+  **U did not move at all: Blue Hearts U1, Mandrake U2, the same as before
+  the change.** So this bought ~1% of headroom and did not touch the fault.
+  Keep it -- it is free and costs nothing visually, and the hubs were
+  confirmed still reacting, so stage 4 earns its keep and there is no
+  further gating available. But it is NOT a changelog line.
+
+  **The instruction count over-predicted the hardware gain by about 3x.**
+  Worth more than the 1% is: apply the same discount to anything else costed
+  from instruction counts alone, the LPC branch's 5-11% included. Instruction
+  counts are a lower bound on cost, not a predictor of recovered time.
+- Re-test `feature/flac-lpc-speedup` on a clean `-O2` build. 5-11%. It was
+  parked as aimed at the wrong thing, correct when the files looked I/O-bound
+  and needed a large gain; they are decode-bound and marginally over, so the
+  premise changed. The listening test that rejected it ran on a contaminated
+  build with the per-sample click detector active.
+- Re-measure hi-res with the 48 kHz gate temporarily lifted. The 157 and 191
+  figures predate the 64-bit reservoir and clz `unary()` -- the same change
+  that took the Furs 95 -> 80. We are planning against stale, pessimistic
+  numbers.
+
+**Phase 2 -- clk_sys 60 -> 66.67 MHz. MEASURED 2026-09-23, three compiles.**
+
+**clk_sys is quantised, and the step size is the finding.** All four outputs
+share one VCO. The 12 MHz pixel clock has to give exactly 60.000 Hz (500x400
+total, the 400x360 image an exact 4x integer scale of the Pocket panel) and
+sdram_fb needs 100 MHz, which pins the VCO at 600 MHz. So clk_sys can only be
+600/N: **60 (/10), 66.67 (/9), 75 (/8) and nothing between**. Asking for 70
+fails the fit outright -- *"output_clock_frequency is set to an illegal value
+of '70.0 MHz'"* -- it is not a timing failure, the PLL simply cannot make it.
+
+| clk_sys | Slow 0C setup | Slow 85C setup | Fast 0C hold | ALMs |
+|---|---|---|---|---|
+| 60.00 (shipping) | +2.168 | +2.065 | +0.099 | 5,903 |
+| **66.67 (+11.1%)** | **+1.546** | **+1.683** | **+0.017** | 5,856 |
+| 75.00 (+25%) | +0.069 | +0.508 | +0.100 | 5,865 |
+
+The 60 MHz row reproduces the +2.07 ns recorded in commit 7051046 for the
+shipped v1.5.0 build, which is why the other two rows can be compared against
+it at all -- run it as a CONTROL, not as a revert afterthought.
+
+**75 MHz is out.** It closes on paper, but 69 ps at Slow 0C is 0.5% of the
+period against the 2.07 ns v1.5.0 ships with. The critical path is ~13.26 ns,
+so real fmax is ~75.4 MHz and 75 lands under it by luck. Note the worst setup
+corner here is Slow **0C**, not 85C.
+
+**66.67 MHz is viable** with ~1.5 ns of setup margin, same order as shipping.
+
+The experimental fit showed hold at Fast 0C down to +0.017 ns and this file
+claimed that was structural -- "a tighter setup constraint makes the fitter
+shorten paths, which works against hold". **That was wrong.** The real Phase 2
+build (2026-09-23) lands at +0.107 ns, marginally BETTER than the 60 MHz
+baseline's +0.099. Across three fits hold ranges 0.017-0.107 with no relation
+to the constraint: it is placement noise. One datapoint plus a plausible
+mechanism is not a finding.
+
+### HARDWARE RESULT 2026-09-23 -- and the control validates the model
+
+Cassette meter, diag build, matched 66.667 MHz pair:
+
+| track | at 60 MHz | at 66.667 | implied demand at 60 MHz |
+|---|---|---|---|
+| Dire Straits (control) | D6-7 | **D15** | ~94% |
+| Blue Hearts | D0-1, U1 | **D5-6** | ~105% |
+| Mandrake | D0, U2 | **D0-1, U1** | ~110% |
+
+The control lands where arithmetic says it should: 93.5% busy / 1.111 =
+84.2% busy, so 15.8% idle, observed 15. **D is linear and can be trusted to
+back out a file's true demand**, which is how the last column is derived --
+a file pinned at D0 is not at 100%, it is at whatever it needs, and the
+headroom it gains at a faster clock reveals how far over it was.
+
+That also explains why the cascade's ~1% did nothing: both files were 5-10%
+short, and 1% crosses neither gap.
+
+EQ presets, UI pacing and 1.2x all confirmed good at the new clock -- the EQ
+check matters because the hardcoded eq_biquad CLK_HZ was the one bug here
+that would have shipped silently.
+
+### The underruns are VARIANCE, not average shortfall -- 2026-09-23
+
+Controlled readings at 1:00 into each track, matched 66.667 MHz pair:
+
+    Blue Hearts  D4 O0 U2        Mandrake  D0 O0 U3
+
+First, the counting: U is CUMULATIVE from track start, so these cannot be
+compared with the earlier ~20 s readings as counts. As rates, both roughly
+halved -- Blue Hearts 3/min -> 2/min, Mandrake 6/min -> 3/min. Improved,
+neither eliminated. The earlier "Blue Hearts is fixed" was wrong, and so was
+the brief alarm that it had got worse.
+
+**O0 on both**, so the decoder never waits on the card: faster decode does
+NOT outrun the SD supply, and that theory is dead.
+
+**The finding is D4 with underruns.** There is average headroom on Blue
+Hearts and it still drops samples, so the shortfall is episodic:
+
+    one FLAC frame = 4608 samples = 104 ms of audio
+    the PCM FIFO   = 2048 entries =  46 ms
+
+The decoder can work at most ~46 ms ahead, and that is the whole shock
+absorber. At 96% average it banks ~4 ms per frame up to that cap; one
+expensive frame -- high LPC order, dense residual -- spends it all. **A
+variance problem cannot be fixed by average throughput**, which is why more
+clock would not reliably close it either.
+
+Deepening the FIFO is the direct fix and does not fit: 2048x32 is 8 M10K at
+256x32 per block, doubling needs 8 more, and 7 are free (301/308). Misses by
+one.
+
+**Which reverses the correction above.** This file says the SDRAM migration
+is not a prerequisite for the FLAC work. That holds for the Rice decoder,
+which wants logic. It is FALSE here: moving pl_text and art_acc out of BRAM
+is exactly what frees the blocks a deeper FIFO needs. The migration is back
+on the FLAC path for a different reason than it was first put there.
+
+**The consequence for Phase 3:** the clock is capped at +11.1% permanently.
+There is no second helping later without redesigning the video timing, so
+whatever 66.67 plus the cascade fix (~6%, so ~17% together) does not reach,
+the Rice decoder has to carry alone.
+
+Not yet done: every clk_sys-derived constant moves with the clock, firmware
+`CLK_HZ` included, and the 71.6 s cycle-counter wrap moves with it too.
+
+**Phase 3 -- Rice decoder in fabric.** The headline. 60-76% of decode into the
+resource the device has most of.
+
+**Phase 4 -- raise the 48 kHz gate** to what the combination actually supports,
+measured rather than hoped. Rewrite the README limitation, which today frames a
+meter cost as a hardware ceiling and tells users to re-encode files that would
+play on bars.
+
+**Phases 1, 2 and 4 are independently shippable.** If Phase 3 is harder than it
+looks, 1.6.0 still ships as "FLAC got faster and more files play" on ~30% from
+the cheap items and the clock together. Phase 1 ALONE does not clear either
+measured file -- that is measured, not assumed -- so the clock is load-bearing
+for the release having a user-visible result at all.
+
+## Deliberately out
+
+- **The SDRAM migration**, moved to 1.7.0 and correctly positioned as groundwork
+  for lyrics and AAC rather than for FLAC. The analysis stands; the ordering
+  argument for it did not.
+- **Lyrics**, after the migration.
+- **Hi-res FLAC rejected at boot, boots stopped** -- user, 2026-09-22: not now.
+- **Issue #3 (black screen on missing mp3player.rom)** and the interlock bump.
+  Interlock stays at rev 21, so no new black-screen exposure is created.
+- **24/192.** Double 24/96 again; nothing on this list reaches it.
+## Font clarity: 1.5x is the only scale that RESAMPLES -- 2026-09-30
+
+Investigated with `tools/font_clarity.py`, which reproduces the whole path --
+FreeType raster, the rounded 4-bit quantiser, cov_weight()'s gamma LUT, the
+RGB565 integer blend, and the Pocket's 4x NEAREST upscale -- so candidates can
+be compared without a hardware trip. Output: docs/font_clarity.png.
+
+**The display is the constraint.** 400x360 goes to the 1600x1440 panel at an
+exact 4x, nearest neighbour, so every UI pixel is a hard 4x4 block. Anti-
+aliasing cannot soften an edge here; it can only choose which blocks are grey.
+The win is FEWER, BETTER-PLACED grey blocks, not more AA.
+
+**The actual defect.** cmd_sx/cmd_sy encode 1x, 1.5x, 2x, 3x and the engine
+Bresenham-scales a 16x16 source cell. The integer scales replicate cleanly;
+**1.5x is the only one that resamples**, duplicating some source columns and
+not others, which comes out as stems of UNEVEN THICKNESS. It reads as badly
+drawn rather than merely soft.
+
+TS_15X is used by the elapsed/total TIME readout, the "Getting started"
+heading and the mismatch screen -- so the clock a user watches constantly is
+the worst-rendered text on screen.
+
+| option | result | cost |
+|---|---|---|
+| keep 1.5x | uneven stems | none |
+| integer 2x | even stems, but AA blocks double to 8x8 and it is 33% taller | layout change only |
+| render at the shown size | clean | **RTL: the engine only reads 16x16 cells** |
+
+The third is the right answer and is NOT a generator-side change, which is
+what it looked like before reading mp3_fb.sv. `char_w = 16 * (sx+1)` and the
+glyph fetch both assume a 16-row cell, so a 23px atlas needs a second cell
+size through the command, the SDRAM font path and glyphbuf -- with BRAM at
+98%, glyphbuf growth is not free. 1.6.0 work, not a point release.
+
+### Found on the way: the optical-size setting has never done anything
+
+`gen_font_rom.py` calls `set_variation_by_axes([14.0, 600.0])` inside a
+try/except, but third_party/font holds **Inter-SemiBold.ttf**, a STATIC
+instance with no axes. The call throws and is swallowed on every run. Nothing
+is broken -- SemiBold is what was wanted -- but opsz is not set to 14 or to
+anything else, and the comment implies otherwise. Exploring weight or optical
+size needs Inter's variable font added to third_party/.
+
+### Not pursued: dropping anti-aliasing
+
+A 1-bit hinted render is the CRISPEST row on the sheet, which sits awkwardly
+against gen_font_rom.py's opening argument that greyscale coverage is what
+makes type look "drawn rather than plotted". That argument assumes AA buys
+smooth edges. At 4x nearest it buys grey blocks. Recorded because the premise
+deserves re-examining on this display, not because the change is recommended:
+it would hurt curves and diagonals at other sizes.
+
+## Held seek on a FLAC wedges and jumps back -- OPEN, not reproducible
+
+**User, 2026-09-30, and it was reliable at the time:** hold seek-forward on a
+FLAC; somewhere around 3-4 minutes in it stops advancing and starts jumping
+BACKWARDS, and will not recover -- only restarting the track clears it.
+Reproduced "every time" on Circles Around the Sun, Widespread Panic and Phish.
+Played from a PLAYLIST. Never seen on MP3.
+
+**It then stopped reproducing and has not come back**, including on a build
+byte-identical to the one it was reliable on (d245dabe, bitstream a433d2b4)
+and across many combinations the user tried. So the trigger is STATE, not the
+build.
+
+### What was ruled out, and one mistake worth not repeating
+
+Two instruments were tried and neither reproduced it:
+
+* `UI_SHOW_SEEK_DIAG` repaints a text row every second through the font
+  engine -- real work inside the path under test.
+* A six-store trace with no drawing. Also did not reproduce, which is what
+  first suggested the instrument was NOT the variable.
+
+**The control was then run against the wrong build.** 54a7c1cc was called
+"the shipping build" and treated as the baseline, but the build in the
+user's hands when it was reliable was d245dabe, which also carries the
+cassette label fix. Two of the three "cannot reproduce" results were
+therefore worthless. Rebuilt byte-identical afterwards; still no repro.
+
+### Where to look when it returns
+
+The seek path's own comment says the state that matters: a track opened from
+a playlist arrives with NO SIZE, because pl_arm_load() zeroes slot_size and
+sets force_size_probe -- the file is opened by name rather than mounted as a
+sized slot. Measured on one 30 MB FLAC: **5,307 KB via a playlist against
+30,856 KB via Load MP3**. A seek bracket built on a short size can only aim
+short, and "will not go past a point, jumps backwards" is what aiming short
+looks like. The user confirms it was playing from a playlist.
+
+Two candidate mechanisms in the code, distinguishable from one SEEK_TRACE
+dump:
+
+1. **The intent window is exactly the step size.** The hold acceleration sets
+   `seek_secs = 30` after 8 repeats, and the base-tracking guard is
+   `fl_seek_intent - ui_sec < 30u`. Any lag at all puts the intent >= 30
+   ahead, the guard fails, and base snaps back to ui_sec. Two constants that
+   must disagree, set to the same number. This block is inside
+   `if (track_fmt == FMT_FLAC ...)`, which is consistent with MP3 being
+   unaffected -- MP3 uses the byte path below and has no intent tracking.
+2. **`if (at && at != file_pos)`** skips the whole update when the locate
+   returns the same offset, so ui_sec never moves while fl_seek_intent keeps
+   climbing.
+
+### Status for the release
+
+NOT claimed as fixed in 1.5.1 and deliberately absent from the changelog. The
+landing-zone guard in target_read_slot is a real race with a real mechanism
+and the narrow form was hardware-confirmed against a DIFFERENT symptom (seek
+landing wrong on long albums). Whether it also addresses this one is unknown,
+and a fault that cannot be reproduced cannot be called fixed.
+
+Build with `EXTRA_CFLAGS="-DSEEK_TRACE=1"` the moment it recurs, hold seek
+until it misbehaves, release, and photograph the dump. Capture the track, the
+time it wedges at, and whether the core had just booted.
+
 # Releasing
 
 **Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
@@ -1067,6 +1431,19 @@ decode, and a third tag parser for `moov/udta/meta/ilst` + `covr`.
 Against that: **11 `.m4a` files out of 7,180 in the library.** `ffmpeg` converts
 them in about a minute.
 
+**A TEST CASE exists and is kept deliberately, 2026-09-28.** The curated
+Hi-Fi library on the NAS (`Media/Hi-Fi`, 97 artists) holds exactly one .m4a
+album: *Tommy Guerrero -- Loose Grooves and Bastard Blues*, 12 files. It came
+up during a sweep that deleted every album with missing tracks -- it was the
+one album the FLAC-tag scanner could not read, so it was neither checked nor
+touched, and the user chose to keep it against possible .m4a support rather
+than convert or remove it.
+
+Two things follow. It is the only real-world m4a to develop against, so do
+not let a later tidy-up take it. And it CONFIRMS the scarcity argument above
+from a second direction: one album in a 133-album curated library, which is
+the library this core is actually pointed at.
+
 #### If it is done anyway, this order
 
 1. Build the CPU↔SDRAM window and move `pl_text` only. One cold buffer, no
@@ -1078,9 +1455,15 @@ them in about a minute.
 Do not attempt the port and the decoder in the same change. The RAM ceiling
 would turn into a week of mysterious failures.
 
-Unsettled detail found on the way: `mp3_fb.sv` says *"~360 KB of 32 MB SDRAM"*
-while `_mister_pocket_lib/core/mem/README.md` says the Pocket's part is
-512 Mbit x16 = **64 MB**, hardware-validated 2026-06-02. One is stale.
+SETTLED 2026-09-22 (was recorded here as an open contradiction): the part is
+**64 MB** (512 Mbit x16), hardware-validated 2026-06-02, and `mp3_fb.sv` now
+says so too -- its comment reads "~360 KB of 64 MB SDRAM". The framebuffer
+therefore uses **0.6% of the device**.
+
+Which reframes this whole section: **capacity was never the constraint, and
+no buffer move is gated on space.** What is scarce is the CPU-side PORT and
+its arbitration against a scanout FILL that must never miss its deadline --
+plus M10K blocks at 300/308, which is what moving a buffer OUT of BRAM buys.
 
 ## Raise the 128-track playlist cap — requested 2026-08-13
 
@@ -1088,7 +1471,9 @@ while `_mister_pocket_lib/core/mem/README.md` says the Pocket's part is
 
 `_heap_start` (end of BSS) is 0x2ACC0 and `_tag_start` — the first reserved DMA
 buffer, which the linker ASSERTs the image must stay below — is 0x33000. So
-**33,600 bytes are free**, and the link fails rather than silently overlapping
+**33,600 bytes were free when this was written; 3,536 as of 2026-09-23** --
+the unicode work and the widened buffers spent the rest. Re-measure with nm
+rather than quoting this. The link fails rather than silently overlapping
 if that is exceeded.
 
 **Do not use build.sh's "% of usable RAM" to judge this.** It compares the ROM
@@ -1936,8 +2321,23 @@ horizontal span of same-coloured modules -- a QR row has ~20-30 spans, so v27 is
 ~3,000 commands for a screen drawn once. Nothing.
 
 The real cost is the QR encoder itself, **~3-6 KB, mostly Reed-Solomon**. That
-does not fit in the 5,008 bytes currently free, so this waits behind the SDRAM
+does not fit in the free space, so this waits behind the SDRAM
 buffer work in the AAC entry above -- the same space problem, and the same fix.
+
+#### RAM as of 2026-09-23: 3,536 bytes free, not 5,008
+
+Measured with nm on the shipping build (_heap_start 0x35E30, _tag_start
+0x36C00). Step 3's encoder was already out of reach and is further out now.
+Step 2 -- the log plus a text export screen -- is ~2 KB of log for 32 entries
+plus its screen, so it would consume essentially all remaining RAM. It fits
+only at a reduced entry count, and leaves nothing behind it.
+
+**The RTC dependency in step 1 can be removed entirely.** Log RELATIVE
+seconds -- how long ago each track played -- and let the decoding page
+subtract them from the SCAN time, which it knows. Absolute timestamps come
+out correct, no RTC is routed, and one RTL change and its compile disappear
+from the plan. The scan happens minutes after listening, so the error is
+seconds.
 
 #### Staged so nothing is wasted
 
@@ -2454,7 +2854,8 @@ not a speed bug at all. See the Fixed entry below; the short version is that
 three files were CBR with no Xing header, so the exact rate was available and
 being discarded in favour of a measurement. HW-confirmed at 1.2x and 1.0x.
 
-**2. Occasional distortion when engaging 1.2x — STILL OPEN.** Consistent with
+**2. Occasional distortion when engaging 1.2x — RESOLVED in v1.5.1 by the
+66.667 MHz clock (HW-confirmed 2026-10-01); the original entry follows.** Consistent with
 the budget table above: 1.2x needs 40.7 MHz typical and 54.8 MHz worst case of
 60, so a dense passage can miss and underrun the FIFO. Likely inherent, and a
 disclosable limitation rather than a fault -- which is what makes the
@@ -2482,6 +2883,8 @@ by whoever picks this up. What that would require:
   Nothing about a bad session survives into the next one.
 - **Distortion is disclosed, not fixed.** 1.2x needs up to 54.8 MHz of the
   60 available, so a dense passage can underrun. That is the budget, not a bug.
+  **(v1.5.1: the budget grew to 66.667 MHz and the distortion went away. The
+  reasoning held — it WAS the budget, and raising it was the fix.)**
 
 The seek defect is the one that decides it. Distortion is a known cost a user
 can hear and accept; a clock that walks backwards looks broken.

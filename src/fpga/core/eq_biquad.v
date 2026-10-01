@@ -54,7 +54,11 @@ module eq_biquad #(
 
     localparam integer NBAND = 5;
     localparam integer NBQ   = NBAND * 2;          // both channels
-    localparam integer DIV   = CLK_HZ / RATE_HZ;   // 1250 exactly at 60 MHz
+    // 1250 exactly at 60 MHz; 1388 at 66.667, giving 48,031 Hz -- 0.065% off
+    // 48 kHz, which is inaudible. CLK_HZ is a PARAMETER and the instantiation
+    // in mp3_soc.v must pass the real clk_sys, or this divider silently paces
+    // the filters at the wrong rate.
+    localparam integer DIV   = CLK_HZ / RATE_HZ;
 
     localparam integer CW = 18;                    // coefficient width
     localparam integer SW = 36;                    // sample / state width

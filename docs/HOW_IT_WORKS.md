@@ -6,7 +6,8 @@ use the player — see the [README](../README.md) for that.
 ## Software decoding on a CPU that did not exist
 
 There is no MP3 decoder chip in the Pocket, so the FPGA is loaded with a RISC-V
-CPU running at 60 MHz and the decoder runs on it as software. Simulation put the
+CPU running at 66.667 MHz -- 60 MHz before v1.5.1 -- and the decoder runs on
+it as software. Simulation put the
 real-time floor around 46 MHz before any hardware was built, which is where the
 headroom comes from.
 

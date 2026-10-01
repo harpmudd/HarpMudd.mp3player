@@ -68,8 +68,13 @@ not meaningfully interact with them.
 theoretical.
 
 Generating the strobe is trivial and needs no fractional accumulator:
-`clk_sys` is 60 MHz and 60,000,000 / 48,000 = **1250 exactly**, so a mod-1250
-counter produces it. This free-runs against the DAC's real rate, which is derived
+`clk_sys` is 66.667 MHz and 66,666,667 / 48,000 = **1388**, so a mod-1388
+counter produces it. It was 1250, exactly 48 kHz, when clk_sys was 60 MHz;
+1388 gives 48,031 Hz, 0.065% high and inaudible. Note the parameter has to
+TRACK clk_sys: `eq_biquad` is instantiated with `.CLK_HZ()` in mp3_soc.v, and
+a stale value there neither fails to build nor to run -- it just paces the
+filters wrongly. Left at 60 MHz after the clock moved, the EQ would have
+processed at 53.3 kHz and shifted every preset's corner up by 11%. This free-runs against the DAC's real rate, which is derived
 from `clk_74a` — the two drift by whatever the two PLLs differ by. That drift
 shifts the EQ's corner frequencies by the same fraction, i.e. a small fraction of
 a percent. Irrelevant.

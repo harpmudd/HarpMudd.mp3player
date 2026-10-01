@@ -2,6 +2,19 @@
 
 What changed in each release, newest first.
 
+## v1.5.1 — 1 October 2026
+
+- **The core runs 11% faster** — its processor moved from 60 MHz to 66.7,
+  which gives the decoder more room to keep up. FLAC files that were at the
+  edge stutter less.
+- **Text is sharper**, with cleaner edges on every letter.
+- **An incomplete update now says so** instead of showing a black screen.
+- Fixed: **1.2× playback distorted in dense passages.** The faster core has
+  the headroom it was short of.
+- Fixed: **the cassette's label showed the last playlist's name** when you
+  played a single track with Load MP3. It is blank now, like a tape nobody
+  has written on.
+
 ## v1.5.0 — 18 September 2026
 
 - **Titles and artists now display in Japanese, Chinese, Greek, Cyrillic and

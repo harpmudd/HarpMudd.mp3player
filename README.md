@@ -5,7 +5,7 @@ SD card, with album art, tags and meters.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
-Current version **v1.5.0**. Release history: [CHANGELOG.md](CHANGELOG.md).
+Current version **v1.5.1**. Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Installing
 
@@ -22,6 +22,13 @@ without rearranging. `mp3player.rom` is the firmware and has to stay in that
 folder — the core won't start without it. `mp3font.bin` sits beside it and
 carries the Japanese and accented characters; without it those titles fall back
 to `?`, and everything else still works.
+
+**When you update, replace both files.** The firmware
+(`/Assets/mp3player/common/mp3player.rom`) and the bitstream
+(`/Cores/HarpMudd.Mp3Player/bitstream.rbf_r`) are built as a matched pair and
+check each other at startup. Copying a whole release over the top does that
+correctly. Update only one and the core stops with a message saying the update
+is incomplete — copy the rest of the release across and it starts normally.
 
 ## Playing
 
@@ -242,7 +249,7 @@ is out, along with 32-bit and multichannel. Anything the core can't play says
 so on screen and names the file's own format, so you aren't left guessing.
 
 The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
-80% of the time available, and the same music at 96 kHz needs nearly twice what
+72% of the time available, and the same music at 96 kHz needs nearly twice what
 the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
 on headphones from a handheld it isn't a difference you're going to hear.
 
@@ -271,18 +278,19 @@ framework bugs that had to be found first — is in
   to be remembered** — see
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
   It plays fine either way.
-- **The most demanding FLAC files can stutter** — 24-bit/48 kHz at a high
-  bitrate, or a maximum-compression encode. Decoding runs on a 60 MHz CPU
-  inside the FPGA and those need about three quarters of it, leaving too little
-  for the screen and the card. Re-encoding at the default compression setting,
-  or to 16-bit/44.1 kHz, fixes it.
+- **The most demanding FLAC files can still stutter** — 24-bit at a high
+  bitrate, mainly. Decoding runs on a CPU inside the FPGA and those files ask
+  for nearly all of it, leaving little for the screen and the card.
+
+  Two things help, in order of effort. **Switch to a simpler meter** — the
+  magic eye, the cassette and the 16-band spectrum are the most demanding of
+  the twelve, and on a file that is close to the edge that alone can be the
+  difference. Bars is among the cheapest. Failing that, re-encode at the
+  default compression setting or to 16-bit/44.1 kHz.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.
   Re-saving the tags as UTF-8 fixes it.
-- **1.2× speed can distort in dense passages.** It needs up to 54.8 MHz of the
-  60 available, so the decoder occasionally can't keep up. Normal speed is
-  unaffected.
 
 ## Credits
 

@@ -139,7 +139,11 @@
 extern unsigned int arena_limit(void);
 #define ARENA_LIMIT (arena_limit())
 
-#define CLK_HZ      60000000u   /* clk_sys; UI timing needs it before playback does */
+#define CLK_HZ      66666667u   /* clk_sys = VCO 600 / 9. See ROADMAP Phase 2:
+ * 60, 66.67 and 75 are the ONLY values the PLL can make, because the 12 MHz
+ * pixel clock and the 100 MHz SDRAM clock pin the VCO at 600 MHz. Changing
+ * this alone is not enough -- eq_biquad CLK_HZ and the pcm_rate reset value
+ * in mp3_soc.v are hardcoded to match, and both fail SILENTLY if they do not. */
 
 /* Free-running cycle counter. Up here because the UI uses it for its own
  * timing (marquee, paused-state throttle) well before the playback code does. */
@@ -164,14 +168,23 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * everything else works. Old firmware on new RTL never sends it. No MMIO
  * register changed meaning.
  *
- * Bump this only when the MMIO contract itself changes, where running on is
- * genuinely worse than stopping. */
-#define EXPECT_VERSION 0x4D503315u   /* rev 21: 16 setting slots          */
+ * Bump this when running on the wrong pair is worse than stopping. That test
+ * used to be read narrowly as "the MMIO map changed", and rev 21 was kept
+ * through the 1.5.0 font work on that basis -- correctly, because the change
+ * was additive and the failure mode was then a BLACK SCREEN, which is worse
+ * than non-ASCII text silently falling back to spaces.
+ *
+ * Rev 22 is the clk_sys change, and it inverts both halves of that reasoning.
+ * The MMIO map is untouched, but a mismatched pair runs 11% off pitch with
+ * every timer wrong and NOTHING on screen to say so -- silent wrongness is
+ * exactly what this exists to prevent. And the failure mode is no longer a
+ * black screen: ui_mismatch_screen() now says what happened and what to do. */
+#define EXPECT_VERSION 0x4D503316u   /* rev 22: clk_sys 60 -> 66.667 MHz   */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.5.0"
+#define APP_VER "1.5.1"
 
 /* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
  * Select+A (APF slot table, boot vs live), Select+B (the framework's file
@@ -735,6 +748,8 @@ static uint32_t clk_max;                 /* largest jump seen, any time */
 static uint32_t fl_idle_cyc, fl_io_cyc;    /* accumulating, this second     */
 static uint32_t fl_rate_hz;                /* mirrors fl.rate, declared later */
 static uint8_t  fl_idle_pct, fl_io_pct;
+static uint32_t fl_probe_stale;      /* poison survived a "complete" read   */
+static uint32_t fl_probe_reads;      /* probes issued, for the ratio        */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
 static void vol_apply(void)
@@ -1288,8 +1303,13 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 /* TEMPORARY, with IO_BENCH: shows the throughput figure. Back to 0 before
  * anything ships -- no diagnostic is ever shown to users. */
 /* 0 for any build a user sees -- the standing rule is that no diagnostic ever
- * reaches one. Set to 1 to bring the D/O/U/F row back while investigating. */
+ * reaches one. Set to 1 to bring the D/O/U/F row back while investigating,
+ * which no longer needs an edit to this file:
+ *     EXTRA_CFLAGS="-DUI_SHOW_SPEED_DIAG=1 -Os" bash fw/build.sh
+ * The -Os is not optional, for the same reason the resume row needs it. */
+#ifndef UI_SHOW_SPEED_DIAG
 #define UI_SHOW_SPEED_DIAG 0
+#endif
 /* Resume instrumentation. EXTRA_CFLAGS="-DUI_SHOW_RESUME_DIAG=1 -Os"
  *
  * The -Os is not optional: the normal build has under 1 KB of heap left and
@@ -1321,6 +1341,32 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * working exactly as it does today. Never shipped: the flag defaults to 0. */
 #ifndef UI_SHOW_SEEK_DIAG
 #define UI_SHOW_SEEK_DIAG 0
+#endif
+
+/* SEEK_TRACE -- a seek recorder that does not disturb what it records.
+ *
+ * UI_SHOW_SEEK_DIAG above is the richer instrument, and it is useless for the
+ * held-seek defect: it repaints a text row every second through the font
+ * engine, which is real work inside the path under test, and with it enabled
+ * the fault stops reproducing. (The probe-poison instrument before it failed
+ * the same way, for the same reason, and that one accidentally FIXED the bug
+ * it was built to find.)
+ *
+ * This writes six values per seek and draws nothing. The dump happens half a
+ * second after the last seek, by which time the run is over and the timing no
+ * longer matters.
+ *
+ *     EXTRA_CFLAGS="-DSEEK_TRACE=1" bash fw/build.sh
+ */
+#ifndef SEEK_TRACE
+#define SEEK_TRACE 0
+#endif
+#if SEEK_TRACE
+#define SEEK_TRACE_N 16u                 /* power of two: index is masked */
+static uint16_t sk_tgt[SEEK_TRACE_N], sk_base[SEEK_TRACE_N];
+static uint16_t sk_ui[SEEK_TRACE_N], sk_land[SEEK_TRACE_N];
+static uint8_t  sk_at0[SEEK_TRACE_N], sk_secs[SEEK_TRACE_N];
+static uint32_t sk_n, sk_idle, sk_shown;
 #endif
 #if UI_SHOW_SEEK_DIAG
 static uint32_t dg_tgt, dg_at, dg_pos, dg_ui, dg_blk, dg_rate;
@@ -1783,6 +1829,17 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
 #define SPEC_BANDS (SPEC_OCT * 2u)         /* each octave split in half     */
 #define SPEC_SH    1u                      /* octave split                  */
 #define SPEC_SH2   2u                      /* the half-octave split within  */
+/* Stages whose BANDS the cassette actually reads: spec_lvl[8]/[9] (stage 4,
+ * the shell rim) and spec_lvl[14]/[15] (stage 7, the bass glow). The chain's
+ * low-passes still all run -- stage 7 cannot be reached without them -- but
+ * the split, the two abs and the two accumulates are skipped for the six
+ * stages nothing reads. Stage 0 is among those six and runs on EVERY sample,
+ * which is where the cost was: measured at ~6% of the CPU (MP3 control read
+ * D6 on the cassette and D12 on bars, 2026-09-22). Exact, not decimated --
+ * feeding the cascade at a lower rate would move every band's corner
+ * frequency down an octave and alias the top, which is a visible wrong
+ * answer rather than a cheaper right one. */
+#define SPEC_TAPE_STAGES ((1u << 4) | (1u << 7))
 
 static int32_t  spec_lp[SPEC_OCT];        /* the cascade's filter state      */
 static int32_t  spec_slp[SPEC_OCT];       /* the half-octave splitter        */
@@ -3156,7 +3213,7 @@ static void ui_wave_anim_start(void)
     /* cycles(), not 0 -- ui_wave_anim_tick() compares
      * (int32_t)(cycles() - wv_next) < 0, which against 0 is just the sign of
      * the counter, so this animation was dead for the same half of every
-     * 71.6 s wrap as the loading dots beside it. */
+     * 64.4 s wrap as the loading dots beside it. */
     wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
     wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
     wv_tr    = 0;
@@ -3290,7 +3347,7 @@ static void ui_boot_note(const char *msg)
     ui_boot_t    = 0;
     /* cycles(), not 0. The tick tests (int32_t)(cycles() - ui_boot_next) < 0,
      * which with 0 reduces to the SIGN OF THE COUNTER -- so for the half of
-     * every 71.6 s wrap where cycles() is above 2^31 the tick returned early,
+     * every 64.4 s wrap where cycles() is above 2^31 the tick returned early,
      * never painted, and never updated the deadline either. The dots were dead
      * for the whole of roughly every other load, which is why they were
      * "rarely seen". Same fault as fl_ui_next and pl_poll_at in c501764. */
@@ -4282,10 +4339,21 @@ static void ui_draw_dynamic(void)
 
             {   /* A new playlist means a new label. Cheap identity: the
                  * first character plus the length, which is enough to catch a
-                 * change without keeping a copy of the name. */
+                 * change without keeping a copy of the name.
+                 *
+                 * A track picked with Load MP3 hashes to 0, the same as having
+                 * no playlist at all. That is not just so the guard below
+                 * blanks the label -- it is what INVALIDATES the cached face.
+                 * pl_name_full still holds the last playlist's name after a
+                 * Load MP3 (nothing clears it, by design: the remembered
+                 * playlist survives playing a one-off track), so hashing the
+                 * name alone gives the same value either way, tape_face is
+                 * never cleared, and the stale label stays painted however the
+                 * guard reads. */
                 uint32_t nh = 0;
-                for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
-                    nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
+                if (track_from_pl)
+                    for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
+                        nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
                 if (nh != tape_name_h) { tape_name_h = nh; tape_face = 0; }
             }
             if (wf || ww != tape_face_w) tape_face = 0;
@@ -4322,8 +4390,17 @@ static void ui_draw_dynamic(void)
                 /* The playlist's name, written on the label like a real one.
                  * Blank for a single track opened with Load MP3 -- there is no
                  * album to name then, and an empty label is what a blank tape
-                 * looks like anyway. */
-                if (pl_count && pl_name_full[0]) {
+                 * looks like anyway.
+                 *
+                 * track_from_pl is the test, not pl_count. pl_count is only
+                 * ever zeroed by the playlist PARSER, so after a Load MP3 it
+                 * still holds the previous list's length and this guard passed
+                 * -- the intent above was written but never took effect, and
+                 * the tape carried the last playlist's name over a track that
+                 * had nothing to do with it. track_from_pl is already the
+                 * flag for "the playlist started this track"; resume uses it
+                 * the same way. */
+                if (track_from_pl && pl_count && pl_name_full[0]) {
                     /* Without the extension. Nobody writes ".m3u" on a
                      * cassette label. */
                     char nm[PL_FULL_MAX + 1u];
@@ -4393,7 +4470,29 @@ static void ui_draw_dynamic(void)
 
             {   /* The shell RIM takes overall level. One thin outline round
                  * the largest perimeter here, so it reads at a glance, and
-                 * nothing else paints those rows. */
+                 * nothing else paints those rows.
+                 *
+                 * peak_amp scaled LINEARLY, and it stays that way. This reads
+                 * like a bug and is not one: peak_amp is a per-frame PEAK and
+                 * modern masters sit near full scale almost continuously, so
+                 * lvl>>5 spends most of its life pinned at 7 and the rim barely
+                 * changes colour. That is the same fault the spectrum had before
+                 * v1.4.0 -- "a linear meter spends nearly all its range on the
+                 * top 6 dB" -- so the obvious fix is to drive it from the
+                 * published bands, which are already log-scaled and already
+                 * carry the ballistics.
+                 *
+                 * TRIED, 2026-09-23, on hardware. It works, and the user did not
+                 * like how it looked: a rim that moves competes with the tape
+                 * glow instead of framing it. Reverted on preference, not on
+                 * fault. Do not re-derive this -- if it is revisited, the
+                 * question is whether the rim should react AT ALL, not which
+                 * number drives it.
+                 *
+                 * (If it ever is driven from the bands, only the four that
+                 * SPEC_TAPE_STAGES computes are valid here. The cascade skips
+                 * the split for every stage the cassette does not read, so the
+                 * other twelve are stale by however long it has been showing.) */
                 uint32_t lvl = (peak_amp * 255u) / 32768u;
                 if (lvl > 255u) lvl = 255u;
                 if (paused) lvl = 0;
@@ -5845,14 +5944,22 @@ ui_tail:
          * decoder is not fast enough. Those need opposite fixes, and without
          * this row the two are indistinguishable from the couch. */
         /* L/R/P are retired: they did their job -- the 48 kHz gate is set
-         * from the numbers they produced -- and FLAC_PROFILE is now 0. What
-         * remains is what the one OPEN defect needs: F names why a load
-         * failed. */
+         * from the numbers they produced -- and FLAC_PROFILE is now 0.
+         *
+         * F (fl_open_err/fl_open_fails) is retired too, and less gracefully:
+         * b63644d deleted both variables on 2026-08-15 but left this row
+         * referencing them, so UI_SHOW_SPEED_DIAG=1 did not COMPILE for over
+         * a month. Nothing caught it because the flag ships at 0. If a field
+         * is removed, remove its use here in the same commit -- a diagnostic
+         * that cannot be built is worse than no diagnostic, because it is
+         * discovered at the moment it is needed. */
         *q++ = 'D'; q = ui_dec(q, fl_idle_pct);
         *q++ = ' '; *q++ = 'O'; q = ui_dec(q, fl_io_pct);
         *q++ = ' '; *q++ = 'U'; q = ui_dec(q, pcm_under_n);
-        *q++ = ' '; *q++ = 'F'; q = ui_dec(q, fl_open_err);
-        *q++ = '/'; q = ui_dec(q, fl_open_fails);
+        /* Seek-probe staleness, 2026-09-23: S = poison survived a read the
+         * hardware called complete, P = probes issued. S0 clears the theory. */
+        *q++ = ' '; *q++ = 'S'; q = ui_dec(q, fl_probe_stale);
+        *q++ = '/'; q = ui_dec(q, fl_probe_reads);
         *q = 0;
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
@@ -6026,11 +6133,14 @@ static void meters_feed(const short *pcm, int n, int stereo)
          * stop after a stage or two, because the lower stages run at a
          * fraction of the rate. */
         if (viz_mode == VIZ_LED || viz_mode == VIZ_TAPE) {
+            const uint32_t need = (viz_mode == VIZ_LED) ? 0xFFu
+                                                        : SPEC_TAPE_STAGES;
             for (int i = 0; i < n; i += (stereo ? 2 : 1)) {
                 int32_t x = stereo ? (((int32_t)pcm[i] + (int32_t)pcm[i + 1]) >> 1)
                                    : (int32_t)pcm[i];
                 for (uint32_t o = 0; o < SPEC_OCT; o++) {
                     spec_lp[o] += (x - spec_lp[o]) >> SPEC_SH;
+                  if (need & (1u << o)) {
                     int32_t hp = x - spec_lp[o];
 
                     /* Split the octave in two. Extending the cascade instead
@@ -6046,6 +6156,7 @@ static void meters_feed(const short *pcm, int n, int stereo)
 
                     spec_acc[o * 2u]      += (uint32_t)(sh < 0 ? -sh : sh);
                     spec_acc[o * 2u + 1u] += (uint32_t)(sl < 0 ? -sl : sl);
+                  }
 
                     if (++spec_cnt[o] & 1u) break;   /* half rate below here */
                     x = spec_lp[o];
@@ -6137,8 +6248,8 @@ static uint32_t ui_dump_mode;            /* dump screen is up; drawing paused  *
 /* Arm the idle timer. Called on every button press and whenever the timeout
  * setting changes. */
 /* Counts SECONDS, deliberately. A cycles() deadline cannot express this: the
- * counter is 32-bit at 60 MHz, so it wraps every 71.6 s and the usual
- * (int32_t)(cycles() - deadline) >= 0 idiom only spans 35.8 s. One minute is
+ * counter is 32-bit at 66.67 MHz, so it wraps every 64.4 s and the usual
+ * (int32_t)(cycles() - deadline) >= 0 idiom only spans 32.2 s. One minute is
  * already past that and two minutes overflows the multiply outright, so the
  * first version could not have worked at any setting. Every other timeout in
  * this core is sub-second, which is why nothing had hit the ceiling before.
@@ -6215,6 +6326,48 @@ static void resume_pump(void)
     uint32_t w = RS_PACK(f, ui_sec, track_from_pl);
     if (w != resume_word) { resume_word = w; resume_saves++; settings_mark_dirty(); }
 }
+
+#if SEEK_TRACE
+/* Renders the trace half a second after the last seek. Called from the main
+ * loop; costs one compare per pass until a run has actually happened.
+ *
+ * One line per seek, newest last:
+ *   B base used   T target asked   L second landed   U ui_sec before
+ *   s step size   r result: .=moved  =same offset  X=refused
+ *
+ * What to look for: B collapsing back to U while T keeps climbing is the
+ * 30-second intent window giving up (the step accelerates to exactly 30 and
+ * the guard is "< 30"). A run of '=' with U frozen is the search returning
+ * the same offset while the intent runs away. */
+static void seek_trace_dump(void)
+{
+    if (!sk_n || sk_shown == sk_n) return;
+    if ((int32_t)(cycles() - sk_idle) < (int32_t)(CLK_HZ / 2u)) return;
+    sk_shown = sk_n;
+
+    uint32_t first = (sk_n > SEEK_TRACE_N) ? sk_n - SEEK_TRACE_N : 0u;
+    uint32_t rows  = sk_n - first;
+    uint32_t y0    = FB_H - 16u - rows * 16u;
+    for (uint32_t k = 0; k < rows; k++) {
+        uint32_t i = (first + k) & (SEEK_TRACE_N - 1u);
+        char b[48], *q = b;
+        *q++ = 'B'; q = ui_dec(q, sk_base[i]);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, sk_tgt[i]);
+        *q++ = ' '; *q++ = 'L';
+        if (sk_land[i] == 0xFFFFu) { *q++ = '-'; } else q = ui_dec(q, sk_land[i]);
+        *q++ = ' '; *q++ = 'U'; q = ui_dec(q, sk_ui[i]);
+        *q++ = ' '; *q++ = 's'; q = ui_dec(q, sk_secs[i]);
+        *q++ = ' ';
+        *q++ = (sk_at0[i] == 1u) ? '.' : (sk_at0[i] == 2u) ? '=' : 'X';
+        *q = 0;
+        uint32_t y = y0 + k * 16u;
+        uint16_t bg = ui_grad_at(y);
+        fb_rect(UI_MARGIN, y, UI_INNER_W, 16u, bg);
+        fb_set_color(UI_RED, bg);
+        fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+}
+#endif
 
 static void ui_blank_pump(void)
 {
@@ -6398,6 +6551,13 @@ static void poll_input(void)
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
         viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        /* The cascade skips the split for stages the OUTGOING meter did not
+         * read, so their splitter state and accumulators are stale by however
+         * long that meter was up. Clear them, or the first window after a
+         * switch into the spectrum publishes whatever was left behind. */
+        for (uint32_t z = 0; z < SPEC_OCT; z++) spec_slp[z] = 0;
+        for (uint32_t z = 0; z < SPEC_BANDS; z++) spec_acc[z] = 0;
+        spec_n = 0;
         ui_wave_clear();                 /* modes do not share a screen layout */
         ui_wave_force = 1u;
         for (uint32_t i = 0; i < UI_WAVE_N; i++) {
@@ -6792,6 +6952,17 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
      * failure hands the caller a path it already has: every target_read_slot()
      * call site checks the return. A missing cover or a failed load is
      * recoverable; a hang is not. */
+    /* Poison the LAST word of the destination before the command goes out, so
+     * the wait below has something to watch. Safe for every caller: the region
+     * is about to be overwritten by the read, and on failure they all check the
+     * return. Last word, not first -- a sequential transfer fills word 0 early
+     * and the tail last, so watching word 0 clears while the tail is in
+     * flight. */
+    volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)
+                              (UNCACHED + dst_off + ((len - 1u) & ~3u));
+    const uint32_t POISON = 0xA5A5A5A5u;
+    if (len >= 4u) *tail = POISON;
+
     uint32_t rd_t0 = cycles();
     while (!target_read_poll()) {
         ui_boot_tick();
@@ -6804,6 +6975,34 @@ static int target_read_slot(uint32_t slot, uint32_t off, uint32_t dst_off, uint3
         }
     }
     rd_pending = 0;
+
+    /* COMPLETION IS NOT ARRIVAL. The sequence counter says the command
+     * finished; it does not say the last bytes have reached the landing zone.
+     * Callers here read the buffer on the very next instruction, and at
+     * 66.667 MHz that is too soon -- which is what broke FLAC seek, where a
+     * stale tail became a wrong frame number and sent the search to the wrong
+     * part of the file. At 60 MHz every caller happened to be late enough.
+     *
+     * Fixed HERE rather than in the one caller where the symptom showed,
+     * because the exposure is everywhere: ID3v1 and ID3v2 parsing, the FLAC
+     * metadata walk, the identity polls, the ring prefill, and artwork at
+     * 43-207 reads a track. A stale tail in a cover is a subtly wrong image,
+     * not an obvious fault, and nobody would connect it to this.
+     *
+     * Waits on the CONDITION, so there is no constant to re-tune when the
+     * clock next moves, and it costs nothing when the data is already there.
+     * Bounded, because a genuine 0xA5A5A5A5 at the tail or a short read must
+     * fall through rather than wedge -- falling through is what the code did
+     * unconditionally before. */
+    if (rd_ok && len >= 4u) {
+        fl_probe_reads++;
+        if (*tail == POISON) {
+            fl_probe_stale++;          /* S on the diag row: how often it fires */
+            uint32_t w0 = cycles();
+            while (*tail == POISON &&
+                   (int32_t)(cycles() - w0) < (int32_t)(CLK_HZ / 1000u)) { }
+        }
+    }
     return rd_ok;
 }
 
@@ -7402,6 +7601,40 @@ static void flac_scan_metadata(void)
  * thrown away would cost far more than the 512 bytes a probe needs. */
 static uint32_t fl_probe_pos;
 
+/* Waits for the data to LAND, not merely for the command to report complete.
+ *
+ * Seek broke at 66.667 MHz and worked at 60, on identical files. Three
+ * observations, all consistent:
+ *
+ *   clean firmware @ 66.667   fails
+ *   the same @ 60             works
+ *   an INSTRUMENTED build @ 66.667, which added an uncached read between the
+ *                             completion and the copy, works
+ *
+ * The third is the telling one: a few cycles of delay in exactly that gap is
+ * the difference. The completion tells us the command finished, not that the
+ * last bytes have arrived in the landing zone -- so the copy below was reading
+ * a partly stale buffer. A stale probe yields a wrong frame number, the
+ * false-position search converges on the wrong bracket, and the seek lands
+ * somewhere arbitrary. "It jumps around" is that, exactly. At 60 MHz the CPU
+ * reached the copy late enough to be safe by accident.
+ *
+ * The guard poisons the LAST word and waits for it to change. The last word,
+ * not the first: a sequential transfer fills word 0 early and the tail last,
+ * so watching word 0 would clear while the tail was still in flight. The
+ * instrumentation that led here made exactly that mistake and would have
+ * reported all-clear with the bug live -- it only appeared to work because
+ * reading word 0 was itself the delay that let the tail land.
+ *
+ * Waiting on the CONDITION rather than pausing a fixed amount is the point: no
+ * constant to re-tune when the clock moves again, and it costs nothing once the
+ * data is already there. Bounded at 1 ms so a genuine 0xA5A5A5A5 in the file --
+ * or a short read -- cannot wedge it; falling through with what arrived is what
+ * the old code did unconditionally.
+ *
+ * Only the PROBE path needs this. The streaming refill consumes the ring
+ * through a different route that never reads straight off a just-signalled
+ * completion. */
 static int flac_probe_pull(void *ctx, uint8_t *dst, int n)
 {
     (void)ctx;
@@ -7410,6 +7643,9 @@ static int flac_probe_pull(void *ctx, uint8_t *dst, int n)
     if (want > 512u) want = 512u;
     if (fl_probe_pos + want > slot_size) want = slot_size - fl_probe_pos;
     if (!want) return 0;
+
+    /* The landing-zone wait lives in target_read_slot() now -- this path is
+     * where the fault was FOUND, not where it was unique. */
     if (!target_read_slot(MP3_SLOT_ID, fl_probe_pos, TAG_OFF, want)) return 0;
     for (uint32_t i = 0; i < want; i++) dst[i] = tagbuf[i];
     fl_probe_pos += want;
@@ -8575,7 +8811,7 @@ static int load_track(void)
     /* Arm the free-running-counter deadlines from NOW.
      *
      * Both are compared as `(int32_t)(cycles() - deadline) >= 0`, which is the
-     * right way to handle a 32-bit counter that wraps every 71.6 s -- but only
+     * right way to handle a 32-bit counter that wraps every 64.4 s -- but only
      * once the deadline holds a real timestamp. Left at 0, the comparison
      * reduces to the sign of cycles() itself, so a track loaded while the
      * counter sits in its upper half reads NEGATIVE and the timer does not
@@ -8968,21 +9204,69 @@ static int load_track(void)
     return 1;
 }
 
+/* Centred line, for the one screen that runs before any UI state exists.
+ * Deliberately not ui_gs_line(): that reads ui_accent and the gradient, which
+ * are loaded later, and this has to work when the RTL underneath may be the
+ * wrong revision. Flat background, fixed colours, nothing else. */
+static void ui_mid_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
+{
+    uint32_t w = fb_text_width(s, ts);
+    uint32_t x = (w < FB_W) ? ((FB_W - w) / 2u) : 0u;
+    fb_set_color(fg, UI_BG);
+    fb_text_clipped(x, y, s, ts, ts, FB_W - x);
+}
+
+/* The firmware and the bitstream did not ship together.
+ *
+ * This REPLACED a silent halt. The old version wrote a pattern to R_STAT0..3
+ * and spun -- but those are status registers, not the framebuffer, so nothing
+ * reached the screen; and it ran BEFORE the clear below, so what the user got
+ * was uninitialised SDRAM noise or black, with no hint that anything was
+ * wrong. It was indistinguishable from the core being broken.
+ *
+ * Wording is deliberately install-method neutral. Some users update through
+ * pupdate or the openFPGA library, others copy the zip by hand; "reinstall"
+ * is the one instruction that is right for all of them. The revisions are
+ * there for bug reports, small and last, not as the message. */
+static void ui_mismatch_screen(uint32_t got, uint32_t want)
+{
+    char b[48], *q = b;
+    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_15X);
+    ui_mid_line(168u, "Some core files are from a",     UI_WHITE, TS_1X);
+    ui_mid_line(186u, "different version.",             UI_WHITE, TS_1X);
+    ui_mid_line(220u, "Reinstall MP3 Player.",          UI_WHITE, TS_1X);
+    { const char *t = "core r";      while (*t) *q++ = *t++; }
+    q = ui_dec(q, got  & 0xFFu);
+    { const char *t = "   firmware r"; while (*t) *q++ = *t++; }
+    q = ui_dec(q, want & 0xFFu);
+    *q = 0;
+    ui_mid_line(300u, b, UI_DIM, TS_1X);
+}
+
 int main(void)
 {
-    /* Bitstream/firmware interlock. On mismatch paint an unmistakable pattern
-     * and stop, rather than running on stale RTL and presenting it as a
-     * mysterious hardware fault. */
+    /* Clear the screen FIRST. SDRAM powers up holding garbage and the scanout
+     * engine displays it the moment video comes alive, so anything slow before
+     * the first fill is visible as a screenful of noise.
+     *
+     * It also has to happen before the interlock below, which now DRAWS.
+     * That ordering is the whole fix. */
+    fb_rect(0, 0, FB_W, FB_H, UI_BG);
+
+    /* Bitstream/firmware interlock. Say what is wrong and what to do, then
+     * stop -- rather than running on stale RTL and presenting it as a
+     * mysterious hardware fault.
+     *
+     * Safe to draw here even though the RTL may be the wrong revision: the
+     * draw engine runs on clk_sdram and the RUN/RECT/CHAR commands have not
+     * changed. If some future revision did break drawing, this lands on the
+     * black screen it replaced -- never worse, usually far better. */
     if (REG(R_VERSION) != EXPECT_VERSION) {
         REG(R_STAT0) = 0xAAAAAAAAu; REG(R_STAT1) = 0x55555555u;
         REG(R_STAT2) = 0xAAAAAAAAu; REG(R_STAT3) = 0x55555555u;
+        ui_mismatch_screen(REG(R_VERSION), EXPECT_VERSION);
         for (;;) { }
     }
-
-    /* Clear the screen FIRST. SDRAM powers up holding garbage and the scanout
-     * engine displays it the moment video comes alive, so anything slow before
-     * the first fill is visible as a screenful of noise. */
-    fb_rect(0, 0, FB_W, FB_H, UI_BG);
 
     vol_apply();
 
@@ -9178,6 +9462,9 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+#if SEEK_TRACE
+        seek_trace_dump();
+#endif
         resume_pump();
 
         /* Keeps the LOADING dots moving through the reload gate. ui_boot_tick()
@@ -9992,6 +10279,31 @@ int main(void)
                 uint32_t at = flac_seek_locate((uint64_t)tgt * (uint64_t)fl.rate,
                                                &landed);
                 seek_req = 0;
+#if SEEK_TRACE
+                /* Four stores. NOTHING is drawn here.
+                 *
+                 * UI_SHOW_SEEK_DIAG repaints a text row every second through
+                 * the font engine, and that is work inside the path under
+                 * test: with it on, the defect this is chasing stops
+                 * reproducing. The same thing happened to the probe-poison
+                 * instrument earlier. An instrument that changes the timing
+                 * of a timing bug measures nothing.
+                 *
+                 * So capture into memory while seeking and render only once
+                 * the run is over -- see the dump below. */
+                {
+                    uint32_t i = sk_n & (SEEK_TRACE_N - 1u);
+                    sk_tgt[i]  = (uint16_t)tgt;
+                    sk_base[i] = (uint16_t)base;
+                    sk_ui[i]   = (uint16_t)ui_sec;
+                    sk_land[i] = (uint16_t)(at && fl.rate
+                                            ? (landed / (uint64_t)fl.rate) : 0xFFFFu);
+                    sk_at0[i]  = (uint8_t)(at ? (at == file_pos ? 2u : 1u) : 0u);
+                    sk_secs[i] = (uint8_t)secs;
+                    sk_n++;
+                    sk_idle = cycles();
+                }
+#endif
 #if UI_SHOW_SEEK_DIAG
                 /* A REFUSED seek leaves the rows stale and reads as "nothing
                  * happened", which is the one outcome that must not be

@@ -1,6 +1,6 @@
 // mf_pllbase.v - PLL wrapper for the MP3 player core.
 //
-// 74.25 MHz in -> 60 MHz (clk_sys) + 12 MHz (clk_vid) + 12 MHz 90deg
+// 74.25 MHz in -> 66.667 MHz (clk_sys) + 12 MHz (clk_vid) + 12 MHz 90deg
 //              + 100 MHz (SDRAM framebuffer)
 //
 // The header and the port comments below both described a different core and a
@@ -11,7 +11,7 @@
 module mf_pllbase (
     input  wire  refclk,
     input  wire  rst,
-    output wire  outclk_0,  // 60 MHz  - CPU / system clock (clk_sys)
+    output wire  outclk_0,  // 66.667 MHz - CPU / system clock (clk_sys)
     output wire  outclk_1,  // 12 MHz  - pixel clock (clk_vid)
     output wire  outclk_2,  // 12 MHz 90 deg - APF DDR pixel clock
     output wire  outclk_3,  // 100 MHz - SDRAM framebuffer controller
