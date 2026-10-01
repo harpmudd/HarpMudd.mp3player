@@ -4,12 +4,10 @@ What changed in each release, newest first.
 
 ## v1.5.1 — 23 September 2026
 
-- **FLAC files that stuttered now play cleanly.** The core runs at 66.7 MHz
-  instead of 60, which gives every track more room. The most demanding
-  24-bit files at high bitrates are better but can still break up.
-- **A part-finished update now says so** instead of showing a black screen.
-  Copying only some of the core's files used to leave it playing at the wrong
-  speed with nothing to explain why.
+- **Fewer FLAC files stutter.** The core runs at 66.7 MHz instead of 60, which
+  gives every track more room. Files that were close to the edge now play
+  cleanly; demanding ones can still break up.
+- **An incomplete update now says so** instead of showing a black screen.
 
 ## v1.5.0 — 18 September 2026
 
