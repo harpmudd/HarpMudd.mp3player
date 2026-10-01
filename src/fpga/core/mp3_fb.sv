@@ -430,19 +430,19 @@ module mp3_fb (
     function [4:0] cov_weight(input [3:0] c);
         case (c)
             4'd0 : cov_weight = 5'd0;
-            4'd1 : cov_weight = 5'd4;
-            4'd2 : cov_weight = 5'd6;
-            4'd3 : cov_weight = 5'd7;
-            4'd4 : cov_weight = 5'd8;
-            4'd5 : cov_weight = 5'd10;
+            4'd1 : cov_weight = 5'd2;
+            4'd2 : cov_weight = 5'd4;
+            4'd3 : cov_weight = 5'd5;
+            4'd4 : cov_weight = 5'd7;
+            4'd5 : cov_weight = 5'd8;
             4'd6 : cov_weight = 5'd10;
             4'd7 : cov_weight = 5'd11;
             4'd8 : cov_weight = 5'd12;
             4'd9 : cov_weight = 5'd13;
-            4'd10: cov_weight = 5'd13;
-            4'd11: cov_weight = 5'd14;
+            4'd10: cov_weight = 5'd14;
+            4'd11: cov_weight = 5'd15;
             4'd12: cov_weight = 5'd15;
-            4'd13: cov_weight = 5'd15;
+            4'd13: cov_weight = 5'd16;
             4'd14: cov_weight = 5'd16;
             4'd15: cov_weight = 5'd16;
         endcase
