@@ -4,8 +4,9 @@ What changed in each release, newest first.
 
 ## v1.5.1 — 23 September 2026
 
-- **Fewer FLAC files stutter.** The core runs at 66.7 MHz instead of 60, which
-  gives every track more room.
+- **The core runs faster.** Its processor moved from 60 MHz to 66.7, so
+  everything it does has 11% more time to do it in.
+- **Fewer FLAC files stutter**, with that extra room.
 - **An incomplete update now says so** instead of showing a black screen.
 
 ## v1.5.0 — 18 September 2026
