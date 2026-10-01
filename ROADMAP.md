@@ -12,7 +12,85 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
-# v1.6.0 -- FLAC performance
+# v1.6.0 -- FLAC, fixed
+
+**Planned 2026-10-01, after v1.5.1 shipped.** Phases 0, 1 and 2 of the
+investigation below went out in v1.5.1: the diagnostic repair, the cascade
+gating, and clk_sys 60 -> 66.667 MHz. The clock also retired the 1.2x
+distortion limitation outright. What it did NOT do is close the FLAC
+underruns, because those are variance rather than average shortfall -- see
+"The underruns are VARIANCE" below, the most load-bearing finding on this
+page.
+
+## The keystone: M10K is at 301/308
+
+Almost everything below is blocked by block RAM, not by ideas. The SDRAM
+migration -- moving `pl_text` and `art_acc` out of BRAM -- unblocks the deeper
+FIFO, the font fix, lyrics and AAC. It ships nothing visible on its own, which
+is exactly why it kept being deferred, and why it goes FIRST this time.
+
+Note this file contradicts itself on that point, and the later entry wins: the
+migration was declared "NOT a prerequisite for the FLAC work", then the
+variance finding reversed it. It IS on the FLAC path -- for the FIFO, not for
+the Rice decoder.
+
+## Phase 1 -- SDRAM migration (prerequisite)
+
+Move `pl_text` and `art_acc` to SDRAM. No user-visible change. Everything below
+either needs this or is independent of it; nothing is blocked BY it. Estimate
+2-3 hardware sessions.
+
+## Phase 2 -- Fixes
+
+- **F1. Held seek on a FLAC wedges and jumps backwards.** The open defect
+  carried out of v1.5.1. Not reproducible; `SEEK_TRACE` is already in the
+  firmware at default 0. Highest priority -- write-up further down this file.
+- **F2. Seeking a VBR MP3 lands the clock wrong.** Deferred from v1.5.0,
+  measured at -3.4 / -3.1 / -1.3 s on Xing files. Held until lyrics, because
+  lyrics are what make a few seconds of clock error matter.
+- **F3. Headerless VBR estimates the total time.** Already dropped from the
+  README. Low value; listed so it is not rediscovered as new.
+
+## Phase 3 -- Enhancements
+
+- **E1. PCM FIFO 2048 -> 4096.** THE fix for FLAC stutter. A frame is 104 ms
+  against a 46 ms FIFO, so throughput cannot close it. Needs 8 M10K and 7 are
+  free -- misses by one, which is what Phase 1 is for.
+- **E2. Rice decoder in fabric.** The headline. 60-76% of decode into the
+  resource the device has most of. Wants ALMs, not BRAM, so it does NOT depend
+  on Phase 1.
+- **E3. Raise the 48 kHz gate** to what the combination actually supports,
+  measured rather than hoped. Today's README frames a METER cost as a hardware
+  ceiling and tells users to re-encode files that play fine on bars.
+- **E4. Font: the 1.5x title scale resamples**, which is why title stems are
+  uneven. Needs a second cell size through the command, the SDRAM font path and
+  glyphbuf -- RTL work, not generator work. Depends on Phase 1.
+
+## Phase 4 -- Features (candidates, probably 1.7.0)
+
+- **N1. Scrobbler, limited.** No card write of any kind: APF cannot create a
+  file. Session-only, ~124 bits = three or four scrobbles, exported by QR to a
+  static page. Independent of Phase 1.
+- **N2. Lyrics.** Needs Phase 1, and makes F2 worth fixing.
+- **N3. AAC / `.m4a`.** ~1.5x MP3's cost. Needs Phase 1. The user's .m4a files
+  are kept on the NAS for this.
+
+## The cut
+
+**Ship 1.6.0 as "FLAC, fixed": Phase 1 -> E1 -> E2 -> E3, plus F1 if it
+reproduces.** Hold lyrics, AAC and the font fix for 1.7.0 -- each is a
+release's worth of work on its own, and 1.6.0 does not need them to feel like
+something.
+
+**The risk is E2.** It is the one item that could be far harder than it looks:
+3 to 10+ hardware sessions depending on how the bit-reader partitions. If it
+is, Phase 1 + E1 + E3 still ships as a real FLAC improvement, so the release is
+not hostage to it.
+
+---
+
+# The FLAC performance investigation -- Phases 0-2 SHIPPED in v1.5.1
+
 
 **Scope set 2026-09-22, and it was re-scoped MID-PLANNING on measurement.** The
 release was going to be the SDRAM migration with fixes attached. Three readings
@@ -250,15 +328,21 @@ the cheap items and the clock together. Phase 1 ALONE does not clear either
 measured file -- that is measured, not assumed -- so the clock is load-bearing
 for the release having a user-visible result at all.
 
-## Deliberately out
+## Deliberately out -- as decided 2026-09-22; TWO have since moved
 
 - **The SDRAM migration**, moved to 1.7.0 and correctly positioned as groundwork
   for lyrics and AAC rather than for FLAC. The analysis stands; the ordering
   argument for it did not.
-- **Lyrics**, after the migration.
+  **SUPERSEDED 2026-09-23:** the variance finding put it back on the FLAC path,
+  because freeing BRAM is what a deeper FIFO needs. It is now Phase 1 of 1.6.0.
+- **Lyrics**, after the migration. (Still out; now a 1.7.0 candidate, N2.)
 - **Hi-res FLAC rejected at boot, boots stopped** -- user, 2026-09-22: not now.
 - **Issue #3 (black screen on missing mp3player.rom)** and the interlock bump.
   Interlock stays at rev 21, so no new black-screen exposure is created.
+  **SUPERSEDED in v1.5.1:** the interlock IS at rev 22, and bumping became safe
+  because `ui_mismatch_screen()` landed first -- the screen clear moved ahead of
+  the check, so a mismatched pair draws a readable message instead of the black
+  screen that made the bump dangerous. The ordering was the whole point.
 - **24/192.** Double 24/96 again; nothing on this list reaches it.
 ## Font clarity: 1.5x is the only scale that RESAMPLES -- 2026-09-30
 
