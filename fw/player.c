@@ -1342,6 +1342,32 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #ifndef UI_SHOW_SEEK_DIAG
 #define UI_SHOW_SEEK_DIAG 0
 #endif
+
+/* SEEK_TRACE -- a seek recorder that does not disturb what it records.
+ *
+ * UI_SHOW_SEEK_DIAG above is the richer instrument, and it is useless for the
+ * held-seek defect: it repaints a text row every second through the font
+ * engine, which is real work inside the path under test, and with it enabled
+ * the fault stops reproducing. (The probe-poison instrument before it failed
+ * the same way, for the same reason, and that one accidentally FIXED the bug
+ * it was built to find.)
+ *
+ * This writes six values per seek and draws nothing. The dump happens half a
+ * second after the last seek, by which time the run is over and the timing no
+ * longer matters.
+ *
+ *     EXTRA_CFLAGS="-DSEEK_TRACE=1" bash fw/build.sh
+ */
+#ifndef SEEK_TRACE
+#define SEEK_TRACE 0
+#endif
+#if SEEK_TRACE
+#define SEEK_TRACE_N 16u                 /* power of two: index is masked */
+static uint16_t sk_tgt[SEEK_TRACE_N], sk_base[SEEK_TRACE_N];
+static uint16_t sk_ui[SEEK_TRACE_N], sk_land[SEEK_TRACE_N];
+static uint8_t  sk_at0[SEEK_TRACE_N], sk_secs[SEEK_TRACE_N];
+static uint32_t sk_n, sk_idle, sk_shown;
+#endif
 #if UI_SHOW_SEEK_DIAG
 static uint32_t dg_tgt, dg_at, dg_pos, dg_ui, dg_blk, dg_rate;
 /* The load-path fields. Copied rather than read where the rows are drawn:
@@ -6301,6 +6327,48 @@ static void resume_pump(void)
     if (w != resume_word) { resume_word = w; resume_saves++; settings_mark_dirty(); }
 }
 
+#if SEEK_TRACE
+/* Renders the trace half a second after the last seek. Called from the main
+ * loop; costs one compare per pass until a run has actually happened.
+ *
+ * One line per seek, newest last:
+ *   B base used   T target asked   L second landed   U ui_sec before
+ *   s step size   r result: .=moved  =same offset  X=refused
+ *
+ * What to look for: B collapsing back to U while T keeps climbing is the
+ * 30-second intent window giving up (the step accelerates to exactly 30 and
+ * the guard is "< 30"). A run of '=' with U frozen is the search returning
+ * the same offset while the intent runs away. */
+static void seek_trace_dump(void)
+{
+    if (!sk_n || sk_shown == sk_n) return;
+    if ((int32_t)(cycles() - sk_idle) < (int32_t)(CLK_HZ / 2u)) return;
+    sk_shown = sk_n;
+
+    uint32_t first = (sk_n > SEEK_TRACE_N) ? sk_n - SEEK_TRACE_N : 0u;
+    uint32_t rows  = sk_n - first;
+    uint32_t y0    = FB_H - 16u - rows * 16u;
+    for (uint32_t k = 0; k < rows; k++) {
+        uint32_t i = (first + k) & (SEEK_TRACE_N - 1u);
+        char b[48], *q = b;
+        *q++ = 'B'; q = ui_dec(q, sk_base[i]);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, sk_tgt[i]);
+        *q++ = ' '; *q++ = 'L';
+        if (sk_land[i] == 0xFFFFu) { *q++ = '-'; } else q = ui_dec(q, sk_land[i]);
+        *q++ = ' '; *q++ = 'U'; q = ui_dec(q, sk_ui[i]);
+        *q++ = ' '; *q++ = 's'; q = ui_dec(q, sk_secs[i]);
+        *q++ = ' ';
+        *q++ = (sk_at0[i] == 1u) ? '.' : (sk_at0[i] == 2u) ? '=' : 'X';
+        *q = 0;
+        uint32_t y = y0 + k * 16u;
+        uint16_t bg = ui_grad_at(y);
+        fb_rect(UI_MARGIN, y, UI_INNER_W, 16u, bg);
+        fb_set_color(UI_RED, bg);
+        fb_text_clipped(UI_MARGIN, y, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+}
+#endif
+
 static void ui_blank_pump(void)
 {
     if (screen_blank || !blank_min) return;
@@ -9394,6 +9462,9 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+#if SEEK_TRACE
+        seek_trace_dump();
+#endif
         resume_pump();
 
         /* Keeps the LOADING dots moving through the reload gate. ui_boot_tick()
@@ -10208,6 +10279,31 @@ int main(void)
                 uint32_t at = flac_seek_locate((uint64_t)tgt * (uint64_t)fl.rate,
                                                &landed);
                 seek_req = 0;
+#if SEEK_TRACE
+                /* Four stores. NOTHING is drawn here.
+                 *
+                 * UI_SHOW_SEEK_DIAG repaints a text row every second through
+                 * the font engine, and that is work inside the path under
+                 * test: with it on, the defect this is chasing stops
+                 * reproducing. The same thing happened to the probe-poison
+                 * instrument earlier. An instrument that changes the timing
+                 * of a timing bug measures nothing.
+                 *
+                 * So capture into memory while seeking and render only once
+                 * the run is over -- see the dump below. */
+                {
+                    uint32_t i = sk_n & (SEEK_TRACE_N - 1u);
+                    sk_tgt[i]  = (uint16_t)tgt;
+                    sk_base[i] = (uint16_t)base;
+                    sk_ui[i]   = (uint16_t)ui_sec;
+                    sk_land[i] = (uint16_t)(at && fl.rate
+                                            ? (landed / (uint64_t)fl.rate) : 0xFFFFu);
+                    sk_at0[i]  = (uint8_t)(at ? (at == file_pos ? 2u : 1u) : 0u);
+                    sk_secs[i] = (uint8_t)secs;
+                    sk_n++;
+                    sk_idle = cycles();
+                }
+#endif
 #if UI_SHOW_SEEK_DIAG
                 /* A REFUSED seek leaves the rows stale and reads as "nothing
                  * happened", which is the one outcome that must not be
