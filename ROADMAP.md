@@ -36,6 +36,69 @@ the Rice decoder.
 
 ## Phase 1 -- SDRAM migration (prerequisite)
 
+### STOP -- the migration ALONE frees ZERO M10K. Verified 2026-10-01.
+
+Before building anything, the premise was checked against the fit report, and
+it does not hold as written.
+
+`mp3_soc` builds RAM as four byte-wide arrays `ram0..ram3`. The fit report
+gives each one **64 M10K, 524,288 bits** -- so the CPU RAM is **256 of the 301
+blocks used, 85% of all block RAM in the design.**
+
+M10K returns blocks only when `RAM_WORDS` shrinks. It does NOT return them
+when the firmware image gets smaller inside a RAM that stays the same size.
+Moving `pl_text` and `art_acc` out frees **23,328 bytes of IMAGE** and **0
+blocks**, because RAM_WORDS is still 65536.
+
+And RAM_WORDS cannot simply be lowered: it **must be a power of two**. 49152
+was tried and Quartus built the memory out of logic instead of M10K --
+`Error (170012): Fitter requires 3621 LABs ... device contains only 1848`. The
+only step below 65536 is 32768 = 128 KB, and the image is ~252 KB. Unreachable.
+
+**So Phase 1 as planned would have been built, measured, and found to free
+nothing.** E1 would still miss by its 8 blocks.
+
+### The correction: bank the RAM, THEN migrate
+
+The power-of-two rule applies to a SINGLE declared array, not to the total. A
+non-power-of-two RAM composes cleanly from power-of-two sub-banks with address
+decode, and each bank infers into M10K correctly:
+
+| total | banks (words) | M10K | freed | image must fit |
+|---|---|---|---|---|
+| 256 KB | 65536 | 256 | -- | 256 KB (today, 3,536 B slack) |
+| 224 KB | 32768 + 16384 + 8192 | 224 | **32** | 224 KB |
+| 192 KB | 32768 + 16384 | 192 | **64** | 192 KB |
+
+E1 needs 8. Even 224 KB covers it four times over.
+
+**Both halves are required and neither works alone.** Banking frees nothing
+until the image shrinks; the migration frees nothing until RAM_WORDS drops.
+
+To reach 224 KB the image must lose ~32 KB. `pl_text` 12,288 + `art_acc`
+11,040 = 23,328, plus the 3,536 already slack, is 26,864 -- **short by ~5.9
+KB**. Close the gap with the 4 KB tag buffer, or by taking the ring from 24 KB
+to 16 KB (the card measures 736 KB/s against 40 KB/s of demand, so the margin
+is there), or with `-Os` on cold text (`load_track` alone is ~4-5 KB).
+
+### Revised order
+
+1. **Bank the RAM** behind power-of-two sub-arrays. Cheap, self-contained,
+   and provable with an A&S run alone -- no hardware needed to know it infers.
+2. **Build the CPU<->SDRAM window**, still the real work item and the real
+   risk: scanout `FILL` has a one-scanline hard deadline and always wins
+   arbitration. See "The first work item is not a buffer, it is a PORT" below.
+3. **Move `pl_text`**, then `art_acc`. Cold buffers, no real-time exposure.
+4. **Drop RAM to 224 KB** and confirm the blocks actually come back in the fit
+   report before relying on them for E1.
+
+Step 4 is the one that must be verified rather than assumed, because the whole
+point of this entry is that the obvious reasoning about M10K was wrong once
+already.
+
+### Original plan, kept for the reasoning
+
+
 Move `pl_text` and `art_acc` to SDRAM. No user-visible change. Everything below
 either needs this or is independent of it; nothing is blocked BY it. Estimate
 2-3 hardware sessions.
