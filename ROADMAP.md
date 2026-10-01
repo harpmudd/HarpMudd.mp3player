@@ -260,6 +260,58 @@ for the release having a user-visible result at all.
 - **Issue #3 (black screen on missing mp3player.rom)** and the interlock bump.
   Interlock stays at rev 21, so no new black-screen exposure is created.
 - **24/192.** Double 24/96 again; nothing on this list reaches it.
+## Font clarity: 1.5x is the only scale that RESAMPLES -- 2026-09-30
+
+Investigated with `tools/font_clarity.py`, which reproduces the whole path --
+FreeType raster, the rounded 4-bit quantiser, cov_weight()'s gamma LUT, the
+RGB565 integer blend, and the Pocket's 4x NEAREST upscale -- so candidates can
+be compared without a hardware trip. Output: docs/font_clarity.png.
+
+**The display is the constraint.** 400x360 goes to the 1600x1440 panel at an
+exact 4x, nearest neighbour, so every UI pixel is a hard 4x4 block. Anti-
+aliasing cannot soften an edge here; it can only choose which blocks are grey.
+The win is FEWER, BETTER-PLACED grey blocks, not more AA.
+
+**The actual defect.** cmd_sx/cmd_sy encode 1x, 1.5x, 2x, 3x and the engine
+Bresenham-scales a 16x16 source cell. The integer scales replicate cleanly;
+**1.5x is the only one that resamples**, duplicating some source columns and
+not others, which comes out as stems of UNEVEN THICKNESS. It reads as badly
+drawn rather than merely soft.
+
+TS_15X is used by the elapsed/total TIME readout, the "Getting started"
+heading and the mismatch screen -- so the clock a user watches constantly is
+the worst-rendered text on screen.
+
+| option | result | cost |
+|---|---|---|
+| keep 1.5x | uneven stems | none |
+| integer 2x | even stems, but AA blocks double to 8x8 and it is 33% taller | layout change only |
+| render at the shown size | clean | **RTL: the engine only reads 16x16 cells** |
+
+The third is the right answer and is NOT a generator-side change, which is
+what it looked like before reading mp3_fb.sv. `char_w = 16 * (sx+1)` and the
+glyph fetch both assume a 16-row cell, so a 23px atlas needs a second cell
+size through the command, the SDRAM font path and glyphbuf -- with BRAM at
+98%, glyphbuf growth is not free. 1.6.0 work, not a point release.
+
+### Found on the way: the optical-size setting has never done anything
+
+`gen_font_rom.py` calls `set_variation_by_axes([14.0, 600.0])` inside a
+try/except, but third_party/font holds **Inter-SemiBold.ttf**, a STATIC
+instance with no axes. The call throws and is swallowed on every run. Nothing
+is broken -- SemiBold is what was wanted -- but opsz is not set to 14 or to
+anything else, and the comment implies otherwise. Exploring weight or optical
+size needs Inter's variable font added to third_party/.
+
+### Not pursued: dropping anti-aliasing
+
+A 1-bit hinted render is the CRISPEST row on the sheet, which sits awkwardly
+against gen_font_rom.py's opening argument that greyscale coverage is what
+makes type look "drawn rather than plotted". That argument assumes AA buys
+smooth edges. At 4x nearest it buys grey blocks. Recorded because the premise
+deserves re-examining on this display, not because the change is recommended:
+it would hurt curves and diagonals at other sizes.
+
 # Releasing
 
 **Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
