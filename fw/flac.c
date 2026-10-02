@@ -102,6 +102,38 @@ static uint32_t unary(flac_t *f)
 
 static void align_byte(flac_t *f) { f->bitcnt -= f->bitcnt & 7u; }
 
+/* One whole Rice code out of a single reservoir window: the zeros, the
+ * terminating 1, and `param` remainder bits. Returns 0 if the code is not
+ * wholly present, leaving the reader untouched for the general path.
+ *
+ * This is the hottest thing in the decoder -- the reader is 64-76% of
+ * channel 0's work and this runs once per sample. Calling unary() and then
+ * bits() makes each re-test the reservoir, re-mask it and update bitcnt
+ * separately, and that bookkeeping is a large part of the cost rather than
+ * the extraction itself. Here it is one refill attempt, one clz and one
+ * bitcnt update.
+ *
+ * Deliberately returns 0 rather than handling short data: every
+ * end-of-data and corrupt-stream case stays in the general path, in one
+ * place, instead of being duplicated somewhere hard to prove. A CD rip
+ * carries ~9.6 coded bits per sample and a 24-bit file ~18.5, so a 32-bit
+ * reservoir covers the common case for both. */
+static inline int rice_fast(flac_t *f, uint32_t param, int32_t *outv)
+{
+    if (f->bitcnt < 32u) (void)need(f, 32u);
+    if (!f->bitcnt) return 0;
+    uint64_t win = f->bitacc & (((uint64_t)1 << f->bitcnt) - 1u);
+    if (!win) return 0;                       /* >= bitcnt leading zeros */
+    uint32_t lead = (uint32_t)__builtin_clzll(win) - (64u - f->bitcnt);
+    if (f->bitcnt < lead + 1u + param) return 0;
+    f->bitcnt -= lead + 1u + param;
+    uint32_t rem = param
+        ? (uint32_t)((f->bitacc >> f->bitcnt) & ((1u << param) - 1u)) : 0u;
+    uint32_t v = (lead << param) | rem;
+    *outv = (v & 1u) ? -(int32_t)((v >> 1) + 1u) : (int32_t)(v >> 1);
+    return 1;
+}
+
 /* ------------------------------------------------------------ metadata */
 
 /* ---- Vorbis comments (metadata block type 4) ---------------------------
@@ -443,6 +475,10 @@ static int32_t rice_next(flac_t *f, rice_t *r)
     }
     r->left--;
     if (r->param == r->escape) return sbits(f, r->raw);
+
+    int32_t fv;
+    if (rice_fast(f, r->param, &fv)) return fv;
+
     uint32_t q = unary(f);
     uint32_t v = (q << r->param) | bits(f, r->param);
     return (v & 1u) ? -(int32_t)((v >> 1) + 1u) : (int32_t)(v >> 1);
@@ -471,6 +507,8 @@ static flac_err residual(flac_t *f, uint32_t order, int32_t *out)
             for (uint32_t i = 0; i < count; i++) out[idx++] = sbits(f, raw);
         } else {
             for (uint32_t i = 0; i < count; i++) {
+                int32_t fv;
+                if (rice_fast(f, param, &fv)) { out[idx++] = fv; continue; }
                 uint32_t q = unary(f);
                 uint32_t r = bits(f, param);
                 uint32_t v = (q << param) | r;
