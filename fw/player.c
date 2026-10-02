@@ -762,9 +762,86 @@ static uint32_t fl_probe_stale;      /* poison survived a "complete" read   */
 static uint32_t fl_probe_reads;      /* probes issued, for the ratio        */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
+/* ---- ReplayGain -----------------------------------------------------------
+ *
+ * Folded into vol_gain rather than applied per sample, so the whole feature
+ * costs NOTHING in the audio path -- the multiply it needs is the one that
+ * was already there for volume.
+ *
+ * 10^(dB/20) in Q8, one entry per dB from -30 to +12, interpolated on the
+ * centi-dB remainder. A table because there is no FPU and newlib's pow()
+ * would cost more than every ReplayGain change combined; 1 dB steps because
+ * the ear cannot hear the interpolation error and 43 entries is 86 bytes.
+ *
+ * Mode: 0 off, 1 album, 2 track. Album is the default -- it preserves the
+ * loudness relationships WITHIN a record, which track gain flattens, and
+ * flattening them is wrong on anything sequenced deliberately. */
+#define RG_DB_LO (-30)
+#define RG_DB_HI  (12)
+static const uint16_t rg_tab[RG_DB_HI - RG_DB_LO + 1] = {
+        8,     9,    10,    11,    13,    14,    16,    18,    20,    23,
+       26,    29,    32,    36,    41,    46,    51,    57,    64,    72,
+       81,    91,   102,   114,   128,   144,   162,   181,   203,   228,
+      256,   287,   322,   362,   406,   455,   511,   573,   643,   722,
+      810,   908,  1019,
+};
+static uint8_t  rg_mode = 1u;            /* 0 off, 1 album, 2 track          */
+static int32_t  rg_q8   = 256;           /* this track's gain, Q8, 256=unity */
+static uint8_t  rg_clipped;              /* peak forced the gain down        */
+
+/* centi-dB -> Q8. Floor-divides so negatives interpolate the same way as
+   positives: C truncates toward zero, which would step the wrong way below 0
+   and put a visible kink at -0.5 dB. */
+__attribute__((noinline, optimize("Os")))
+static int32_t rg_cdb_to_q8(int32_t cdb)
+{
+    int32_t d = cdb >= 0 ? cdb / 100 : -(((-cdb) + 99) / 100);
+    int32_t f = cdb - d * 100;                  /* 0..99, always positive    */
+    if (d <  RG_DB_LO) return rg_tab[0];
+    if (d >= RG_DB_HI) return rg_tab[RG_DB_HI - RG_DB_LO];
+    int32_t a = rg_tab[d - RG_DB_LO];
+    int32_t b = rg_tab[d - RG_DB_LO + 1];
+    return a + (b - a) * f / 100;
+}
+
+static void vol_apply(void);   /* defined just below; rg_update folds into it */
+
+/* Recomputes this track's gain. Called once per load, never per sample.
+ *
+ * Peak limiting is the part most players skip: a track tagged +3 dB whose
+ * peak is already 0.99 will clip when the gain is applied, and the result is
+ * distortion that sounds like a bad rip. If gain x peak would pass full
+ * scale, the gain is reduced until it does not -- quieter than the tag asked
+ * for, which is the right way to be wrong. */
+__attribute__((noinline, optimize("Os")))
+static void rg_update(int16_t track_cdb, int16_t album_cdb,
+                      uint16_t peak_q12, uint8_t have)
+{
+    rg_q8 = 256; rg_clipped = 0;
+    if (!rg_mode || !have) { vol_apply(); return; }
+    int16_t cdb;
+    if (rg_mode == 1u && (have & 2u))      cdb = album_cdb;   /* album    */
+    else if (have & 1u)                    cdb = track_cdb;   /* fallback */
+    else if (have & 2u)                    cdb = album_cdb;
+    else { vol_apply(); return; }
+    int32_t g = rg_cdb_to_q8(cdb);
+    if ((have & 4u) && peak_q12) {
+        /* full scale is 4096 in Q12; cap so g * peak <= 4096 */
+        int32_t cap = (4096 * 256) / (int32_t)peak_q12;
+        if (g > cap) { g = cap; rg_clipped = 1u; }
+    }
+    if (g < 1) g = 1;
+    rg_q8 = g;
+    vol_apply();
+}
+
+static void rg_reapply(void);   /* defined after flac_t fl below */
+
 static void vol_apply(void)
 {
-    vol_gain = (int32_t)(volume * 256u / 100u);
+    int32_t g = (int32_t)(volume * 256u / 100u);
+    if (rg_mode && rg_q8 != 256) g = (g * rg_q8) >> 8;
+    vol_gain = g;
 }
 /* ------------------------------------------------------------- playlist ----
  * State only. The logic is in playlist.inc, which has to be included further
@@ -6616,6 +6693,17 @@ static void poll_input(void)
         if (!(keys & KEY_A)) a_armed = 0u;
     }
     if (edge & KEY_X) {
+        /* Select+X: ReplayGain off -> album -> track. The slot the dropped
+         * reverse-meter cycle left behind, and X/Y with Select are now the
+         * audio-mode pair. */
+        if (keys & KEY_SELECT) {
+            sel_used = 1;
+            rg_mode  = (uint8_t)((rg_mode + 1u) % 3u);
+            rg_reapply();
+            ui_toast_msg(rg_mode == 0u ? "REPLAYGAIN OFF"
+                       : rg_mode == 1u ? "REPLAYGAIN ALBUM"
+                                       : "REPLAYGAIN TRACK");
+        } else {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
@@ -6647,6 +6735,7 @@ static void poll_input(void)
                    : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
                                             : "METER: CASSETTE");
         settings_mark_dirty();
+        }
     }
     if (edge & KEY_Y) {
         /* Forward only, matching X. Y was completely unused before the EQ. */
@@ -7396,6 +7485,18 @@ static void target_flush_slot_cache(void)
  * mislabelled file should not silently fail. */
 /* Declared up with the other track state -- see fl_first_frame. */
 static flac_t   fl;
+
+/* Re-run the gain for the track already playing, after a mode change.
+ * fl stays populated for the life of a FLAC, so the tags are still
+ * there; an MP3 has none and goes back to unity. */
+static void rg_reapply(void)
+{
+    if (track_fmt == FMT_FLAC)
+        rg_update(fl.rg_track_cdb, fl.rg_album_cdb, fl.rg_peak_q12, fl.rg_have);
+    else
+        rg_update(0, 0, 0, 0);
+}
+
 static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
 #include "art.inc"
@@ -8914,6 +9015,11 @@ static int load_track(void)
     pcm_flush();
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+    /* Unity until proven otherwise. An MP3 carries no Vorbis comments, and
+     * a FLAC without ReplayGain tags must not inherit the previous track's
+     * gain -- that would present as "one album plays quiet" and be close to
+     * untraceable. Both track-reset sites do it. */
+    rg_update(0, 0, 0, 0);
 #if FIFO_DEFICIT
     def_min = 0xFFFFu; def_eps = 0u; def_ms_max = 0u;
     def_ms_tot = 0u; def_in = 0u;
@@ -9038,6 +9144,11 @@ static int load_track(void)
             rate_unsupported = 1u;
             return 0;
         }
+        /* flac_open has parsed the Vorbis comments by here, and the file
+         * is known playable, so this is the first valid point. */
+        rg_update(fl.rg_track_cdb, fl.rg_album_cdb, fl.rg_peak_q12,
+                  fl.rg_have);
+
         fl_buf = (int32_t *)malloc((size_t)fl.max_blocksize * sizeof(int32_t));
         if (!fl_buf) { REG(R_STAT2) = 0xC1000000u; return 0; }
         fl.ch0     = fl_buf;
@@ -10140,6 +10251,11 @@ int main(void)
             pcm_flush();
             refill_drain();
             frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+    /* Unity until proven otherwise. An MP3 carries no Vorbis comments, and
+     * a FLAC without ReplayGain tags must not inherit the previous track's
+     * gain -- that would present as "one album plays quiet" and be close to
+     * untraceable. Both track-reset sites do it. */
+    rg_update(0, 0, 0, 0);
             track_kbps = 0; track_hz = 0;
             file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;

@@ -177,6 +177,61 @@ static void tag_copy(char *dst, uint32_t cap, const char *src, uint32_t n)
     dst[u8_trim(dst, j)] = 0;
 }
 
+/* "-7.23 dB" -> -723 centi-dB. Also accepts "+2.5", "3", trailing units and
+ * surrounding spaces. Two decimals is all the tag ever carries; a third is
+ * read and discarded rather than rejected.
+ *
+ * No strtod anywhere near this: there is no FPU, and newlib's float parsing
+ * would cost more code than every ReplayGain feature put together. */
+static int16_t rg_parse_cdb(const char *v, uint32_t n)
+{
+    uint32_t i = 0;
+    while (i < n && (v[i] == ' ' || v[i] == '	')) i++;
+    int neg = 0;
+    if (i < n && (v[i] == '-' || v[i] == '+')) { neg = (v[i] == '-'); i++; }
+    int32_t whole = 0;
+    while (i < n && v[i] >= '0' && v[i] <= '9') {
+        if (whole < 1000) whole = whole * 10 + (v[i] - '0');
+        i++;
+    }
+    int32_t frac = 0, fdig = 0;
+    if (i < n && v[i] == '.') {
+        i++;
+        while (i < n && v[i] >= '0' && v[i] <= '9') {
+            if (fdig < 2) { frac = frac * 10 + (v[i] - '0'); fdig++; }
+            i++;
+        }
+    }
+    while (fdig < 2) { frac *= 10; fdig++; }
+    int32_t cdb = whole * 100 + frac;
+    if (cdb > 32000) cdb = 32000;
+    return (int16_t)(neg ? -cdb : cdb);
+}
+
+/* "0.988525" -> Q12, 4096 == full scale. Clamped: a peak above 1.0 is legal
+ * in the tag (the encoder saw inter-sample overs) and must not wrap. */
+static uint16_t rg_parse_peak(const char *v, uint32_t n)
+{
+    uint32_t i = 0;
+    while (i < n && (v[i] == ' ' || v[i] == '	')) i++;
+    uint32_t whole = 0;
+    while (i < n && v[i] >= '0' && v[i] <= '9') {
+        if (whole < 100u) whole = whole * 10u + (uint32_t)(v[i] - '0');
+        i++;
+    }
+    uint32_t frac = 0, scale = 1;
+    if (i < n && v[i] == '.') {
+        i++;
+        while (i < n && v[i] >= '0' && v[i] <= '9' && scale < 10000u) {
+            frac = frac * 10u + (uint32_t)(v[i] - '0');
+            scale *= 10u;
+            i++;
+        }
+    }
+    uint32_t q = whole * 4096u + (frac * 4096u) / scale;
+    return (uint16_t)(q > 65535u ? 65535u : q);
+}
+
 static void vorbis_comments(flac_t *f, uint32_t length)
 {
     uint32_t used = 0;
@@ -214,6 +269,17 @@ static void vorbis_comments(flac_t *f, uint32_t length)
                                                    tag_copy(f->tag_year,   8u, v, vn > 4u ? 4u : vn); }
         else if (key_is(e, keep, "TRACKNUMBER")) { v += 12; vn = keep - 12u;
                                                    tag_copy(f->tag_trk,    8u, v, vn); }
+        /* ReplayGain. All three keys are 21 characters, so the value starts
+         * at 22 -- key_is() requires the full key AND a following '=', so it
+         * cannot match a prefix and the order here does not matter.
+         * keep > 21 is guaranteed by that same '=' test, so keep - 22 cannot
+         * underflow. */
+        else if (key_is(e, keep, "REPLAYGAIN_TRACK_GAIN")) {
+            f->rg_track_cdb = rg_parse_cdb(e + 22, keep - 22u); f->rg_have |= 1u; }
+        else if (key_is(e, keep, "REPLAYGAIN_ALBUM_GAIN")) {
+            f->rg_album_cdb = rg_parse_cdb(e + 22, keep - 22u); f->rg_have |= 2u; }
+        else if (key_is(e, keep, "REPLAYGAIN_TRACK_PEAK")) {
+            f->rg_peak_q12  = rg_parse_peak(e + 22, keep - 22u); f->rg_have |= 4u; }
     }
     for (; used < length; used++) (void)bits(f, 8);
 }

@@ -102,3 +102,5 @@ src/fpga/paths_sdram.txt
 mp3player_FIFO_DEFICIT.rom
 mp3player_LPC_DEFICIT.rom
 mp3player_UNROLL_DEFICIT.rom
+mp3player_RICE_DEFICIT.rom
+mp3player_v160_candidate.rom
