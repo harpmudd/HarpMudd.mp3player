@@ -637,6 +637,9 @@ static uint32_t track_frames, track_secs;
  * use, which made both a fine seek and an accelerating scrub impossible to
  * express -- the request said which way but never how far. */
 static uint32_t seek_secs = 5u;
+/* Declared HERE, not beside the FLAC seek code, because the release
+ * handler clears it -- see the wedge note at its use. */
+static uint32_t fl_seek_intent;
 /* Average byte rate measured from real playback. Converges on the truth for
  * VBR files that carry no Xing header, which the first-frame bitrate cannot. */
 static uint32_t meas_rate;
@@ -7017,6 +7020,12 @@ static void poll_input(void)
                     else          ui_toast_msg("NO PLAYLIST");
                 }
                 lr_fired[i] = 0;
+                /* The run is over, so the intent is spent. Its lifetime
+                 * is the HOLD, which is what it was always meant to be;
+                 * the 30-second staleness window at the use site was a
+                 * stand-in for this and it collided with the step size.
+                 * See the wedge note there. */
+                fl_seek_intent = 0;
             }
         }
     }
@@ -7850,8 +7859,6 @@ static uint32_t fl_cap;            /* max_blocksize, kept across reopens */
  * presses advances monotonically whatever the landings do, while the clock
  * stays truthful about where the audio is. The guard band drops the intent
  * once ordinary playback has caught up, so it never lingers. */
-static uint32_t fl_seek_intent;
-
 static uint32_t fl_seek_off;      /* absolute offset of the SEEKTABLE body  */
 
 static uint32_t fl_seek_pts;      /* 18-byte points; 0 = no table           */
@@ -10685,7 +10692,27 @@ int main(void)
                  * transport can wedge -- measured under tools/rv32sim.py as
                  * +22, +11, +5, +0, +0, +0. */
                 uint32_t base = ui_sec;
-                if (fl_seek_intent > ui_sec && fl_seek_intent - ui_sec < 30u)
+                /* WEDGE, found 2026-10-02 by reading after a live repro.
+                 * This window was 30 and the hold acceleration tops out
+                 * at seek_secs = 30 -- the same number, and they must
+                 * disagree.
+                 *
+                 * Presses repeat every 250 ms but each seek takes longer
+                 * to land, so the intent runs ahead of ui_sec. The moment
+                 * that gap reached 30 the guard failed, base fell back to
+                 * ui_sec, and the next target was ui_sec + 30 -- BEHIND
+                 * where it had already got to. That is the jump
+                 * backwards. From then on the gap was pinned at exactly
+                 * 30, so the guard failed forever and the transport could
+                 * never advance again. Only restarting the track cleared
+                 * it, because that reset the intent.
+                 *
+                 * The real fix is above: the intent is cleared when the
+                 * hold is RELEASED, so its lifetime is the run rather
+                 * than a timeout. This bound is now only a sanity check
+                 * against a stale value, and is deliberately far larger
+                 * than any step so the two can never meet again. */
+                if (fl_seek_intent > ui_sec && fl_seek_intent - ui_sec < 300u)
                     base = fl_seek_intent;
                 if (seek_req == 1u) {
                     tgt = base + secs;
