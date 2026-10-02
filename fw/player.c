@@ -828,6 +828,56 @@ static uint32_t fl_probe_stale;      /* poison survived a "complete" read   */
 static uint32_t fl_probe_reads;      /* probes issued, for the ratio        */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
+/* ---- Crossfeed ------------------------------------------------------------
+ *
+ * Headphones put each channel in one ear with no acoustic path to the other,
+ * which is not how ears hear a room: hard-panned material sits INSIDE the
+ * head and is tiring over a long listen. Crossfeed leaks a low-passed,
+ * attenuated copy of each channel into the other, roughly what the far ear
+ * would receive -- the standard Rockbox / Astell&Kern / FiiO feature.
+ *
+ * Low-passed because the head shadows high frequencies: only the lows bend
+ * around it. A one-pole at ~700 Hz is the usual choice and costs two adds
+ * and a multiply, which is what makes this affordable here at all.
+ *
+ *   lp  += (x - lp) * a         one pole, a = 24/256 ~ 700 Hz at 44.1 kHz
+ *   out  = x + lp_other * mix
+ *   out *= 256/(256+mix)        so the sum cannot clip
+ *
+ * The normalise is NOT optional: adding a copy of the other channel raises
+ * the peak, and without it a loud centred mix clips.
+ *
+ * OFF by default and not persisted, like screen blanking and the art panel.
+ * It changes the sound, so it is opt-in. Select+Y cycles off/low/high.
+ *
+ * ~8 operations per stereo frame, about 1.2% of the CPU at 48 kHz. That is
+ * real against a decoder that only just cleared its deadline on the spectrum
+ * meter, so re-measure X with FIFO_DEFICIT after touching this rather than
+ * assuming it is free. */
+static uint8_t xf_mode;                  /* 0 off, 1 low, 2 high            */
+static int32_t xf_lp_l, xf_lp_r;         /* one-pole state                  */
+static int32_t xf_mix  = 0;              /* Q8 amount of the other channel  */
+static int32_t xf_norm = 256;            /* Q8 scale that undoes the sum    */
+#define XF_A 24                          /* Q8 one-pole coefficient         */
+
+static void xf_apply_mode(void)
+{
+    xf_mix  = (xf_mode == 1u) ? 77 : (xf_mode == 2u) ? 128 : 0;   /* .30/.50 */
+    xf_norm = 256 * 256 / (256 + xf_mix);
+    xf_lp_l = xf_lp_r = 0;               /* no click when switching */
+}
+
+static inline void xf_filter(int32_t *l, int32_t *r)
+{
+    xf_lp_l += ((*l - xf_lp_l) * XF_A) >> 8;
+    xf_lp_r += ((*r - xf_lp_r) * XF_A) >> 8;
+    int32_t nl = ((*l + ((xf_lp_r * xf_mix) >> 8)) * xf_norm) >> 8;
+    int32_t nr = ((*r + ((xf_lp_l * xf_mix) >> 8)) * xf_norm) >> 8;
+    if (nl >  32767) nl =  32767; else if (nl < -32768) nl = -32768;
+    if (nr >  32767) nr =  32767; else if (nr < -32768) nr = -32768;
+    *l = nl; *r = nr;
+}
+
 /* ---- ReplayGain -----------------------------------------------------------
  *
  * Folded into vol_gain rather than applied per sample, so the whole feature
@@ -1116,6 +1166,13 @@ static uint16_t resume_saves;     /* times resume_pump has published a point  */
 
 static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
+/* Sleep timer. Counts SECONDS off a one-second tick, exactly like the blank
+ * timeout above, because cycles() wraps every 64 s at 66.667 MHz and a
+ * 60-minute deadline cannot be held in one 32-bit value. Not persisted:
+ * a sleep timer that survived a power cycle would be a trap. */
+static uint32_t sleep_min;            /* 0 = off; set by Select+Up             */
+static uint32_t sleep_sec;
+static uint32_t sleep_tick;
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
 static uint8_t  screen_blank;         /* the screen is currently black         */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
@@ -6695,6 +6752,21 @@ static void seek_trace_dump(void)
 }
 #endif
 
+static void sleep_pump(void)
+{
+    if (!sleep_min) return;
+    if ((int32_t)(cycles() - sleep_tick) < 0) return;
+    sleep_tick = cycles() + CLK_HZ;
+    if (sleep_sec < 0xFFFFu) sleep_sec++;
+    if (sleep_sec >= sleep_min * 60u) {
+        sleep_min = 0;                 /* one shot; re-arm deliberately */
+        stopped   = 1u;
+        paused   |= 1u;
+        stop_req  = 1u;
+        ui_toast_msg("SLEEP");
+    }
+}
+
 static void ui_blank_pump(void)
 {
     if (screen_blank || !blank_min) return;
@@ -6921,9 +6993,21 @@ static void poll_input(void)
         }
     }
     if (edge & KEY_Y) {
-        /* Forward only, matching X. Y was completely unused before the EQ. */
-        eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
-        eq_apply = 1u;
+        /* Select+Y: crossfeed. Y is the EQ, so Select+Y is its
+         * audio-processing sibling -- X and Y with Select are the two
+         * audio modes. */
+        if (keys & KEY_SELECT) {
+            sel_used = 1;
+            xf_mode  = (uint8_t)((xf_mode + 1u) % 3u);
+            xf_apply_mode();
+            ui_toast_msg(xf_mode == 0u ? "CROSSFEED OFF"
+                       : xf_mode == 1u ? "CROSSFEED LOW"
+                                       : "CROSSFEED HIGH");
+        } else {
+            /* Forward only, matching X. Y was unused before the EQ. */
+            eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
+            eq_apply = 1u;
+        }
     }
     if (edge & KEY_START) {
 #if DEBUG_DIAG
@@ -7081,6 +7165,22 @@ static void poll_input(void)
      * Sits beside Select+L (repeat) and Select+R (shuffle), which is where a
      * user already looks for settings-ish combos. Not persisted: it is back to
      * OFF every launch, which is the honest cost of the trade. */
+    /* Select+Up: the sleep timer, opposite Select+Down's screen blank.
+     * Two timeouts, mirrored on the pad -- one turns the screen off, the
+     * other turns the music off. ARMS the tick: a deadline left at 0 is
+     * dead for up to 64 s rather than due now. */
+    else if (edge & KEY_UP) {
+        static const uint8_t sl[] = { 0u, 15u, 30u, 60u };
+        uint32_t i = 0;
+        while (i < sizeof(sl) / sizeof(sl[0]) && sl[i] != sleep_min) i++;
+        i = (i + 1u) % (sizeof(sl) / sizeof(sl[0]));
+        sleep_min  = sl[i];
+        sleep_sec  = 0;
+        sleep_tick = cycles() + CLK_HZ;
+        sel_used   = 1;
+        if (sleep_min) ui_toast_set("SLEEP", sleep_min, " MIN");
+        else           ui_toast_msg("SLEEP OFF");
+    }
     else if (edge & KEY_DOWN) {
         static const uint8_t bl[] = { 0u, 1u, 5u, 10u, 30u };
         uint32_t i = 0;
@@ -8258,6 +8358,7 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
          * Same order as MP3: volume first, then the fade, so a fade-in at low
          * volume stays at low volume. Capped at unity, so it only ever
          * attenuates and cannot overflow. */
+        if (xf_mode) xf_filter(&l, &r);
         if (vol_gain != 256) {
             l = (l * vol_gain) >> 8;
             r = (r * vol_gain) >> 8;
@@ -9934,6 +10035,7 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+        sleep_pump();
 #if SEEK_TRACE
         seek_trace_dump();
 #endif
@@ -11310,6 +11412,7 @@ int main(void)
             int32_t r = stereo ? pcm[i + 1] : l;
             /* Capped at unity, so this only ever attenuates and cannot
              * overflow -- no clamp needed. */
+            if (xf_mode) xf_filter(&l, &r);
             if (vol_gain != 256) {
                 l = (l * vol_gain) >> 8;
                 r = (r * vol_gain) >> 8;
