@@ -219,7 +219,8 @@ either needs this or is independent of it; nothing is blocked BY it. Estimate
 
 ## Phase 2 -- Fixes
 
-- **F1. Held seek on a FLAC wedges and jumps backwards.** The open defect
+- ~~**F1. Held seek on a FLAC wedges and jumps backwards.**~~ **FIXED
+  2026-10-02**, three causes; see the write-up below. The open defect
   carried out of v1.5.1. Not reproducible; `SEEK_TRACE` is already in the
   firmware at default 0. Highest priority -- write-up further down this file.
 - **F2. Seeking a VBR MP3 lands the clock wrong.** Deferred from v1.5.0,
@@ -573,7 +574,81 @@ smooth edges. At 4x nearest it buys grey blocks. Recorded because the premise
 deserves re-examining on this display, not because the change is recommended:
 it would hurt curves and diagonals at other sizes.
 
-## Held seek on a FLAC wedges and jumps back -- OPEN, not reproducible
+## Held seek on a FLAC wedges and jumps back -- FIXED 2026-10-02
+
+**THREE separate defects behind one symptom.** Each is real, and none of them
+alone accounts for the reported behaviour -- which is why two earlier attempts
+that found one cause and stopped did not fix it.
+
+### 1. The step size and the staleness window were the same number
+
+    seek_secs = (lr_reps > 8) ? 30u : ...          // step tops out at 30
+    if (fl_seek_intent - ui_sec < 30u) base = ...  // window is ALSO 30
+
+Presses repeat every 250 ms while each seek takes longer to land, so the
+intent runs ahead of ui_sec. The moment the gap reached 30 the guard failed,
+base fell back to ui_sec, and the next target was ui_sec + 30 -- BEHIND where
+the run had reached. That is the jump backwards. The gap then sat pinned at
+exactly 30 and the guard failed on every press afterwards.
+
+Fixed by LIFETIME, not by the constant: fl_seek_intent is cleared when the
+hold is released, so it lives for a run rather than until a timeout expires.
+The window is widened to 300 as a sanity bound that cannot collide with a
+step again.
+
+### 2. fl_seek_intent survived a track change
+
+Written at the seek site, never reset on load, so it carried into the next
+track while ui_sec went back to 0 -- comparing against the wrong timeline.
+Cleared at both track-reset sites now. Note rg_reapply() calls rg_update with
+identical arguments but means "mode change", not "new track": three call
+sites look the same and only two may clear the intent.
+
+**This one nearly caused a regression.** Widening the window in fix 1 from 30
+to 300 means a stale cross-track intent that used to be ignored would be
+trusted for five minutes. Fix 1 without fix 2 would have traded one wedge for
+another.
+
+### 3. THE one that explains the numbers: a stale slot_size
+
+Found by the USER'S experiment, not by reading. Vary the previously loaded
+file and the cap moves with it:
+
+| loaded first | Julius seeks die at |
+|---|---|
+| ~28 MB FLAC | 3:50 |
+| ~10 MB MP3 | <1:30 |
+
+Julius is 33,963,176 bytes over 282.2 s = **120,350 bytes/s**, and both times
+are those file sizes divided by that rate. `flac_seek_locate()` brackets
+between `fl_first_frame` and `slot_size`, so a stale smaller slot_size
+truncates the search and every target past it pins there.
+
+The guard against this already existed and could never fire:
+
+    uint32_t z = slot_size ? slot_size : probe_file_size();
+    if (z > slot_size) { slot_size = z; ... }
+
+Non-zero slot_size short-circuits, so z == slot_size and the test is false.
+It only ever ran when the size was MISSING -- and the comment directly above
+it says the fault is the size being WRONG rather than absent. **The lesson was
+written down and then undone by the expression underneath it.**
+
+**KNOWN LIMIT:** "take the larger" only repairs a stale size that is too
+SMALL, which is what was observed. A previous file LARGER than the current one
+would leave slot_size too big and seeks could aim past the end. Not seen, not
+fixed, recorded rather than assumed away.
+
+### How it was finally caught
+
+**Not by the instrument.** SEEK_TRACE and UI_SHOW_SEEK_DIAG both stopped the
+defect reproducing -- noted twice in this file before today. What worked was a
+live reproduction, then READING the suspected mechanism, then the user varying
+one input (the previous file) and reporting how the symptom moved. A symptom
+that scales with an input names the variable; no amount of staring at the seek
+code would have pointed at slot_size.
+
+### Original entry, kept for the reasoning
 
 **User, 2026-09-30, and it was reliable at the time:** hold seek-forward on a
 FLAC; somewhere around 3-4 minutes in it stops advancing and starts jumping
