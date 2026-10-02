@@ -248,10 +248,13 @@ That covers CD rips and most libraries. Hi-res — 88.2, 96, 176.4 and 192 kHz �
 is out, along with 32-bit and multichannel. Anything the core can't play says
 so on screen and names the file's own format, so you aren't left guessing.
 
-The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
-72% of the time available, and the same music at 96 kHz needs nearly twice what
-the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
-on headphones from a handheld it isn't a difference you're going to hear.
+Two things stop hi-res, not a setting. The decoder needs about 10% more CPU
+than the chip has to keep up with 96 kHz, measured on a real album; and those
+files are usually written in 8192-sample blocks, which need a 32 KB buffer
+where the decoder has 24 KB to work in. 192 kHz is twice as far away again.
+
+Converting a hi-res album to 44.1 kHz is still lossless, and on headphones
+from a handheld it isn't a difference you're going to hear.
 
 ## How it works
 
@@ -278,15 +281,10 @@ framework bugs that had to be found first — is in
   to be remembered** — see
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
   It plays fine either way.
-- **The most demanding FLAC files can still stutter** — 24-bit at a high
-  bitrate, mainly. Decoding runs on a CPU inside the FPGA and those files ask
-  for nearly all of it, leaving little for the screen and the card.
-
-  Two things help, in order of effort. **Switch to a simpler meter** — the
-  magic eye, the cassette and the 16-band spectrum are the most demanding of
-  the twelve, and on a file that is close to the edge that alone can be the
-  difference. Bars is among the cheapest. Failing that, re-encode at the
-  default compression setting or to 16-bit/44.1 kHz.
+- **A very demanding FLAC file may still stutter.** The decoder got about a
+  third faster in v1.6.0 and the files that used to break up no longer do,
+  on any meter. If you find one that does, re-encoding at the default
+  compression setting is the quickest fix.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.

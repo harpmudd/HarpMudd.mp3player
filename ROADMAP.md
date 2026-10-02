@@ -69,6 +69,50 @@ Two instrument errors on the way, both worth not repeating:
   branch was judged on came from 16-bit files. That is exactly why its guard
   being dead at 24-bit went unnoticed for two weeks.
 
+### E3 -- hi-res: MEASURED 2026-10-02, still out, and now by how much
+
+The gate is one constant (`FLAC_MAX_RATE`) and the output path is
+rate-agnostic -- `pcm_rate_apply()` builds a fractional phase increment from
+any Hz, with no 48 kHz assumption. So this is purely about cost.
+
+**The user's library is 29% hi-res**, which is the reason to care: 1,514 FLAC
+files on the NAS, surveyed from their STREAMINFO headers.
+
+| rate / depth | files | share |
+|---|---|---|
+| 44.1 kHz 16-bit | 937 | 62% |
+| 44.1 kHz 24-bit | 82 | 5% |
+| 48 kHz 24-bit | 58 | 4% |
+| **96 kHz 24-bit** | **283** | **19%** |
+| **192 kHz 24-bit** | **154** | **10%** |
+
+Benchmarked on a real one (AC/DC, Back In Black, 96/24, 8192-sample blocks):
+**463.3 instructions per sample.** Hi-res is NOT cheaper per sample -- the
+extra samples carry real coded bits, not silence.
+
+    needed     463.3 x 96,000 = 44.5 M instr/s  =  73.4 MHz of clk_sys
+    available  66.667 / 1.65 CPI = 40.4 M instr/s
+
+**110% of the CPU on decode alone**, before meters, UI or SD. The recorded
+figure for this used to be 157 MHz, so the decoder work has more than halved
+it -- the README's explanation IS stale, but the conclusion survives. 192 kHz
+is double again, ~89 M instr/s, and is not in reach by any route here.
+
+**Three gates, and the second is a wall:**
+
+1. **CPU, 10% short.** The PLL can make 75 MHz (VCO allows 60 / 66.67 / 75),
+   which gives 45.5 M instr/s and clears decode by ~2% -- but fmax measured
+   ~75.4, so that is the ragged edge of closure with nothing left for meters.
+2. **Memory.** 8192-sample blocks need `fl_buf` = 32,768 bytes against a
+   24,576-byte arena. No amount of speed fixes it.
+3. **SD, fine.** ~404 KB/s against 736 measured.
+
+**So E2 and Phase 1 both return -- for hi-res, not for stutter.** The Rice
+decoder in fabric is the only realistic route to another 30% now that the
+cheap software wins are spent, and the SDRAM migration is what affords the
+block buffer. That is a coherent 1.7.0 worth 437 files, and a far better
+justification than either had before.
+
 ### Still open
 
 - **24-bit bit-exactness is NOT verified.** 16-bit is (`bit-exact: yes` over
