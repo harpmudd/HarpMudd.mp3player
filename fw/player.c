@@ -940,7 +940,48 @@ static void vol_apply(void)
  * function moves, no static is exported, nothing is reordered. */
 #define PL_TEXT_MAX  12288u
 
-static char     pl_text[PL_TEXT_MAX];
+/* pl_text LIVES IN PSRAM as of rev 23 -- 12,288 bytes that used to sit in
+ * the CPU's 256 KB, which had 288 bytes free with four features queued.
+ *
+ * ONE BYTE PER 16-BIT WORD, deliberately. Packing two would halve the
+ * footprint and force a read-modify-write on every byte store, which is a
+ * whole class of bug for no gain: this is 24 KB of a 32 MB part that nothing
+ * else touches. Spend the address space, keep the code obvious.
+ *
+ * Every access is ~20 cycles instead of one, so this is only safe because
+ * pl_text is COLD -- parsed once at load, never touched while audio runs.
+ * A 12 KB parse costs ~4 ms against a load that already takes 1241 ms. */
+#define PLT_BASE 0u            /* PSRAM word address of pl_text[0] */
+static inline char plt_get(uint32_t i)
+{
+    return (char)(uint8_t)psr_read16(PLT_BASE + i);
+}
+static inline void plt_set(uint32_t i, char c)
+{
+    psr_write16(PLT_BASE + i, (uint16_t)(uint8_t)c);
+}
+
+/* A staging copy for the one name a caller needs RIGHT NOW. PSRAM cannot
+ * hand out a char*, and the callers want a C string, so the string is
+ * materialised here instead. 256 bytes of RAM to free 12,288 of it.
+ *
+ * The buffer is SHARED and overwritten on every call: a caller must not hold
+ * two names at once, and nothing does -- they are consumed immediately, by
+ * pl_open_name or by one row of the browser. */
+static char plt_name[256];
+static const char *plt_name_at(uint32_t off)
+{
+    psr_seek(PLT_BASE + off);
+    uint32_t j = 0;
+    while (j + 1u < sizeof(plt_name)) {
+        char c = (char)(uint8_t)psr_next();
+        plt_name[j] = c;
+        if (!c) return plt_name;
+        j++;
+    }
+    plt_name[j] = 0;
+    return plt_name;
+}
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
  * reached with lines still to read. Without this a clipped playlist is
  * indistinguishable from a short one: the screen just shows a smaller number. */
@@ -4074,7 +4115,7 @@ static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
 {
     out[0] = 0;
     if (pos >= pl_count) return;
-    const char *nm = &pl_text[pl_off[pl_order[pos]]];
+    const char *nm = plt_name_at(pl_off[pl_order[pos]]);
 
     uint32_t start = 0;
     for (uint32_t i = 0; nm[i]; i++)
