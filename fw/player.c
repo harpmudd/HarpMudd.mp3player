@@ -10671,7 +10671,29 @@ int main(void)
                 while (szp_phase && szp_phase < 4u && ++guard < 64u)
                     size_probe_step();
 
-                uint32_t z = slot_size ? slot_size : probe_file_size();
+                /* ALWAYS measure. This read `slot_size ? slot_size :
+                 * probe_file_size()`, which short-circuits the instant
+                 * slot_size is non-zero -- so z == slot_size, the test
+                 * below is false, and nothing is corrected. The probe
+                 * fired only when the size was MISSING, and the comment
+                 * above already says the real fault is the size being
+                 * WRONG. That lesson was written down and then undone by
+                 * this one expression.
+                 *
+                 * Measured 2026-10-02: Load MP3, then Load Playlist, then
+                 * seek. slot_size still held the MP3's size, and
+                 * flac_seek_locate brackets between fl_first_frame and
+                 * slot_size -- so every target beyond the stale figure
+                 * pinned at it. The cap tracked the PREVIOUS file: a
+                 * ~28 MB FLAC first gave 3:50 of Julius, a ~10 MB MP3
+                 * first gave 1:20, and Julius runs 120,350 bytes/s.
+                 * Dividing one by the other is where those times come
+                 * from.
+                 *
+                 * Still bounded to ONCE per track by seek_size_tried, and
+                 * the incremental search above has usually finished
+                 * during playback, so this is normally free. */
+                uint32_t z = probe_file_size();
                 if (z > slot_size) {
                     slot_size = z;
                     /* The bitrate was derived from the old figure and is on
