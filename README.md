@@ -57,14 +57,16 @@ The controls:
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
 | **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
+| **Select** + **Up** | Sleep timer: off → 15 → 30 → 60 min |
+| **Select** + **Y** | Crossfeed: off → low → high → mono |
 
 Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset carry over
-between sessions, in step with **Core Settings**; the album art panel and
-screen-blank timeout reset each launch. Switch on **Resume playback** there and
+between sessions, in step with **Core Settings**; the album art panel, the
+screen-blank timeout, crossfeed and the sleep timer reset each launch. Switch on **Resume playback** there and
 the core also remembers where you were — one place, for the last playlist you
 used. **Load MP3** records no position, so for an audiobook use a playlist; a
 one-line `.m3u` is enough.
@@ -223,6 +225,32 @@ Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
 rises with the speed, so music sounds wrong. Off every launch. 1.2× is the
 whole range — double speed would mean decoding twice as many frames a second,
 past what the CPU can do.
+
+## Crossfeed
+
+**Select** + **Y** cycles off → low → high → mono.
+
+Headphones put each channel straight into one ear with no path to the other,
+which is not how you hear a room. Anything hard-panned — drums entirely in
+one ear on a 60s or 70s record — sits *inside* your head, and over a long
+listen that is tiring. Crossfeed mixes a little of each channel into the
+other, filtered the way your head would filter it, so the sound moves out in
+front of you. On modern recordings the effect is small, because they are
+already mixed to work on headphones.
+
+**Mono** sums both channels into both ears. If you have hearing loss on one
+side, that is the setting that guarantees nothing is lost — crossfeed alone
+still leaves part of the far channel where you cannot hear it.
+
+Off every launch; it changes the sound, so it is never on unless you ask.
+
+## Sleep timer
+
+**Select** + **Up** cycles off → 15 → 30 → 60 minutes, and playback stops
+when the time is up. Off every launch.
+
+It stops the music rather than powering anything down — a core cannot reach
+the Pocket's power or backlight, the same limit screen blanking has.
 
 ## Screen blanking
 

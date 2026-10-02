@@ -837,8 +837,15 @@ static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
  * would receive -- the standard Rockbox / Astell&Kern / FiiO feature.
  *
  * Low-passed because the head shadows high frequencies: only the lows bend
- * around it. A one-pole at ~700 Hz is the usual choice and costs two adds
- * and a multiply, which is what makes this affordable here at all.
+ * around it. One pole, two adds and a multiply, which is what makes this
+ * affordable here at all.
+ *
+ * CUTOFF ~2 kHz, not the textbook ~700 Hz. 700 was tried first and was
+ * inaudible on real material, for a reason the textbook figure hides:
+ * bass is already mono in most mixes, so crossing over only the lows adds
+ * a channel's bass to a channel that already has it. The in-head
+ * localisation cue lives in the MIDS, and a 700 Hz pole throws all of it
+ * away. Tested on hardware 2026-10-02 -- "no major difference in depth".
  *
  *   lp  += (x - lp) * a         one pole, a = 24/256 ~ 700 Hz at 44.1 kHz
  *   out  = x + lp_other * mix
@@ -848,27 +855,45 @@ static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
  * the peak, and without it a loud centred mix clips.
  *
  * OFF by default and not persisted, like screen blanking and the art panel.
- * It changes the sound, so it is opt-in. Select+Y cycles off/low/high.
+ * It changes the sound, so it is opt-in. Select+Y cycles
+ * off / low / high / MONO.
+ *
+ * MONO is the far end of the same axis -- progressively more of each
+ * channel in both ears -- which is why it sits on this control rather
+ * than its own. It is also the reason the feature earns its place: with
+ * hearing loss in one ear, crossfeed at 0.75 still loses part of the far
+ * channel, and a true sum guarantees nothing is lost at all. iOS and
+ * Android both ship exactly this toggle. User's observation, 2026-10-02.
  *
  * ~8 operations per stereo frame, about 1.2% of the CPU at 48 kHz. That is
  * real against a decoder that only just cleared its deadline on the spectrum
  * meter, so re-measure X with FIFO_DEFICIT after touching this rather than
  * assuming it is free. */
-static uint8_t xf_mode;                  /* 0 off, 1 low, 2 high            */
+static uint8_t xf_mode;                  /* 0 off, 1 low, 2 high, 3 mono    */
 static int32_t xf_lp_l, xf_lp_r;         /* one-pole state                  */
 static int32_t xf_mix  = 0;              /* Q8 amount of the other channel  */
 static int32_t xf_norm = 256;            /* Q8 scale that undoes the sum    */
-#define XF_A 24                          /* Q8 one-pole coefficient         */
+#define XF_A 63                          /* Q8 one-pole, ~2 kHz at 44.1 kHz */
 
 static void xf_apply_mode(void)
 {
-    xf_mix  = (xf_mode == 1u) ? 77 : (xf_mode == 2u) ? 128 : 0;   /* .30/.50 */
+    /* low 0.50, high 0.75. The old 0.30/0.50 pair was chosen to be
+     * conservative and the result was a feature nobody could hear. At
+     * 0.75 a hard-panned source puts 43% into the other ear, which is
+     * the point of the effect. */
+    xf_mix  = (xf_mode == 1u) ? 128 : (xf_mode == 2u) ? 192 : 0;
     xf_norm = 256 * 256 / (256 + xf_mix);
+    if (xf_mode == 3u) { xf_mix = 0; xf_norm = 256; }   /* mono: see below */
     xf_lp_l = xf_lp_r = 0;               /* no click when switching */
 }
 
 static inline void xf_filter(int32_t *l, int32_t *r)
 {
+    if (xf_mode == 3u) {                 /* mono: full sum, no filter */
+        int32_t m = (*l + *r) >> 1;      /* halved, so it cannot clip */
+        *l = *r = m;
+        return;
+    }
     xf_lp_l += ((*l - xf_lp_l) * XF_A) >> 8;
     xf_lp_r += ((*r - xf_lp_r) * XF_A) >> 8;
     int32_t nl = ((*l + ((xf_lp_r * xf_mix) >> 8)) * xf_norm) >> 8;
@@ -6998,11 +7023,12 @@ static void poll_input(void)
          * audio modes. */
         if (keys & KEY_SELECT) {
             sel_used = 1;
-            xf_mode  = (uint8_t)((xf_mode + 1u) % 3u);
+            xf_mode  = (uint8_t)((xf_mode + 1u) % 4u);
             xf_apply_mode();
             ui_toast_msg(xf_mode == 0u ? "CROSSFEED OFF"
                        : xf_mode == 1u ? "CROSSFEED LOW"
-                                       : "CROSSFEED HIGH");
+                       : xf_mode == 2u ? "CROSSFEED HIGH"
+                                       : "MONO");
         } else {
             /* Forward only, matching X. Y was unused before the EQ. */
             eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
