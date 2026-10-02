@@ -65,8 +65,9 @@ moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset carry over
-between sessions, in step with **Core Settings**; the album art panel, the
-screen-blank timeout, crossfeed and the sleep timer reset each launch. Switch on **Resume playback** there and
+between sessions, in step with **Core Settings** — crossfeed too, so a
+setting you rely on is still there next time. The album art panel, the
+screen-blank timeout and the sleep timer reset each launch. Switch on **Resume playback** there and
 the core also remembers where you were — one place, for the last playlist you
 used. **Load MP3** records no position, so for an audiobook use a playlist; a
 one-line `.m3u` is enough.
@@ -242,7 +243,8 @@ already mixed to work on headphones.
 side, that is the setting that guarantees nothing is lost — crossfeed alone
 still leaves part of the far channel where you cannot hear it.
 
-Off every launch; it changes the sound, so it is never on unless you ask.
+Off by default, and remembered once you set it — it also appears in
+**Core Settings**, so you do not have to know the button to find it.
 
 ## Sleep timer
 

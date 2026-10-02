@@ -128,6 +128,13 @@ enum { SW_VOL = 0, SW_PAL, SW_REP, SW_SHUF, SW_RESUME, SW_VIZ, SW_EQ,
         * five free slots buy thirty-two characters and the name that prompted
         * this is forty-two. See pl_saved_hash. */
        SW_PLHASH,
+       /* Crossfeed, slot 12 of the 16 the 4-bit index allows. Persisted
+        * because of MONO: someone using it for hearing loss in one ear
+        * needs it every launch, and an accessibility setting you must
+        * re-select each boot is not one. Its own slot rather than spare
+        * bits in SW_SHUF -- that word is a CHECKBOX in Core Settings and
+        * widening its range would turn it into a slider. */
+       SW_XFEED,
        SW_N };
 
 /* What we last published. Initialised to a value APF can never write for
@@ -138,7 +145,7 @@ static uint32_t set_pub[SW_N] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu,
                                   0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                  0xFFFFFFFFu };
+                                  0xFFFFFFFFu, 0xFFFFFFFFu };
 
 static uint32_t set_rd(uint32_t w) { REG(R_SET_IDX) = w; return REG(R_SET_DAT); }
 static void     set_wr(uint32_t w, uint32_t v)
@@ -159,6 +166,7 @@ static int settings_store(void)
     set_wr(SW_RESUME, resume_word);
     set_wr(SW_VIZ,  viz_mode);
     set_wr(SW_EQ,   eq_idx);
+    set_wr(SW_XFEED, xf_mode);
     set_wr(SW_RESUMEON, resume_on ? 1u : 0u);
     for (uint32_t k = 0; k < 3u; k++) {
         uint32_t w = 0;
@@ -200,6 +208,7 @@ static int settings_load(void)
      * actually open. A garbage word can only fail to resume. */
     resume_word = set_rd(SW_RESUME);
     v = set_rd(SW_VIZ);   if (v < VIZ_COUNT)       viz_mode = (uint8_t)v;
+    v = set_rd(SW_XFEED); if (v <= 3u) { xf_mode = (uint8_t)v; xf_apply_mode(); }
     v = set_rd(SW_EQ);    if (v < EQ_COUNT)      { eq_idx = (uint8_t)v;
                                                    REG(R_EQ) = eq_idx; }
     v = set_rd(SW_RESUMEON); resume_on = v ? 1u : 0u;
