@@ -65,6 +65,16 @@
 #define R_EQ        0x80000068u   /* R/W: EQ preset index, 0 = FLAT (bypass)    */
 #define R_SET_IDX   0x8000006Cu   /* W:   persistent settings word index, 0..7  */
 #define R_SET_DAT   0x80000070u   /* R: value APF wrote  W: value we publish    */
+/* PSRAM window, rev 23. 16-bit WORD addressing into the 32 MB nothing
+ * else in this core touches. The bus is single-cycle and cannot stall, so
+ * an access is request / poll / collect rather than a blocking load.
+ * The address auto-increments on COMPLETION, so a sequential walk skips
+ * the address write entirely after the first. */
+#define R_PSR_ADDR  0x80000074u   /* W: word address  R: current address    */
+#define R_PSR_DATA  0x80000078u   /* W: data + start write  R: last read    */
+#define R_PSR_ST    0x8000007Cu   /* W: start a read  R: {ready, busy}      */
+#define PSR_BUSY(s)  ((s) & 1u)
+#define PSR_READY(s) ((s) & 2u)
 
 /* Target command selector, written to R_TGT_GO bits [1:0]. */
 #define TGT_READ     0u   /* 0180 */
@@ -150,6 +160,44 @@ extern unsigned int arena_limit(void);
 static inline uint32_t cycles(void) { return REG(R_CYCLES); }
 
 static inline uint32_t pcm_level(void)    { return PCM_LEVEL(REG(R_PCM_ST)); }
+
+/* ---- PSRAM accessors ------------------------------------------------------
+ *
+ * Every wait is BOUNDED. A PSRAM access is ~15 clk_sys cycles; the guard is
+ * ~1 ms, which is four orders of magnitude of slack and still cannot hang
+ * the core if the controller never answers. A hang here would present as a
+ * frozen player with no message, which is the worst failure this core has.
+ *
+ * A failed access returns 0 / does nothing rather than retrying: the caller
+ * cannot do anything useful about it, and a retry loop is just a slower hang.
+ */
+static inline int psr_wait(void)
+{
+    uint32_t t0 = cycles();
+    while (!PSR_READY(REG(R_PSR_ST)))
+        if ((uint32_t)(cycles() - t0) > CLK_HZ / 1000u) return 0;
+    return 1;
+}
+
+static inline void psr_seek(uint32_t word_addr) { REG(R_PSR_ADDR) = word_addr; }
+
+/* Reads at the CURRENT address and steps on. */
+static inline uint16_t psr_next(void)
+{
+    REG(R_PSR_ST) = 1u;                      /* any write starts a read */
+    if (!psr_wait()) return 0;
+    return (uint16_t)REG(R_PSR_DATA);
+}
+
+/* Writes at the CURRENT address and steps on. */
+static inline void psr_put(uint16_t v)
+{
+    REG(R_PSR_DATA) = v;
+    (void)psr_wait();
+}
+
+static inline uint16_t psr_read16(uint32_t a)  { psr_seek(a); return psr_next(); }
+static inline void     psr_write16(uint32_t a, uint16_t v) { psr_seek(a); psr_put(v); }
 static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 
 /* Must match CORE_VERSION in mp3_soc.v. The .rom reloads in seconds but the
@@ -179,7 +227,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503316u   /* rev 22: clk_sys 60 -> 66.667 MHz   */
+#define EXPECT_VERSION 0x4D503317u   /* rev 23: PSRAM window               */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
@@ -1423,6 +1471,29 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * past 296px at two digits, and these are separate investigations. */
 #ifndef FIFO_DEFICIT
 #define FIFO_DEFICIT 0
+#endif
+/* PSRAM bring-up test. EXTRA_CFLAGS="-DPSRAM_TEST=1 -Os"
+ *
+ * Nothing has ever driven cram0 in this core, so the window is unproven
+ * hardware. Prove it BEFORE pl_text depends on it -- a bad window found
+ * through a corrupted playlist parser would be miserable to diagnose.
+ *
+ * The pattern is derived from the ADDRESS, not a constant, so a stuck or
+ * swapped address line shows up as a mismatch instead of passing. Both
+ * paths are covered: a sequential pass that leans on auto-increment, then
+ * a strided re-read that seeks every time. Those fail differently -- the
+ * first catches the increment logic, the second catches the addressing.
+ * -Os is not optional; the image has 288 bytes free. */
+#ifndef PSRAM_TEST
+#define PSRAM_TEST 0
+#endif
+#if PSRAM_TEST
+/* LATCHED, not toasted. The test runs immediately after the interlock
+ * check -- before the UI can draw -- so the first attempt showed nothing
+ * at all. The result is held and redrawn every second instead, which
+ * also means it cannot be missed by looking away. */
+static uint32_t psr_bad_seq, psr_bad_rnd, psr_first, psr_words;
+static uint32_t ui_last_psr = 0xFFFFFFFFu;
 #endif
 /* Resume instrumentation. EXTRA_CFLAGS="-DUI_SHOW_RESUME_DIAG=1 -Os"
  *
@@ -6114,6 +6185,29 @@ ui_tail:
     }
 #endif
 
+#if PSRAM_TEST
+    if (ui_sec != ui_last_psr) {
+        ui_last_psr = ui_sec;
+        char b[48], *q = b;
+        if (!psr_bad_seq && !psr_bad_rnd) {
+            const char *m = "PSRAM OK ";
+            while (*m) *q++ = *m++;
+            q = ui_dec(q, psr_words);
+        } else {
+            const char *m = "PSR S";
+            while (*m) *q++ = *m++;
+            q = ui_dec(q, psr_bad_seq);
+            *q++ = ' '; *q++ = 'R'; q = ui_dec(q, psr_bad_rnd);
+            *q++ = ' '; *q++ = '@'; q = ui_dec(q, psr_first);
+        }
+        *q = 0;
+        uint16_t pbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), pbg);
+        fb_set_color(UI_RED, pbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
 #if UI_SHOW_RESUME_DIAG
     {
         char b[40], *q = b;
@@ -9500,6 +9594,41 @@ int main(void)
         ui_mismatch_screen(REG(R_VERSION), EXPECT_VERSION);
         for (;;) { }
     }
+
+#if PSRAM_TEST
+    {
+        /* 8192 words = 16 KB, comfortably past the 12,288 bytes pl_text
+         * needs. Pattern is a function of the address so a swapped or stuck
+         * address line cannot pass. */
+        const uint32_t N = 8192u;
+        uint32_t bad_seq = 0, bad_rnd = 0, first = 0xFFFFFFFFu;
+
+        psr_seek(0);
+        for (uint32_t i = 0; i < N; i++) psr_put((uint16_t)(i ^ 0xA5A5u));
+
+        /* Pass 1: sequential, exercising auto-increment. */
+        psr_seek(0);
+        for (uint32_t i = 0; i < N; i++) {
+            if (psr_next() != (uint16_t)(i ^ 0xA5A5u)) {
+                bad_seq++;
+                if (first == 0xFFFFFFFFu) first = i;
+            }
+        }
+
+        /* Pass 2: strided, seeking every time. A prime stride so the walk
+         * does not sit on one set of address bits. */
+        for (uint32_t i = 0; i < N; i += 7u) {
+            if (psr_read16(i) != (uint16_t)(i ^ 0xA5A5u)) {
+                bad_rnd++;
+                if (first == 0xFFFFFFFFu) first = i;
+            }
+        }
+
+        psr_bad_seq = bad_seq; psr_bad_rnd = bad_rnd;
+        psr_first   = (first == 0xFFFFFFFFu) ? 0u : first;
+        psr_words   = N;
+    }
+#endif
 
     vol_apply();
 
