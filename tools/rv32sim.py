@@ -96,6 +96,12 @@ class Machine:
             return self.dma_len
         if off == 0x1C:
             return len(self.blob)
+        if off == 0x20:
+            # Instructions retired so far. The target has a cycle counter and
+            # fw/flac.c's FLAC_PROFILE hooks read it through a function
+            # pointer; this is the same measurement here, in instructions
+            # rather than cycles, so a pass can be timed without hardware.
+            return self.icount & 0xFFFFFFFF
         raise SystemExit('bad MMIO load 0x%X' % addr)
 
     # ---- run ---------------------------------------------------------------
@@ -198,6 +204,7 @@ class Machine:
                     imm -= 0x1000
                 addr = (reg[rs1] + imm) & M32
                 if addr >= MMIO:
+                    self.icount = n          # so 0xF0000020 reads the live count
                     v = self.mmio_load(addr)
                 elif f3 == 2:
                     v = (mem[addr] | (mem[addr + 1] << 8) |
