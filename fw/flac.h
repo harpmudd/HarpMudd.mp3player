@@ -80,6 +80,9 @@ typedef struct {
      * track. Peak is Q12 (4096 = full scale), used to back the gain off
      * rather than clip -- the one thing most players get wrong.
      * rg_have is a bitmask: 1 track gain, 2 album gain, 4 peak. */
+#ifndef REPLAYGAIN
+#define REPLAYGAIN 0
+#endif
     int16_t       rg_track_cdb, rg_album_cdb;
     uint16_t      rg_peak_q12;
     uint8_t       rg_have;

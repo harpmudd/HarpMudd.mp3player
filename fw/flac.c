@@ -177,6 +177,7 @@ static void tag_copy(char *dst, uint32_t cap, const char *src, uint32_t n)
     dst[u8_trim(dst, j)] = 0;
 }
 
+#if REPLAYGAIN
 /* "-7.23 dB" -> -723 centi-dB. Also accepts "+2.5", "3", trailing units and
  * surrounding spaces. Two decimals is all the tag ever carries; a third is
  * read and discarded rather than rejected.
@@ -231,6 +232,7 @@ static uint16_t rg_parse_peak(const char *v, uint32_t n)
     uint32_t q = whole * 4096u + (frac * 4096u) / scale;
     return (uint16_t)(q > 65535u ? 65535u : q);
 }
+#endif
 
 static void vorbis_comments(flac_t *f, uint32_t length)
 {
@@ -269,6 +271,7 @@ static void vorbis_comments(flac_t *f, uint32_t length)
                                                    tag_copy(f->tag_year,   8u, v, vn > 4u ? 4u : vn); }
         else if (key_is(e, keep, "TRACKNUMBER")) { v += 12; vn = keep - 12u;
                                                    tag_copy(f->tag_trk,    8u, v, vn); }
+#if REPLAYGAIN
         /* ReplayGain. All three keys are 21 characters, so the value starts
          * at 22 -- key_is() requires the full key AND a following '=', so it
          * cannot match a prefix and the order here does not matter.
@@ -280,6 +283,7 @@ static void vorbis_comments(flac_t *f, uint32_t length)
             f->rg_album_cdb = rg_parse_cdb(e + 22, keep - 22u); f->rg_have |= 2u; }
         else if (key_is(e, keep, "REPLAYGAIN_TRACK_PEAK")) {
             f->rg_peak_q12  = rg_parse_peak(e + 22, keep - 22u); f->rg_have |= 4u; }
+#endif
     }
     for (; used < length; used++) (void)bits(f, 8);
 }

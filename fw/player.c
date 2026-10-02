@@ -842,6 +842,7 @@ static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
  * Mode: 0 off, 1 album, 2 track. Album is the default -- it preserves the
  * loudness relationships WITHIN a record, which track gain flattens, and
  * flattening them is wrong on anything sequenced deliberately. */
+#if REPLAYGAIN
 #define RG_DB_LO (-30)
 #define RG_DB_HI  (12)
 static const uint16_t rg_tab[RG_DB_HI - RG_DB_LO + 1] = {
@@ -902,11 +903,14 @@ static void rg_update(int16_t track_cdb, int16_t album_cdb,
 }
 
 static void rg_reapply(void);   /* defined after flac_t fl below */
+#endif  /* REPLAYGAIN */
 
 static void vol_apply(void)
 {
     int32_t g = (int32_t)(volume * 256u / 100u);
+#if REPLAYGAIN
     if (rg_mode && rg_q8 != 256) g = (g * rg_q8) >> 8;
+#endif
     vol_gain = g;
 }
 /* ------------------------------------------------------------- playlist ----
@@ -1545,6 +1549,29 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
  * -Os is not optional; the image has 288 bytes free. */
 #ifndef PSRAM_TEST
 #define PSRAM_TEST 0
+#endif
+/* ReplayGain. OFF, and off for a measured reason rather than caution.
+ *
+ * Surveyed 2026-10-02 against the user's actual libraries:
+ *   FLAC, 1,514 files : 100% tagged, every value +0.00 dB -- inert.
+ *   MP3,  sampled 150 :   9% tagged, real values -7.6 to -10.0 dB.
+ *
+ * The MP3 number is the one that decides it, and it argues AGAINST the
+ * feature. Every real value is negative, so applying gain to the tagged
+ * 9% makes those files quieter than the untagged 91% -- it introduces an
+ * 8 dB step into the library whose complaint is inconsistent loudness.
+ * ReplayGain only helps at near-total coverage; partial coverage is
+ * worse than none.
+ *
+ * Kept rather than deleted: the dB->Q8 table (no FPU, so pow() was never
+ * available), the clip-safe peak handling, and the Vorbis parsing are the
+ * hard parts, and they cost nothing while this is 0. Turn it on with
+ * -DREPLAYGAIN=1 if a library is tagged throughout.
+ *
+ * NOTE for whoever revisits: MP3 gains live in ID3v2 TXXX frames, which
+ * nothing here parses. This path is FLAC/Vorbis only. */
+#ifndef REPLAYGAIN
+#define REPLAYGAIN 0
 #endif
 #if PSRAM_TEST
 /* LATCHED, not toasted. The test runs immediately after the interlock
@@ -6849,6 +6876,7 @@ static void poll_input(void)
         /* Select+X: ReplayGain off -> album -> track. The slot the dropped
          * reverse-meter cycle left behind, and X/Y with Select are now the
          * audio-mode pair. */
+#if REPLAYGAIN
         if (keys & KEY_SELECT) {
             sel_used = 1;
             rg_mode  = (uint8_t)((rg_mode + 1u) % 3u);
@@ -6856,7 +6884,9 @@ static void poll_input(void)
             ui_toast_msg(rg_mode == 0u ? "REPLAYGAIN OFF"
                        : rg_mode == 1u ? "REPLAYGAIN ALBUM"
                                        : "REPLAYGAIN TRACK");
-        } else {
+        } else
+#endif
+        {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
@@ -7645,6 +7675,7 @@ static void target_flush_slot_cache(void)
 /* Declared up with the other track state -- see fl_first_frame. */
 static flac_t   fl;
 
+#if REPLAYGAIN
 /* Re-run the gain for the track already playing, after a mode change.
  * fl stays populated for the life of a FLAC, so the tags are still
  * there; an MP3 has none and goes back to unity. */
@@ -7655,6 +7686,7 @@ static void rg_reapply(void)
     else
         rg_update(0, 0, 0, 0);
 }
+#endif
 
 static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
@@ -9176,7 +9208,9 @@ static int load_track(void)
      * a FLAC without ReplayGain tags must not inherit the previous track's
      * gain -- that would present as "one album plays quiet" and be close to
      * untraceable. Both track-reset sites do it. */
+#if REPLAYGAIN
     rg_update(0, 0, 0, 0);
+#endif
     /* A new track makes any pending seek intent meaningless: ui_sec has
      * gone back to 0 while the intent still refers to the OLD track's
      * timeline. It was never cleared here, which is why loading one
@@ -9314,8 +9348,10 @@ static int load_track(void)
         }
         /* flac_open has parsed the Vorbis comments by here, and the file
          * is known playable, so this is the first valid point. */
+#if REPLAYGAIN
         rg_update(fl.rg_track_cdb, fl.rg_album_cdb, fl.rg_peak_q12,
                   fl.rg_have);
+#endif
 
         fl_buf = (int32_t *)malloc((size_t)fl.max_blocksize * sizeof(int32_t));
         if (!fl_buf) { REG(R_STAT2) = 0xC1000000u; return 0; }
@@ -10458,7 +10494,9 @@ int main(void)
      * a FLAC without ReplayGain tags must not inherit the previous track's
      * gain -- that would present as "one album plays quiet" and be close to
      * untraceable. Both track-reset sites do it. */
+#if REPLAYGAIN
     rg_update(0, 0, 0, 0);
+#endif
     /* A new track makes any pending seek intent meaningless: ui_sec has
      * gone back to 0 while the intent still refers to the OLD track's
      * timeline. It was never cleared here, which is why loading one
