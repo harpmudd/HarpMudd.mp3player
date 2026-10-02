@@ -14,6 +14,76 @@ the reasoning, not the status.
 
 # v1.6.0 -- FLAC, fixed
 
+## SOLVED 2026-10-02, in FIRMWARE. Phase 1 is not needed and is dropped.
+
+Both test files now read **L0 E1 X0 T0** on hardware: the PCM FIFO never
+empties during playback at all, only at the start-of-track fill.
+
+| file | | before | after |
+|---|---|---|---|
+| Blue Hearts | 16-bit 44.1k | E climbing, X2 | **E1 X0 T0** |
+| Mandrake | 24-bit 48k | E climbing, X2 | **E1 X0 T0** |
+
+Two firmware changes, no RTL, no M10K, no migration:
+
+1. **The 32-bit predictor path** (`b5b8dd7`), written 2026-09-16 and PARKED
+   because it was heard as worse -- on a diagnostic build running the click
+   detector per sample inside the audio path. The rejection was never valid.
+   Fixes 16-bit outright.
+2. **Unrolling the 64-bit predictor** (`d8d2401`). 24-bit can never take the
+   narrow path: one tap needs |coef| < 2^(32-bps), which is 256 at 24-bit
+   against coefficients that run to thousands. Both of the branch's
+   measurements were on 16-bit files, so this was the gap. -4.08% on
+   Mandrake, and it closed a shortfall that needed ~4.5%.
+
+### What this kills
+
+- **Phase 1, the SDRAM migration** -- off the 1.6.0 path entirely. It stays a
+  1.7.0 item for lyrics and AAC, which need image space rather than M10K.
+- **E1, the deeper PCM FIFO.** 8 M10K not needed. 2048 entries is enough once
+  the decoder meets its deadline.
+- **E2, the Rice decoder in fabric** -- for THIS purpose. It was the headline
+  because FLAC was slow; FLAC is no longer slow.
+- **The RAM banking work**, which existed only to free blocks for E1.
+
+Three to four sessions of RTL, with real arbitration risk against a
+one-scanline scanout deadline, replaced by two firmware changes -- one of
+which was already written.
+
+### The lesson, which is the expensive part
+
+**The plan was built on a true fact that was not the binding constraint.** A
+4608-sample frame against a 2048-entry FIFO is genuinely lopsided, and it
+argued convincingly for a bigger buffer. Measuring said the decoder missed
+its deadline by **2 ms** -- about 4% -- which is an optimisation problem, not
+a buffering one.
+
+Two instrument errors on the way, both worth not repeating:
+
+- The first sampler ran once per decode-loop iteration, and an iteration IS a
+  frame, so it reported X104 on two unrelated files. **That was its own
+  sampling interval.** Same shape as the counter that rose by exactly 1 per
+  track: a reading pinned to a structural constant is a ceiling, not data.
+- The host harness cannot verify 24-bit files -- `reference_crc()` packs
+  samples into `array('h')` and overflows -- so every number the predictor
+  branch was judged on came from 16-bit files. That is exactly why its guard
+  being dead at 24-bit went unnoticed for two weeks.
+
+### Still open
+
+- **24-bit bit-exactness is NOT verified.** 16-bit is (`bit-exact: yes` over
+  921,600 samples). The unroll only reorders additions into an int64_t
+  accumulator, which cannot change an exact integer sum, but the harness
+  should be widened past int16 so the claim rests on a measurement.
+- **E3, the 48 kHz gate**, is now the interesting one: the limitation text
+  describes a decoder that no longer exists.
+- **F1, held seek on a FLAC.** Untouched by any of this.
+
+---
+
+## The plan as written 2026-10-01, before the measurement
+
+
 **Planned 2026-10-01, after v1.5.1 shipped.** Phases 0, 1 and 2 of the
 investigation below went out in v1.5.1: the diagnostic repair, the cascade
 gating, and clk_sys 60 -> 66.667 MHz. The clock also retired the 1.2x
