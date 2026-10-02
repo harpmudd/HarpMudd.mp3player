@@ -8569,7 +8569,13 @@ static uint32_t vbr_frame_count(void)
 }
 
 /* Reads the head of the file and skips any ID3 tag, leaving the ring and
- * file_pos positioned at real audio. Returns 0 on I/O failure. */
+ * file_pos positioned at real audio. Returns 0 on I/O failure.
+ *
+ * -Os, like load_track above it and for the same reason: this runs once per
+ * track change and was 5,068 bytes at -O2, the largest genuinely cold
+ * function in the build. Image space is the binding constraint on every
+ * feature now queued -- 1,424 bytes were free when this was added. */
+__attribute__((optimize("Os")))
 static int read_track_head(void)
 {
     refill_drain();     /* settle anything in flight before touching the ring */
