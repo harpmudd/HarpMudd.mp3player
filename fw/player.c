@@ -9177,6 +9177,17 @@ static int load_track(void)
      * gain -- that would present as "one album plays quiet" and be close to
      * untraceable. Both track-reset sites do it. */
     rg_update(0, 0, 0, 0);
+    /* A new track makes any pending seek intent meaningless: ui_sec has
+     * gone back to 0 while the intent still refers to the OLD track's
+     * timeline. It was never cleared here, which is why loading one
+     * track and then another made the seek wedge reproducible when the
+     * second track alone did not -- user, 2026-10-02.
+     *
+     * This matters MORE since the staleness window was widened to 300 to
+     * fix the step collision: at 30 a stale cross-track intent was simply
+     * ignored, at 300 it would be trusted. Widening that window without
+     * this reset would have traded one wedge for another. */
+    fl_seek_intent = 0;
 #if FIFO_DEFICIT
     def_min = 0xFFFFu; def_eps = 0u; def_ms_max = 0u;
     def_ms_tot = 0u; def_in = 0u;
@@ -10448,6 +10459,17 @@ int main(void)
      * gain -- that would present as "one album plays quiet" and be close to
      * untraceable. Both track-reset sites do it. */
     rg_update(0, 0, 0, 0);
+    /* A new track makes any pending seek intent meaningless: ui_sec has
+     * gone back to 0 while the intent still refers to the OLD track's
+     * timeline. It was never cleared here, which is why loading one
+     * track and then another made the seek wedge reproducible when the
+     * second track alone did not -- user, 2026-10-02.
+     *
+     * This matters MORE since the staleness window was widened to 300 to
+     * fix the step collision: at 30 a stale cross-track intent was simply
+     * ignored, at 300 it would be trusted. Widening that window without
+     * this reset would have traded one wedge for another. */
+    fl_seek_intent = 0;
             track_kbps = 0; track_hz = 0;
             file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
