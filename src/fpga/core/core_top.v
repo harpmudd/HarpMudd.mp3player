@@ -137,11 +137,10 @@ assign port_tran_si            = 1'bZ;    assign port_tran_si_dir        = 1'b0;
 assign port_tran_sck           = 1'bZ;    assign port_tran_sck_dir       = 1'b0;
 assign port_tran_sd            = 1'bZ;    assign port_tran_sd_dir        = 1'b0;
 
-assign cram0_a = 6'h0;  assign cram0_dq = 16'hZZZZ; assign cram0_clk = 1'b0;
-assign cram0_adv_n = 1'b1; assign cram0_cre = 1'b0;
-assign cram0_ce0_n = 1'b1; assign cram0_ce1_n = 1'b1;
-assign cram0_oe_n = 1'b1; assign cram0_we_n = 1'b1;
-assign cram0_ub_n = 1'b1; assign cram0_lb_n = 1'b1;
+// cram0 is DRIVEN now -- the psram controller lives in core_game.vh, which
+// is `included into this module, so it reaches these pins directly. It
+// holds the cold buffers that no longer fit in the CPU's 256 KB.
+// cram1 stays tied off below; one 16 MB chip is ample for 23 KB.
 
 assign cram1_a = 6'h0;  assign cram1_dq = 16'hZZZZ; assign cram1_clk = 1'b0;
 assign cram1_adv_n = 1'b1; assign cram1_cre = 1'b0;

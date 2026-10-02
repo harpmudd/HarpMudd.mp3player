@@ -106,6 +106,9 @@ wire [3:0]  soc_set_idx;
 wire        soc_set_wr;
 wire [31:0] soc_set_wdata;
 wire [31:0] soc_set_rdata;
+wire [21:0] soc_psr_addr;
+wire [15:0] soc_psr_wdata, psr_dout;
+wire        soc_psr_rd, soc_psr_wr, psr_avail, psr_busy;
 wire [9:0]  soc_dt_addr;
 wire        soc_dt_wren;
 wire [31:0] soc_dt_wdata;
@@ -193,7 +196,48 @@ mp3_soc u_soc (
     .set_idx  (soc_set_idx),
     .set_wr   (soc_set_wr),
     .set_wdata(soc_set_wdata),
-    .set_rdata(soc_set_rdata)
+    .set_rdata(soc_set_rdata),
+
+    .psr_addr (soc_psr_addr),
+    .psr_wdata(soc_psr_wdata),
+    .psr_rd   (soc_psr_rd),
+    .psr_wr   (soc_psr_wr),
+    .psr_rdata(psr_dout),
+    .psr_avail(psr_avail),
+    .psr_busy (psr_busy)
+);
+
+// ---- PSRAM -------------------------------------------------------------
+// agg23's controller (MIT), from _mister_pocket_lib/core/mem/psram.sv.
+//
+// On clk_sys, not the 100 MHz SDRAM clock: the timing is parameterised so
+// a slower clock is always safe, and running it here means there is no
+// clock-domain crossing in the CPU's path to it at all.
+//
+// Nothing else in the design touches PSRAM, so unlike a port on sdram_fb
+// there is no arbitration against the scanout's one-scanline deadline.
+// Whole-word accesses only, so both byte enables are always asserted.
+psram #(
+    .CLOCK_SPEED(66.666667)
+) u_psram (
+    .clk             (clk_sys),
+    .bank_sel        (1'b0),
+    .addr            (soc_psr_addr),
+    .write_en        (soc_psr_wr),
+    .data_in         (soc_psr_wdata),
+    .write_high_byte (1'b1),
+    .write_low_byte  (1'b1),
+    .read_en         (soc_psr_rd),
+    .read_avail      (psr_avail),
+    .data_out        (psr_dout),
+    .busy            (psr_busy),
+
+    .cram_a     (cram0_a),     .cram_dq    (cram0_dq),
+    .cram_wait  (cram0_wait),  .cram_clk   (cram0_clk),
+    .cram_adv_n (cram0_adv_n), .cram_cre   (cram0_cre),
+    .cram_ce0_n (cram0_ce0_n), .cram_ce1_n (cram0_ce1_n),
+    .cram_oe_n  (cram0_oe_n),  .cram_we_n  (cram0_we_n),
+    .cram_ub_n  (cram0_ub_n),  .cram_lb_n  (cram0_lb_n)
 );
 
 // core_bridge_cmd's datatable, user-side port. core_top declares these wires
