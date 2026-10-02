@@ -609,11 +609,27 @@ static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
                 out[i] += p >> shift;
             }
         } else {
+            /* Unrolled by four, like the narrow path above, because 24-bit
+             * audio ALWAYS lands here: one tap needs |coef| * 2^23 < 2^31,
+             * i.e. |coef| < 256, and FLAC coefficients at 15-bit precision
+             * run to thousands. Measured on hardware 2026-10-02 -- the
+             * narrow path fixed 16-bit files outright (FIFO never ran dry)
+             * and left a 24-bit/48 kHz file completely unchanged, still
+             * 2 ms short per frame.
+             *
+             * The multiplies cannot be removed: on RV32IM each tap is
+             * mul+mulh plus a two-word add. The loop overhead around them
+             * can be, and against a 4% shortfall that is the whole job. */
             for (uint32_t i = order; i < n; i++) {
                 const int32_t *w = out + i - order;
                 int64_t p = 0;
-                for (uint32_t j = 0; j < order; j++)
-                    p += (int64_t)rc[j] * w[j];
+                int32_t j = 0;
+                for (; j + 4 <= (int32_t)order; j += 4)
+                    p += (int64_t)rc[j]     * w[j]
+                       + (int64_t)rc[j + 1] * w[j + 1]
+                       + (int64_t)rc[j + 2] * w[j + 2]
+                       + (int64_t)rc[j + 3] * w[j + 3];
+                for (; j < (int32_t)order; j++) p += (int64_t)rc[j] * w[j];
                 out[i] += (int32_t)(p >> shift);
             }
         }
@@ -722,7 +738,13 @@ static flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
             while (i < n) {
                 const int32_t *w = buf + i - order;
                 int64_t p = 0;
-                for (uint32_t j = 0; j < order; j++)
+                int32_t j = 0;
+                for (; j + 4 <= (int32_t)order; j += 4)
+                    p += (int64_t)rc[j]     * (w[j]     >> wasted)
+                       + (int64_t)rc[j + 1] * (w[j + 1] >> wasted)
+                       + (int64_t)rc[j + 2] * (w[j + 2] >> wasted)
+                       + (int64_t)rc[j + 3] * (w[j + 3] >> wasted);
+                for (; j < (int32_t)order; j++)
                     p += (int64_t)rc[j] * (w[j] >> wasted);
                 EMIT((rice_next(f, &r) + (int32_t)(p >> shift)) << wasted);
             }
