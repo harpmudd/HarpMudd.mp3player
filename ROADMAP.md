@@ -639,6 +639,13 @@ time it wedges at, and whether the core had just booted.
 
 # Releasing
 
+**Build the shipping firmware with `EXTRA_CFLAGS=-DAPP_RELEASE=1`.** Without
+it the splash reads "v1.6.0 (Dev)" -- the default is DEV on purpose, so a
+development build can never present itself as a release. A shipped build
+wrongly marked "(Dev)" is embarrassing; a dev build wrongly marked as a
+release is a support thread where nobody can tell which firmware the user
+actually has. The marker comes off at signoff, not before.
+
 **Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
 running list and stays flat, one line an item. A GitHub release body carries
 the same content grouped under **New** / **Changed** / **Fixed**, which earns
