@@ -272,7 +272,9 @@ module mp3_fb (
     // ======================================================================
     // 128 entries: shared by CHAR (max 48 px wide) and COPY, whose width is the
     // album-art panel rather than a glyph.
-    reg [15:0] glyphbuf [0:127];
+    /* MLAB, not M10K: 128x16 = 2048 bits is 20% of a block. Four MLABs
+     * hold it, and ALMs are only 33% used. */
+    (* ramstyle = "MLAB" *) reg [15:0] glyphbuf [0:127];
     reg [15:0] glyph_q;
     always @(posedge clk_sdram) glyph_q <= glyphbuf[wsrc_addr[6:0]];
 
@@ -289,7 +291,8 @@ module mp3_fb (
     // so queue order IS address order. fw_disc records it if that ever stops
     // being true (the testbench checks it stays clear).
     // ======================================================================
-    (* ramstyle = "M10K" *) reg [15:0] fw_mem [0:255];
+    /* MLAB: 256x16 = 4096 bits is 40% of a block. */
+    (* ramstyle = "MLAB" *) reg [15:0] fw_mem [0:255];
     reg  [8:0]  fw_wr = 0;              // written here
     reg  [8:0]  fw_rd = 0;              // advanced by the engine on retire
     reg  [20:0] fw_next = 0;            // font word offset of the entry at fw_rd
