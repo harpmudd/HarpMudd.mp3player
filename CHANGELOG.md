@@ -12,9 +12,8 @@ What changed in each release, newest first.
 - **A sleep timer.** **Select** + **Up** cycles off, 15, 30 and 60 minutes.
 - **FLAC decoding is about a third faster**, so the files that used to break
   up now play cleanly — on any meter, including the demanding ones.
-- Fixed: **holding seek on a FLAC could stop moving forward and jump
-  backwards**, with only a restart to recover. Three separate faults, one of
-  which made the failure point depend on whichever file you played before.
+- Fixed: **holding seek on a FLAC could jump backwards and stop advancing**,
+  until the track was restarted.
 
 ## v1.5.1 — 1 October 2026
 
