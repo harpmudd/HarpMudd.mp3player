@@ -10914,7 +10914,7 @@ int main(void)
                  * where it had already got to. That is the jump
                  * backwards. From then on the gap was pinned at exactly
                  * 30, so the guard failed forever and the transport could
-                 * never advance again. Only restarting the track cleared
+                 * never advance again. Only restarting the CORE cleared
                  * it, because that reset the intent.
                  *
                  * The real fix is above: the intent is cleared when the

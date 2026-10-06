@@ -653,6 +653,11 @@ code would have pointed at slot_size.
 **User, 2026-09-30, and it was reliable at the time:** hold seek-forward on a
 FLAC; somewhere around 3-4 minutes in it stops advancing and starts jumping
 BACKWARDS, and will not recover -- only restarting the track clears it.
+**[CORRECTED 2026-10-06: it was the CORE that had to be restarted, not the
+track. That fits the root cause and the original wording did not -- a track
+change could not have helped, because the stale slot_size was inherited
+ACROSS loads. Reading it as "restart the track" pointed the early hunt at
+per-track state and away from the value that survived one.]**
 Reproduced "every time" on Circles Around the Sun, Widespread Panic and Phish.
 Played from a PLAYLIST. Never seen on MP3.
 
