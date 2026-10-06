@@ -12,7 +12,38 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
-# v1.6.0 -- FLAC, fixed
+# v1.6.0 -- RELEASED 2026-10-06
+
+Merged `ff89864`, tagged `v1.6.0`, published with the zip attached and
+verified byte-for-byte against the hardware-tested card. Interlock rev 23.
+
+Shipped as **crossfeed and mono, a sleep timer, and FLAC a third faster** --
+headlined on crossfeed rather than the decoder work, because "faster FLAC"
+immediately after v1.5.1's performance release reads as the same release
+twice. The accessibility use of mono is what gives it a story the speed
+work does not have.
+
+**Two release-time traps, both caught only at the last check:**
+
+1. `dist/` still held the **v1.5.1 bitstream** -- repeated `git checkout --
+   dist/` during testing had reverted it. Rev 23 firmware against rev 22
+   silicon is the mismatch screen for every user.
+2. `src/fpga/output_files/` is gitignored and **not per-branch**, so it held
+   another branch's build. A release bitstream must be recompiled on the
+   release branch.
+
+Both argue the same rule: **verify CORE_VERSION against EXPECT_VERSION from
+the actual dist/ files immediately before tagging**, and never assume the
+build output belongs to the branch you are on.
+
+**Not done:** `docs/QA_1.6.0.md` was never run end to end. Sections 2
+(24-bit FLAC, where listening is the only verification that exists), 7 (MP3)
+and 8 (artwork, resume) had no deliberate pass on the final build.
+
+---
+
+# The v1.6.0 plan, as written before the work (kept for the reasoning)
+
 
 ## SOLVED 2026-10-02, in FIRMWARE. Phase 1 is not needed and is dropped.
 
