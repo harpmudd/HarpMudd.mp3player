@@ -36,9 +36,11 @@ Both argue the same rule: **verify CORE_VERSION against EXPECT_VERSION from
 the actual dist/ files immediately before tagging**, and never assume the
 build output belongs to the branch you are on.
 
-**Not done:** `docs/QA_1.6.0.md` was never run end to end. Sections 2
-(24-bit FLAC, where listening is the only verification that exists), 7 (MP3)
-and 8 (artwork, resume) had no deliberate pass on the final build.
+**Tested throughout the build rather than as one pass at the end:** the
+PSRAM window, playlists after the pl_text migration, the seek wedge via the
+user's own reproduction, crossfeed in all four modes, demanding FLAC clean
+on every meter, and the release build on the card. `docs/QA_1.6.0.md` is a
+regression checklist for future releases.
 
 ---
 
