@@ -6,7 +6,7 @@ What changed in each release, newest first.
 
 - **Crossfeed and mono**, on **Select** + **Y**. Crossfeed moves hard-panned
   records out of your head; mono sends the whole mix to both ears, so nothing
-  is lost if you hear better on one side. Remembered between sessions.
+  is lost if you hear better on one side. Setting remembered between sessions.
 - **A sleep timer.** **Select** + **Up** cycles off, 15, 30 and 60 minutes.
 - **FLAC decoding is about a third faster**, so the files that used to break
   up now play cleanly — on any meter, including the demanding ones.
