@@ -2,6 +2,20 @@
 
 What changed in each release, newest first.
 
+## v1.6.0 — UNRELEASED
+
+- **Crossfeed**, for headphones. Hard-panned records stop sitting inside your
+  head and move out in front of you. **Select** + **Y** cycles off, low, high
+  and **mono** — mono sums both channels into both ears, which is the setting
+  that loses nothing if you hear better on one side. It is remembered, and it
+  is in Core Settings.
+- **A sleep timer.** **Select** + **Up** cycles off, 15, 30 and 60 minutes.
+- **FLAC decoding is about a third faster**, so the files that used to break
+  up now play cleanly — on any meter, including the demanding ones.
+- Fixed: **holding seek on a FLAC could stop moving forward and jump
+  backwards**, with only a restart to recover. Three separate faults, one of
+  which made the failure point depend on whichever file you played before.
+
 ## v1.5.1 — 1 October 2026
 
 - **The core runs 11% faster** — its processor moved from 60 MHz to 66.7,
