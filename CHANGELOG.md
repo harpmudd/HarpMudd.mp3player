@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.6.0 — UNRELEASED
+## v1.6.0 — 6 October 2026
 
 - **Crossfeed and mono**, on **Select** + **Y**. Crossfeed moves hard-panned
   records out of your head; mono sends the whole mix to both ears, so nothing
