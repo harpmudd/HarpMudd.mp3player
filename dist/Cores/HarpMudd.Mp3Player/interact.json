@@ -35,6 +35,22 @@
                 }
             },
             {
+                "name": "Crossfeed",
+                "id": 24,
+                "type": "slider_u32",
+                "enabled": true,
+                "persist": true,
+                "address": "0x20000030",
+                "defaultval": 0,
+                "graphical": {
+                    "signed": false,
+                    "min": 0,
+                    "max": 3,
+                    "adjust_small": 1,
+                    "adjust_large": 1
+                }
+            },
+            {
                 "name": "Repeat",
                 "id": 12,
                 "type": "slider_u32",

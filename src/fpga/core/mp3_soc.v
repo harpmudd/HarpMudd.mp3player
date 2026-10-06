@@ -139,7 +139,30 @@ module mp3_soc #(
     output reg  [3:0]   set_idx,
     output reg          set_wr,
     output reg  [31:0]  set_wdata,
-    input  wire [31:0]  set_rdata
+    input  wire [31:0]  set_rdata,
+
+    // ---- PSRAM window (rev 23) -------------------------------------
+    // A plain 16-bit load/store port into the 32 MB PSRAM, which this
+    // core did not use at all before. It exists to get cold buffers OUT
+    // of the CPU's 256 KB -- pl_text and art_acc are 23 KB between them
+    // and the image had 288 bytes left.
+    //
+    // PSRAM rather than the framebuffer SDRAM on purpose: sdram_fb has a
+    // one-scanline hard deadline for scanout and always wins arbitration,
+    // so a CPU port there makes the CPU a second real-time client of the
+    // thing that draws every pixel. Nothing else touches PSRAM, so there
+    // is no arbitration here to get wrong.
+    //
+    // Clocked by clk_sys, NOT the 100 MHz SDRAM clock: the controller's
+    // timing is parameterised so slower is safe, and it means there is no
+    // clock-domain crossing anywhere in this path.
+    output reg  [21:0]  psr_addr,
+    output reg  [15:0]  psr_wdata,
+    output reg          psr_rd,
+    output reg          psr_wr,
+    input  wire [15:0]  psr_rdata,
+    input  wire         psr_avail,
+    input  wire         psr_busy
 );
 
     // ---------------------------------------------------------------- CPU ---
@@ -368,7 +391,8 @@ module mp3_soc #(
                      R_FB_GO   = 8'h54, R_FB_STALL= 8'h58, R_SLOT_SZ = 8'h5C,
                      R_DT_ADDR = 8'h60, R_DT_DATA = 8'h64,
                      R_EQ      = 8'h68, R_SET_IDX = 8'h6C,
-                     R_SET_DAT = 8'h70;
+                     R_SET_DAT = 8'h70, R_PSR_ADDR= 8'h74,
+                     R_PSR_DATA= 8'h78, R_PSR_ST  = 8'h7C;
 
     // Bitstream/firmware interlock. Firmware compares this against its own
     // expected value and refuses to run on a mismatch.
@@ -381,7 +405,7 @@ module mp3_soc #(
     // a mismatched pair would run WRONG rather than merely degraded, which is
     // what rev 22 is: clk_sys moved and every timing constant moved with it, so
     // the wrong pairing plays 11% off pitch and says nothing.
-    localparam [31:0] CORE_VERSION = 32'h4D503316;   // "MP3" + rev 22 (clk_sys 66.667 MHz)
+    localparam [31:0] CORE_VERSION = 32'h4D503317;   // "MP3" + rev 23 (PSRAM window)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -442,12 +466,36 @@ module mp3_soc #(
         .out_r  (audio_r)
     );
 
+    /* PSRAM window state. psr_hold is the last word read -- the CPU bus
+     * is single-cycle and cannot stall, so a read is request / poll /
+     * collect rather than a blocking load. */
+    reg [15:0] psr_hold;
+    reg        psr_ready;
+    reg        psr_wr_pend;
+
     always @(posedge clk) begin
         con_wr      <= 1'b0;
         tgt_go      <= 1'b0;
         fb_cmd_push <= 1'b0;
         dt_wren     <= 1'b0;
         set_wr      <= 1'b0;
+        psr_rd      <= 1'b0;
+        psr_wr      <= 1'b0;
+
+        /* PSRAM completion. A read lands in psr_hold and a write simply
+         * finishes; either way the address steps on and ready goes up.
+         * Stepping ONLY on completion is deliberate -- incrementing at
+         * request time would skip a word whenever firmware polled the
+         * status register before the access finished. */
+        if (psr_avail) begin
+            psr_hold  <= psr_rdata;
+            psr_addr  <= psr_addr + 22'd1;
+            psr_ready <= 1'b1;
+        end else if (psr_wr_pend && !psr_busy) begin
+            psr_addr  <= psr_addr + 22'd1;
+            psr_ready <= 1'b1;
+        end
+        psr_wr_pend <= psr_wr ? 1'b1 : (psr_busy ? psr_wr_pend : 1'b0);
 
         if (rst) begin
             status0 <= 32'd0; status1 <= 32'd0;
@@ -467,6 +515,9 @@ module mp3_soc #(
             pcm_rate <= 32'd3092376;   // 48 kHz at clk_sys = 66.666667 MHz
             eq_preset <= 3'd0;         // FLAT: bypass until asked otherwise
             set_idx <= 4'd0; set_wdata <= 32'd0;
+            psr_addr <= 22'd0; psr_wdata <= 16'd0;
+            psr_rd <= 1'b0; psr_wr <= 1'b0; psr_ready <= 1'b0;
+            psr_hold <= 16'd0; psr_wr_pend <= 1'b0;
         end else if (d_req & d_is_mmio & dWE) begin
             case (mmio_reg)
                 R_CONSOLE: begin con_char <= dDAT_MOSI[7:0]; con_wr <= 1'b1; end
@@ -475,6 +526,18 @@ module mp3_soc #(
                 R_EQ:       eq_preset <= dDAT_MOSI[2:0];
                 R_SET_IDX:  set_idx   <= dDAT_MOSI[3:0];
                 R_SET_DAT:  begin set_wdata <= dDAT_MOSI; set_wr <= 1'b1; end
+                /* PSRAM. The address is a 16-bit WORD index and
+                 * auto-increments after each completed access, so a
+                 * sequential walk costs one write per word rather than
+                 * three. ready is cleared on every request and set by
+                 * the handshake below; firmware polls R_PSR_ST. */
+                R_PSR_ADDR: begin psr_addr  <= dDAT_MOSI[21:0];
+                                  psr_ready <= 1'b0; end
+                R_PSR_DATA: begin psr_wdata <= dDAT_MOSI[15:0];
+                                  psr_wr    <= 1'b1;
+                                  psr_ready <= 1'b0; end
+                R_PSR_ST:   begin psr_rd    <= 1'b1;
+                                  psr_ready <= 1'b0; end
                 R_PCM_ST:  ;   /* handled by pcm_flush -> pcm_fifo, above */
                 R_STAT0:   status0 <= dDAT_MOSI;
                 R_STAT1:   status1 <= dDAT_MOSI;
@@ -534,6 +597,9 @@ module mp3_soc #(
             R_FB_STALL: mmio_rdata = fb_stall_ctr;
             R_EQ:      mmio_rdata = {29'd0, eq_preset};
             R_SET_DAT: mmio_rdata = set_rdata;
+            R_PSR_ADDR: mmio_rdata = {10'd0, psr_addr};
+            R_PSR_DATA: mmio_rdata = {16'd0, psr_hold};
+            R_PSR_ST:  mmio_rdata = {30'd0, psr_ready, psr_busy};
             R_STAT0:   mmio_rdata = status0;
             R_STAT1:   mmio_rdata = status1;
             R_STAT2:   mmio_rdata = status2;

@@ -102,6 +102,38 @@ static uint32_t unary(flac_t *f)
 
 static void align_byte(flac_t *f) { f->bitcnt -= f->bitcnt & 7u; }
 
+/* One whole Rice code out of a single reservoir window: the zeros, the
+ * terminating 1, and `param` remainder bits. Returns 0 if the code is not
+ * wholly present, leaving the reader untouched for the general path.
+ *
+ * This is the hottest thing in the decoder -- the reader is 64-76% of
+ * channel 0's work and this runs once per sample. Calling unary() and then
+ * bits() makes each re-test the reservoir, re-mask it and update bitcnt
+ * separately, and that bookkeeping is a large part of the cost rather than
+ * the extraction itself. Here it is one refill attempt, one clz and one
+ * bitcnt update.
+ *
+ * Deliberately returns 0 rather than handling short data: every
+ * end-of-data and corrupt-stream case stays in the general path, in one
+ * place, instead of being duplicated somewhere hard to prove. A CD rip
+ * carries ~9.6 coded bits per sample and a 24-bit file ~18.5, so a 32-bit
+ * reservoir covers the common case for both. */
+static inline int rice_fast(flac_t *f, uint32_t param, int32_t *outv)
+{
+    if (f->bitcnt < 32u) (void)need(f, 32u);
+    if (!f->bitcnt) return 0;
+    uint64_t win = f->bitacc & (((uint64_t)1 << f->bitcnt) - 1u);
+    if (!win) return 0;                       /* >= bitcnt leading zeros */
+    uint32_t lead = (uint32_t)__builtin_clzll(win) - (64u - f->bitcnt);
+    if (f->bitcnt < lead + 1u + param) return 0;
+    f->bitcnt -= lead + 1u + param;
+    uint32_t rem = param
+        ? (uint32_t)((f->bitacc >> f->bitcnt) & ((1u << param) - 1u)) : 0u;
+    uint32_t v = (lead << param) | rem;
+    *outv = (v & 1u) ? -(int32_t)((v >> 1) + 1u) : (int32_t)(v >> 1);
+    return 1;
+}
+
 /* ------------------------------------------------------------ metadata */
 
 /* ---- Vorbis comments (metadata block type 4) ---------------------------
@@ -145,6 +177,63 @@ static void tag_copy(char *dst, uint32_t cap, const char *src, uint32_t n)
     dst[u8_trim(dst, j)] = 0;
 }
 
+#if REPLAYGAIN
+/* "-7.23 dB" -> -723 centi-dB. Also accepts "+2.5", "3", trailing units and
+ * surrounding spaces. Two decimals is all the tag ever carries; a third is
+ * read and discarded rather than rejected.
+ *
+ * No strtod anywhere near this: there is no FPU, and newlib's float parsing
+ * would cost more code than every ReplayGain feature put together. */
+static int16_t rg_parse_cdb(const char *v, uint32_t n)
+{
+    uint32_t i = 0;
+    while (i < n && (v[i] == ' ' || v[i] == '	')) i++;
+    int neg = 0;
+    if (i < n && (v[i] == '-' || v[i] == '+')) { neg = (v[i] == '-'); i++; }
+    int32_t whole = 0;
+    while (i < n && v[i] >= '0' && v[i] <= '9') {
+        if (whole < 1000) whole = whole * 10 + (v[i] - '0');
+        i++;
+    }
+    int32_t frac = 0, fdig = 0;
+    if (i < n && v[i] == '.') {
+        i++;
+        while (i < n && v[i] >= '0' && v[i] <= '9') {
+            if (fdig < 2) { frac = frac * 10 + (v[i] - '0'); fdig++; }
+            i++;
+        }
+    }
+    while (fdig < 2) { frac *= 10; fdig++; }
+    int32_t cdb = whole * 100 + frac;
+    if (cdb > 32000) cdb = 32000;
+    return (int16_t)(neg ? -cdb : cdb);
+}
+
+/* "0.988525" -> Q12, 4096 == full scale. Clamped: a peak above 1.0 is legal
+ * in the tag (the encoder saw inter-sample overs) and must not wrap. */
+static uint16_t rg_parse_peak(const char *v, uint32_t n)
+{
+    uint32_t i = 0;
+    while (i < n && (v[i] == ' ' || v[i] == '	')) i++;
+    uint32_t whole = 0;
+    while (i < n && v[i] >= '0' && v[i] <= '9') {
+        if (whole < 100u) whole = whole * 10u + (uint32_t)(v[i] - '0');
+        i++;
+    }
+    uint32_t frac = 0, scale = 1;
+    if (i < n && v[i] == '.') {
+        i++;
+        while (i < n && v[i] >= '0' && v[i] <= '9' && scale < 10000u) {
+            frac = frac * 10u + (uint32_t)(v[i] - '0');
+            scale *= 10u;
+            i++;
+        }
+    }
+    uint32_t q = whole * 4096u + (frac * 4096u) / scale;
+    return (uint16_t)(q > 65535u ? 65535u : q);
+}
+#endif
+
 static void vorbis_comments(flac_t *f, uint32_t length)
 {
     uint32_t used = 0;
@@ -182,6 +271,19 @@ static void vorbis_comments(flac_t *f, uint32_t length)
                                                    tag_copy(f->tag_year,   8u, v, vn > 4u ? 4u : vn); }
         else if (key_is(e, keep, "TRACKNUMBER")) { v += 12; vn = keep - 12u;
                                                    tag_copy(f->tag_trk,    8u, v, vn); }
+#if REPLAYGAIN
+        /* ReplayGain. All three keys are 21 characters, so the value starts
+         * at 22 -- key_is() requires the full key AND a following '=', so it
+         * cannot match a prefix and the order here does not matter.
+         * keep > 21 is guaranteed by that same '=' test, so keep - 22 cannot
+         * underflow. */
+        else if (key_is(e, keep, "REPLAYGAIN_TRACK_GAIN")) {
+            f->rg_track_cdb = rg_parse_cdb(e + 22, keep - 22u); f->rg_have |= 1u; }
+        else if (key_is(e, keep, "REPLAYGAIN_ALBUM_GAIN")) {
+            f->rg_album_cdb = rg_parse_cdb(e + 22, keep - 22u); f->rg_have |= 2u; }
+        else if (key_is(e, keep, "REPLAYGAIN_TRACK_PEAK")) {
+            f->rg_peak_q12  = rg_parse_peak(e + 22, keep - 22u); f->rg_have |= 4u; }
+#endif
     }
     for (; used < length; used++) (void)bits(f, 8);
 }
@@ -443,6 +545,10 @@ static int32_t rice_next(flac_t *f, rice_t *r)
     }
     r->left--;
     if (r->param == r->escape) return sbits(f, r->raw);
+
+    int32_t fv;
+    if (rice_fast(f, r->param, &fv)) return fv;
+
     uint32_t q = unary(f);
     uint32_t v = (q << r->param) | bits(f, r->param);
     return (v & 1u) ? -(int32_t)((v >> 1) + 1u) : (int32_t)(v >> 1);
@@ -471,6 +577,8 @@ static flac_err residual(flac_t *f, uint32_t order, int32_t *out)
             for (uint32_t i = 0; i < count; i++) out[idx++] = sbits(f, raw);
         } else {
             for (uint32_t i = 0; i < count; i++) {
+                int32_t fv;
+                if (rice_fast(f, param, &fv)) { out[idx++] = fv; continue; }
                 uint32_t q = unary(f);
                 uint32_t r = bits(f, param);
                 uint32_t v = (q << param) | r;
@@ -574,11 +682,64 @@ static flac_err subframe(flac_t *f, int32_t *out, uint32_t bps)
         PROF_ADD(flac_res_cyc);
         if (e) return e; }
         PROF_T0();
-        for (uint32_t i = order; i < n; i++) {
-            int64_t p = 0;
-            for (uint32_t j = 0; j < order; j++)
-                p += (int64_t)coef[j] * out[i - 1u - j];
-            out[i] += (int32_t)(p >> shift);
+        /* Reconstruction, and it is ~46% of decoding a track (measured with
+         * tools/host/flac_bench.py: 142 instructions per sample of 616 on an
+         * order-12 file, counting both channels).
+         *
+         * TWO loops, because a 64-bit multiply-accumulate on a 32-bit CPU is
+         * two multiply instructions plus multi-word adds, and most of the time
+         * it buys nothing: the sum cannot overflow 32 bits unless the
+         * coefficients are large. Decide once per subframe rather than per
+         * tap -- worst case is sum(|coef|) * 2^(bps-1), so the narrow path is
+         * safe while sum < 2^(32-bps).
+         *
+         * Measured on the test card: an order-12 file encoded at maximum
+         * compression takes the narrow path for every subframe, and an
+         * ordinary order-8 file for about two thirds of them.
+         *
+         * Coefficients are reversed once so both loops walk `out` forwards,
+         * which also lets the compiler keep the window in registers. */
+        int32_t  rc[FLAC_MAX_ORDER];
+        uint32_t mag = 0;
+        for (uint32_t i = 0; i < order; i++) {
+            int32_t c = coef[order - 1u - i];
+            rc[i] = c;
+            mag += (uint32_t)(c < 0 ? -c : c);
+        }
+        if (mag < (1u << (32u - bps))) {
+            for (uint32_t i = order; i < n; i++) {
+                const int32_t *w = out + i - order;
+                int32_t p = 0, j = 0;
+                for (; j + 4 <= (int32_t)order; j += 4)
+                    p += rc[j] * w[j] + rc[j + 1] * w[j + 1]
+                       + rc[j + 2] * w[j + 2] + rc[j + 3] * w[j + 3];
+                for (; j < (int32_t)order; j++) p += rc[j] * w[j];
+                out[i] += p >> shift;
+            }
+        } else {
+            /* Unrolled by four, like the narrow path above, because 24-bit
+             * audio ALWAYS lands here: one tap needs |coef| * 2^23 < 2^31,
+             * i.e. |coef| < 256, and FLAC coefficients at 15-bit precision
+             * run to thousands. Measured on hardware 2026-10-02 -- the
+             * narrow path fixed 16-bit files outright (FIFO never ran dry)
+             * and left a 24-bit/48 kHz file completely unchanged, still
+             * 2 ms short per frame.
+             *
+             * The multiplies cannot be removed: on RV32IM each tap is
+             * mul+mulh plus a two-word add. The loop overhead around them
+             * can be, and against a 4% shortfall that is the whole job. */
+            for (uint32_t i = order; i < n; i++) {
+                const int32_t *w = out + i - order;
+                int64_t p = 0;
+                int32_t j = 0;
+                for (; j + 4 <= (int32_t)order; j += 4)
+                    p += (int64_t)rc[j]     * w[j]
+                       + (int64_t)rc[j + 1] * w[j + 1]
+                       + (int64_t)rc[j + 2] * w[j + 2]
+                       + (int64_t)rc[j + 3] * w[j + 3];
+                for (; j < (int32_t)order; j++) p += (int64_t)rc[j] * w[j];
+                out[i] += (int32_t)(p >> shift);
+            }
         }
         PROF_ADD(flac_lpc_cyc);
     } else {
@@ -659,11 +820,42 @@ static flac_err subframe_stream(flac_t *f, uint32_t bps, uint32_t out_bps,
         rice_t r; flac_err e = rice_init(f, &r, order);
         if (e) return e;
         for (uint32_t j = 0; j < order; j++) EMIT(warm[j] << wasted);
-        while (i < n) {
-            int64_t p = 0;
-            for (uint32_t j = 0; j < order; j++)
-                p += (int64_t)coef[j] * (buf[i - 1u - j] >> wasted);
-            EMIT((rice_next(f, &r) + (int32_t)(p >> shift)) << wasted);
+        /* Same two-loop split as subframe(), and for the same reason -- this is
+         * channel 1's reconstruction, which costs as much as channel 0's. See
+         * the comment there for why the narrow path is safe. */
+        int32_t  rc[FLAC_MAX_ORDER];
+        uint32_t mag = 0;
+        for (uint32_t j = 0; j < order; j++) {
+            int32_t c = coef[order - 1u - j];
+            rc[j] = c;
+            mag += (uint32_t)(c < 0 ? -c : c);
+        }
+        if (mag < (1u << (32u - bps))) {
+            while (i < n) {
+                const int32_t *w = buf + i - order;
+                int32_t p = 0, j = 0;
+                for (; j + 4 <= (int32_t)order; j += 4)
+                    p += rc[j] * (w[j] >> wasted)
+                       + rc[j + 1] * (w[j + 1] >> wasted)
+                       + rc[j + 2] * (w[j + 2] >> wasted)
+                       + rc[j + 3] * (w[j + 3] >> wasted);
+                for (; j < (int32_t)order; j++) p += rc[j] * (w[j] >> wasted);
+                EMIT((rice_next(f, &r) + (p >> shift)) << wasted);
+            }
+        } else {
+            while (i < n) {
+                const int32_t *w = buf + i - order;
+                int64_t p = 0;
+                int32_t j = 0;
+                for (; j + 4 <= (int32_t)order; j += 4)
+                    p += (int64_t)rc[j]     * (w[j]     >> wasted)
+                       + (int64_t)rc[j + 1] * (w[j + 1] >> wasted)
+                       + (int64_t)rc[j + 2] * (w[j + 2] >> wasted)
+                       + (int64_t)rc[j + 3] * (w[j + 3] >> wasted);
+                for (; j < (int32_t)order; j++)
+                    p += (int64_t)rc[j] * (w[j] >> wasted);
+                EMIT((rice_next(f, &r) + (int32_t)(p >> shift)) << wasted);
+            }
         }
     } else {
         return FLAC_ERR_DATA;

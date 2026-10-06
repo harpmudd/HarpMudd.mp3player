@@ -5,7 +5,7 @@ SD card, with album art, tags and meters.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
-Current version **v1.5.1**. Release history: [CHANGELOG.md](CHANGELOG.md).
+Current version **v1.6.0**. Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Installing
 
@@ -57,14 +57,17 @@ The controls:
 | **Select** + **L** | Repeat: off → all → one |
 | **Select** + **R** | Shuffle on / off |
 | **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
+| **Select** + **Up** | Sleep timer: off → 15 → 30 → 60 min |
+| **Select** + **Y** | Crossfeed: off → low → high → mono |
 
 Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;
 restarting the current one is instant.
 
 Volume, accent color, repeat, shuffle, the meter and the EQ preset carry over
-between sessions, in step with **Core Settings**; the album art panel and
-screen-blank timeout reset each launch. Switch on **Resume playback** there and
+between sessions, in step with **Core Settings** — crossfeed too, so a
+setting you rely on is still there next time. The album art panel, the
+screen-blank timeout and the sleep timer reset each launch. Switch on **Resume playback** there and
 the core also remembers where you were — one place, for the last playlist you
 used. **Load MP3** records no position, so for an audiobook use a playlist; a
 one-line `.m3u` is enough.
@@ -224,6 +227,33 @@ rises with the speed, so music sounds wrong. Off every launch. 1.2× is the
 whole range — double speed would mean decoding twice as many frames a second,
 past what the CPU can do.
 
+## Crossfeed
+
+**Select** + **Y** cycles off → low → high → mono.
+
+Headphones put each channel straight into one ear with no path to the other,
+which is not how you hear a room. Anything hard-panned — drums entirely in
+one ear on a 60s or 70s record — sits *inside* your head, and over a long
+listen that is tiring. Crossfeed mixes a little of each channel into the
+other, filtered the way your head would filter it, so the sound moves out in
+front of you. On modern recordings the effect is small, because they are
+already mixed to work on headphones.
+
+**Mono** sums both channels into both ears. If you have hearing loss on one
+side, that is the setting that guarantees nothing is lost — crossfeed alone
+still leaves part of the far channel where you cannot hear it.
+
+Off by default, and remembered once you set it — it also appears in
+**Core Settings**, so you do not have to know the button to find it.
+
+## Sleep timer
+
+**Select** + **Up** cycles off → 15 → 30 → 60 minutes, and playback stops
+when the time is up. Off every launch.
+
+It stops the music rather than powering anything down — a core cannot reach
+the Pocket's power or backlight, the same limit screen blanking has.
+
 ## Screen blanking
 
 **Select + Down** cycles the timeout: off, 1, 5, 10, 30 minutes. The screen
@@ -248,10 +278,13 @@ That covers CD rips and most libraries. Hi-res — 88.2, 96, 176.4 and 192 kHz �
 is out, along with 32-bit and multichannel. Anything the core can't play says
 so on screen and names the file's own format, so you aren't left guessing.
 
-The limit is the CPU, not a setting: a 24-bit 44.1 kHz track already uses about
-72% of the time available, and the same music at 96 kHz needs nearly twice what
-the chip can do. Converting a hi-res album to 44.1 kHz is still lossless, and
-on headphones from a handheld it isn't a difference you're going to hear.
+Two things stop hi-res, not a setting. The decoder needs about 10% more CPU
+than the chip has to keep up with 96 kHz, measured on a real album; and those
+files are usually written in 8192-sample blocks, which need a 32 KB buffer
+where the decoder has 24 KB to work in. 192 kHz is twice as far away again.
+
+Converting a hi-res album to 44.1 kHz is still lossless, and on headphones
+from a handheld it isn't a difference you're going to hear.
 
 ## How it works
 
@@ -278,15 +311,10 @@ framework bugs that had to be found first — is in
   to be remembered** — see
   [Remembering which playlist you were using](#remembering-which-playlist-you-were-using).
   It plays fine either way.
-- **The most demanding FLAC files can still stutter** — 24-bit at a high
-  bitrate, mainly. Decoding runs on a CPU inside the FPGA and those files ask
-  for nearly all of it, leaving little for the screen and the card.
-
-  Two things help, in order of effort. **Switch to a simpler meter** — the
-  magic eye, the cassette and the 16-band spectrum are the most demanding of
-  the twelve, and on a file that is close to the edge that alone can be the
-  difference. Bars is among the cheapest. Failing that, re-encode at the
-  default compression setting or to 16-bit/44.1 kHz.
+- **A very demanding FLAC file may still stutter.** The decoder got about a
+  third faster in v1.6.0 and the files that used to break up no longer do,
+  on any meter. If you find one that does, re-encoding at the default
+  compression setting is the quickest fix.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.

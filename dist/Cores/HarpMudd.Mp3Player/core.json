@@ -9,8 +9,8 @@
             "description": "MP3 Player",
             "author": "HarpMudd",
             "url": "https://github.com/harpmudd/HarpMudd.mp3player",
-            "version": "1.5.1",
-            "date_release": "2026-10-01"
+            "version": "1.6.0",
+            "date_release": "2026-10-06"
         },
         "framework": {
             "target_product": "Analogue Pocket",

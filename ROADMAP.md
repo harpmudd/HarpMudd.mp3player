@@ -14,6 +14,120 @@ the reasoning, not the status.
 
 # v1.6.0 -- FLAC, fixed
 
+## SOLVED 2026-10-02, in FIRMWARE. Phase 1 is not needed and is dropped.
+
+Both test files now read **L0 E1 X0 T0** on hardware: the PCM FIFO never
+empties during playback at all, only at the start-of-track fill.
+
+| file | | before | after |
+|---|---|---|---|
+| Blue Hearts | 16-bit 44.1k | E climbing, X2 | **E1 X0 T0** |
+| Mandrake | 24-bit 48k | E climbing, X2 | **E1 X0 T0** |
+
+Two firmware changes, no RTL, no M10K, no migration:
+
+1. **The 32-bit predictor path** (`b5b8dd7`), written 2026-09-16 and PARKED
+   because it was heard as worse -- on a diagnostic build running the click
+   detector per sample inside the audio path. The rejection was never valid.
+   Fixes 16-bit outright.
+2. **Unrolling the 64-bit predictor** (`d8d2401`). 24-bit can never take the
+   narrow path: one tap needs |coef| < 2^(32-bps), which is 256 at 24-bit
+   against coefficients that run to thousands. Both of the branch's
+   measurements were on 16-bit files, so this was the gap. -4.08% on
+   Mandrake, and it closed a shortfall that needed ~4.5%.
+
+### What this kills
+
+- **Phase 1, the SDRAM migration** -- off the 1.6.0 path entirely. It stays a
+  1.7.0 item for lyrics and AAC, which need image space rather than M10K.
+- **E1, the deeper PCM FIFO.** 8 M10K not needed. 2048 entries is enough once
+  the decoder meets its deadline.
+- **E2, the Rice decoder in fabric** -- for THIS purpose. It was the headline
+  because FLAC was slow; FLAC is no longer slow.
+- **The RAM banking work**, which existed only to free blocks for E1.
+
+Three to four sessions of RTL, with real arbitration risk against a
+one-scanline scanout deadline, replaced by two firmware changes -- one of
+which was already written.
+
+### The lesson, which is the expensive part
+
+**The plan was built on a true fact that was not the binding constraint.** A
+4608-sample frame against a 2048-entry FIFO is genuinely lopsided, and it
+argued convincingly for a bigger buffer. Measuring said the decoder missed
+its deadline by **2 ms** -- about 4% -- which is an optimisation problem, not
+a buffering one.
+
+Two instrument errors on the way, both worth not repeating:
+
+- The first sampler ran once per decode-loop iteration, and an iteration IS a
+  frame, so it reported X104 on two unrelated files. **That was its own
+  sampling interval.** Same shape as the counter that rose by exactly 1 per
+  track: a reading pinned to a structural constant is a ceiling, not data.
+- The host harness cannot verify 24-bit files -- `reference_crc()` packs
+  samples into `array('h')` and overflows -- so every number the predictor
+  branch was judged on came from 16-bit files. That is exactly why its guard
+  being dead at 24-bit went unnoticed for two weeks.
+
+### E3 -- hi-res: MEASURED 2026-10-02, still out, and now by how much
+
+The gate is one constant (`FLAC_MAX_RATE`) and the output path is
+rate-agnostic -- `pcm_rate_apply()` builds a fractional phase increment from
+any Hz, with no 48 kHz assumption. So this is purely about cost.
+
+**The user's library is 29% hi-res**, which is the reason to care: 1,514 FLAC
+files on the NAS, surveyed from their STREAMINFO headers.
+
+| rate / depth | files | share |
+|---|---|---|
+| 44.1 kHz 16-bit | 937 | 62% |
+| 44.1 kHz 24-bit | 82 | 5% |
+| 48 kHz 24-bit | 58 | 4% |
+| **96 kHz 24-bit** | **283** | **19%** |
+| **192 kHz 24-bit** | **154** | **10%** |
+
+Benchmarked on a real one (AC/DC, Back In Black, 96/24, 8192-sample blocks):
+**463.3 instructions per sample.** Hi-res is NOT cheaper per sample -- the
+extra samples carry real coded bits, not silence.
+
+    needed     463.3 x 96,000 = 44.5 M instr/s  =  73.4 MHz of clk_sys
+    available  66.667 / 1.65 CPI = 40.4 M instr/s
+
+**110% of the CPU on decode alone**, before meters, UI or SD. The recorded
+figure for this used to be 157 MHz, so the decoder work has more than halved
+it -- the README's explanation IS stale, but the conclusion survives. 192 kHz
+is double again, ~89 M instr/s, and is not in reach by any route here.
+
+**Three gates, and the second is a wall:**
+
+1. **CPU, 10% short.** The PLL can make 75 MHz (VCO allows 60 / 66.67 / 75),
+   which gives 45.5 M instr/s and clears decode by ~2% -- but fmax measured
+   ~75.4, so that is the ragged edge of closure with nothing left for meters.
+2. **Memory.** 8192-sample blocks need `fl_buf` = 32,768 bytes against a
+   24,576-byte arena. No amount of speed fixes it.
+3. **SD, fine.** ~404 KB/s against 736 measured.
+
+**So E2 and Phase 1 both return -- for hi-res, not for stutter.** The Rice
+decoder in fabric is the only realistic route to another 30% now that the
+cheap software wins are spent, and the SDRAM migration is what affords the
+block buffer. That is a coherent 1.7.0 worth 437 files, and a far better
+justification than either had before.
+
+### Still open
+
+- **24-bit bit-exactness is NOT verified.** 16-bit is (`bit-exact: yes` over
+  921,600 samples). The unroll only reorders additions into an int64_t
+  accumulator, which cannot change an exact integer sum, but the harness
+  should be widened past int16 so the claim rests on a measurement.
+- **E3, the 48 kHz gate**, is now the interesting one: the limitation text
+  describes a decoder that no longer exists.
+- **F1, held seek on a FLAC.** Untouched by any of this.
+
+---
+
+## The plan as written 2026-10-01, before the measurement
+
+
 **Planned 2026-10-01, after v1.5.1 shipped.** Phases 0, 1 and 2 of the
 investigation below went out in v1.5.1: the diagnostic repair, the cascade
 gating, and clk_sys 60 -> 66.667 MHz. The clock also retired the 1.2x
@@ -36,13 +150,77 @@ the Rice decoder.
 
 ## Phase 1 -- SDRAM migration (prerequisite)
 
+### STOP -- the migration ALONE frees ZERO M10K. Verified 2026-10-01.
+
+Before building anything, the premise was checked against the fit report, and
+it does not hold as written.
+
+`mp3_soc` builds RAM as four byte-wide arrays `ram0..ram3`. The fit report
+gives each one **64 M10K, 524,288 bits** -- so the CPU RAM is **256 of the 301
+blocks used, 85% of all block RAM in the design.**
+
+M10K returns blocks only when `RAM_WORDS` shrinks. It does NOT return them
+when the firmware image gets smaller inside a RAM that stays the same size.
+Moving `pl_text` and `art_acc` out frees **23,328 bytes of IMAGE** and **0
+blocks**, because RAM_WORDS is still 65536.
+
+And RAM_WORDS cannot simply be lowered: it **must be a power of two**. 49152
+was tried and Quartus built the memory out of logic instead of M10K --
+`Error (170012): Fitter requires 3621 LABs ... device contains only 1848`. The
+only step below 65536 is 32768 = 128 KB, and the image is ~252 KB. Unreachable.
+
+**So Phase 1 as planned would have been built, measured, and found to free
+nothing.** E1 would still miss by its 8 blocks.
+
+### The correction: bank the RAM, THEN migrate
+
+The power-of-two rule applies to a SINGLE declared array, not to the total. A
+non-power-of-two RAM composes cleanly from power-of-two sub-banks with address
+decode, and each bank infers into M10K correctly:
+
+| total | banks (words) | M10K | freed | image must fit |
+|---|---|---|---|---|
+| 256 KB | 65536 | 256 | -- | 256 KB (today, 3,536 B slack) |
+| 224 KB | 32768 + 16384 + 8192 | 224 | **32** | 224 KB |
+| 192 KB | 32768 + 16384 | 192 | **64** | 192 KB |
+
+E1 needs 8. Even 224 KB covers it four times over.
+
+**Both halves are required and neither works alone.** Banking frees nothing
+until the image shrinks; the migration frees nothing until RAM_WORDS drops.
+
+To reach 224 KB the image must lose ~32 KB. `pl_text` 12,288 + `art_acc`
+11,040 = 23,328, plus the 3,536 already slack, is 26,864 -- **short by ~5.9
+KB**. Close the gap with the 4 KB tag buffer, or by taking the ring from 24 KB
+to 16 KB (the card measures 736 KB/s against 40 KB/s of demand, so the margin
+is there), or with `-Os` on cold text (`load_track` alone is ~4-5 KB).
+
+### Revised order
+
+1. **Bank the RAM** behind power-of-two sub-arrays. Cheap, self-contained,
+   and provable with an A&S run alone -- no hardware needed to know it infers.
+2. **Build the CPU<->SDRAM window**, still the real work item and the real
+   risk: scanout `FILL` has a one-scanline hard deadline and always wins
+   arbitration. See "The first work item is not a buffer, it is a PORT" below.
+3. **Move `pl_text`**, then `art_acc`. Cold buffers, no real-time exposure.
+4. **Drop RAM to 224 KB** and confirm the blocks actually come back in the fit
+   report before relying on them for E1.
+
+Step 4 is the one that must be verified rather than assumed, because the whole
+point of this entry is that the obvious reasoning about M10K was wrong once
+already.
+
+### Original plan, kept for the reasoning
+
+
 Move `pl_text` and `art_acc` to SDRAM. No user-visible change. Everything below
 either needs this or is independent of it; nothing is blocked BY it. Estimate
 2-3 hardware sessions.
 
 ## Phase 2 -- Fixes
 
-- **F1. Held seek on a FLAC wedges and jumps backwards.** The open defect
+- ~~**F1. Held seek on a FLAC wedges and jumps backwards.**~~ **FIXED
+  2026-10-02**, three causes; see the write-up below. The open defect
   carried out of v1.5.1. Not reproducible; `SEEK_TRACE` is already in the
   firmware at default 0. Highest priority -- write-up further down this file.
 - **F2. Seeking a VBR MP3 lands the clock wrong.** Deferred from v1.5.0,
@@ -396,11 +574,90 @@ smooth edges. At 4x nearest it buys grey blocks. Recorded because the premise
 deserves re-examining on this display, not because the change is recommended:
 it would hurt curves and diagonals at other sizes.
 
-## Held seek on a FLAC wedges and jumps back -- OPEN, not reproducible
+## Held seek on a FLAC wedges and jumps back -- FIXED 2026-10-02
+
+**THREE separate defects behind one symptom.** Each is real, and none of them
+alone accounts for the reported behaviour -- which is why two earlier attempts
+that found one cause and stopped did not fix it.
+
+### 1. The step size and the staleness window were the same number
+
+    seek_secs = (lr_reps > 8) ? 30u : ...          // step tops out at 30
+    if (fl_seek_intent - ui_sec < 30u) base = ...  // window is ALSO 30
+
+Presses repeat every 250 ms while each seek takes longer to land, so the
+intent runs ahead of ui_sec. The moment the gap reached 30 the guard failed,
+base fell back to ui_sec, and the next target was ui_sec + 30 -- BEHIND where
+the run had reached. That is the jump backwards. The gap then sat pinned at
+exactly 30 and the guard failed on every press afterwards.
+
+Fixed by LIFETIME, not by the constant: fl_seek_intent is cleared when the
+hold is released, so it lives for a run rather than until a timeout expires.
+The window is widened to 300 as a sanity bound that cannot collide with a
+step again.
+
+### 2. fl_seek_intent survived a track change
+
+Written at the seek site, never reset on load, so it carried into the next
+track while ui_sec went back to 0 -- comparing against the wrong timeline.
+Cleared at both track-reset sites now. Note rg_reapply() calls rg_update with
+identical arguments but means "mode change", not "new track": three call
+sites look the same and only two may clear the intent.
+
+**This one nearly caused a regression.** Widening the window in fix 1 from 30
+to 300 means a stale cross-track intent that used to be ignored would be
+trusted for five minutes. Fix 1 without fix 2 would have traded one wedge for
+another.
+
+### 3. THE one that explains the numbers: a stale slot_size
+
+Found by the USER'S experiment, not by reading. Vary the previously loaded
+file and the cap moves with it:
+
+| loaded first | Julius seeks die at |
+|---|---|
+| ~28 MB FLAC | 3:50 |
+| ~10 MB MP3 | <1:30 |
+
+Julius is 33,963,176 bytes over 282.2 s = **120,350 bytes/s**, and both times
+are those file sizes divided by that rate. `flac_seek_locate()` brackets
+between `fl_first_frame` and `slot_size`, so a stale smaller slot_size
+truncates the search and every target past it pins there.
+
+The guard against this already existed and could never fire:
+
+    uint32_t z = slot_size ? slot_size : probe_file_size();
+    if (z > slot_size) { slot_size = z; ... }
+
+Non-zero slot_size short-circuits, so z == slot_size and the test is false.
+It only ever ran when the size was MISSING -- and the comment directly above
+it says the fault is the size being WRONG rather than absent. **The lesson was
+written down and then undone by the expression underneath it.**
+
+**KNOWN LIMIT:** "take the larger" only repairs a stale size that is too
+SMALL, which is what was observed. A previous file LARGER than the current one
+would leave slot_size too big and seeks could aim past the end. Not seen, not
+fixed, recorded rather than assumed away.
+
+### How it was finally caught
+
+**Not by the instrument.** SEEK_TRACE and UI_SHOW_SEEK_DIAG both stopped the
+defect reproducing -- noted twice in this file before today. What worked was a
+live reproduction, then READING the suspected mechanism, then the user varying
+one input (the previous file) and reporting how the symptom moved. A symptom
+that scales with an input names the variable; no amount of staring at the seek
+code would have pointed at slot_size.
+
+### Original entry, kept for the reasoning
 
 **User, 2026-09-30, and it was reliable at the time:** hold seek-forward on a
 FLAC; somewhere around 3-4 minutes in it stops advancing and starts jumping
 BACKWARDS, and will not recover -- only restarting the track clears it.
+**[CORRECTED 2026-10-06: it was the CORE that had to be restarted, not the
+track. That fits the root cause and the original wording did not -- a track
+change could not have helped, because the stale slot_size was inherited
+ACROSS loads. Reading it as "restart the track" pointed the early hunt at
+per-track state and away from the value that survived one.]**
 Reproduced "every time" on Circles Around the Sun, Widespread Panic and Phish.
 Played from a PLAYLIST. Never seen on MP3.
 
@@ -461,6 +718,13 @@ until it misbehaves, release, and photograph the dump. Capture the track, the
 time it wedges at, and whether the core had just booted.
 
 # Releasing
+
+**Build the shipping firmware with `EXTRA_CFLAGS=-DAPP_RELEASE=1`.** Without
+it the splash reads "v1.6.0 (Dev)" -- the default is DEV on purpose, so a
+development build can never present itself as a release. A shipped build
+wrongly marked "(Dev)" is embarrassing; a dev build wrongly marked as a
+release is a support thread where nobody can tell which firmware the user
+actually has. The marker comes off at signoff, not before.
 
 **Release notes come FROM the changelog, restructured.** `CHANGELOG.md` is the
 running list and stays flat, one line an item. A GitHub release body carries
@@ -1104,6 +1368,87 @@ trigger the defect, and changing the load path for a reason that is not present
 is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
+
+## CUSTOM EQ -- user-set bands, held as a 9th preset. Requested 2026-10-06
+
+**Operation, as asked for:** hold **Y** to open an EQ overlay; **Up/Down**
+moves the selected band's gain, **Left/Right** moves between bands, hold **Y**
+again to close. The result is saved as **CUSTOM**, which joins the cycle that
+a plain **Y** tap already walks, and persists.
+
+### It is more tractable than it looks, because the bands are FIXED
+
+The EQ is five bands at fixed frequencies -- lowshelf 80 Hz, peaks at 250,
+1k and 4k, highshelf 12 kHz -- with five Q2.16 coefficients each, generated
+by `tools/gen_eq_coeffs.py`. The filter runs in RTL and `R_EQ` selects a
+preset by index.
+
+A fixed centre frequency means `cos(omega)` and `alpha` are CONSTANTS per
+band. Only `A = 10^(gain/40)` varies, and after normalising by a0 every
+coefficient is a short expression in `alpha*A` and `alpha/A`. So this does
+NOT need a runtime filter designer, which is what makes it affordable on a
+CPU with no FPU. Note also that `b1` and `a1` are both `-2cos(omega)`, so
+they do not move with gain at all.
+
+**crom is `romstyle = "logic"`, not M10K.** A 9th preset's 25 coefficients
+plus its preamp is ~468 bits of registers -- ALMs, which are 35% used. This
+costs no block RAM, which is the resource that would otherwise veto it.
+
+### Two ways to get the coefficients, and the safer one is bigger
+
+**Build-time table (preferred).** Extend `gen_eq_coeffs.py` to emit every
+(band, gain-step) combination as a C array. At 25 steps (-12..+12 dB in 1 dB)
+that is 5 x 25 x 5 coefficients, roughly 1,900 bytes. No runtime arithmetic,
+and the values come from the same generator that already produces the eight
+shipped presets, so they inherit whatever validation those get.
+
+**Runtime computation.** ~400-600 bytes of code plus two small constant
+tables (10 values for cos/alpha, 25 for A). Cheaper in space, allows finer
+steps, and needs five divides per change -- nothing, since it only runs when
+the user moves a slider.
+
+**Prefer the table.** An IIR with bad coefficients does not degrade quietly;
+an unstable 2-pole section produces full-scale noise into headphones. If the
+runtime path is taken anyway, it MUST validate before applying -- a stable
+section needs |a2| < 1 and |a1| < 1 + a2, which is two comparisons.
+
+### Cost
+
+| part | estimate |
+|---|---|
+| coefficient table | ~1,900 B image (or ~600 B of code if computed) |
+| overlay UI, five bars | ~600-800 B |
+| modal input handling | ~300 B |
+| RTL: writable coefficients + MMIO | small; ALMs, no M10K; needs a compile |
+| persistence | 5 bands x 5 bits = **25 bits, one settings word** |
+
+Three `interact.json` slots are free, so the gains fit in one of them.
+
+### Four things that will bite
+
+1. **`EQ_COUNT` 8 -> 9 means widening the EQ preset slider's `max` from 7 to
+   8 in `interact.json`.** Forget it and the preset silently stops persisting
+   with everything still looking correct -- this already happened once with a
+   meter. Widening a max is the one safe edit to that file.
+2. **Y is getting crowded.** Tap cycles the preset, Select+Y is crossfeed as
+   of 1.6.0, and hold would be the overlay. Three functions on one button is
+   more than any other key here carries; A has two.
+3. **The overlay is MODAL**, and the only other modal screen is the playlist
+   browser. While it is open, Up/Down must drive the band and not the volume,
+   and Left/Right must not seek. The browser already shows the shape to copy
+   -- it masks the key bits on the way out.
+4. **Preamp.** Each shipped preset carries one (`prom[0:7]`) to stop boosted
+   bands clipping. A user who lifts every band needs the same protection
+   computed for them, or CUSTOM will clip where the presets do not.
+
+### Worth doing?
+
+Yes, and it is a better fit than most of the queue: it costs no M10K, the
+persistence fits one word, and the hard part -- designing filters on a CPU
+with no FPU -- dissolves once you notice the band frequencies never move.
+The RTL change is small but real, so it wants to ride along with another
+compile rather than paying for its own.
+
 
 ## Japanese and accented text — BUILT for 1.5.0, 2026-09-15
 

@@ -65,6 +65,16 @@
 #define R_EQ        0x80000068u   /* R/W: EQ preset index, 0 = FLAT (bypass)    */
 #define R_SET_IDX   0x8000006Cu   /* W:   persistent settings word index, 0..7  */
 #define R_SET_DAT   0x80000070u   /* R: value APF wrote  W: value we publish    */
+/* PSRAM window, rev 23. 16-bit WORD addressing into the 32 MB nothing
+ * else in this core touches. The bus is single-cycle and cannot stall, so
+ * an access is request / poll / collect rather than a blocking load.
+ * The address auto-increments on COMPLETION, so a sequential walk skips
+ * the address write entirely after the first. */
+#define R_PSR_ADDR  0x80000074u   /* W: word address  R: current address    */
+#define R_PSR_DATA  0x80000078u   /* W: data + start write  R: last read    */
+#define R_PSR_ST    0x8000007Cu   /* W: start a read  R: {ready, busy}      */
+#define PSR_BUSY(s)  ((s) & 1u)
+#define PSR_READY(s) ((s) & 2u)
 
 /* Target command selector, written to R_TGT_GO bits [1:0]. */
 #define TGT_READ     0u   /* 0180 */
@@ -150,6 +160,44 @@ extern unsigned int arena_limit(void);
 static inline uint32_t cycles(void) { return REG(R_CYCLES); }
 
 static inline uint32_t pcm_level(void)    { return PCM_LEVEL(REG(R_PCM_ST)); }
+
+/* ---- PSRAM accessors ------------------------------------------------------
+ *
+ * Every wait is BOUNDED. A PSRAM access is ~15 clk_sys cycles; the guard is
+ * ~1 ms, which is four orders of magnitude of slack and still cannot hang
+ * the core if the controller never answers. A hang here would present as a
+ * frozen player with no message, which is the worst failure this core has.
+ *
+ * A failed access returns 0 / does nothing rather than retrying: the caller
+ * cannot do anything useful about it, and a retry loop is just a slower hang.
+ */
+static inline int psr_wait(void)
+{
+    uint32_t t0 = cycles();
+    while (!PSR_READY(REG(R_PSR_ST)))
+        if ((uint32_t)(cycles() - t0) > CLK_HZ / 1000u) return 0;
+    return 1;
+}
+
+static inline void psr_seek(uint32_t word_addr) { REG(R_PSR_ADDR) = word_addr; }
+
+/* Reads at the CURRENT address and steps on. */
+static inline uint16_t psr_next(void)
+{
+    REG(R_PSR_ST) = 1u;                      /* any write starts a read */
+    if (!psr_wait()) return 0;
+    return (uint16_t)REG(R_PSR_DATA);
+}
+
+/* Writes at the CURRENT address and steps on. */
+static inline void psr_put(uint16_t v)
+{
+    REG(R_PSR_DATA) = v;
+    (void)psr_wait();
+}
+
+static inline uint16_t psr_read16(uint32_t a)  { psr_seek(a); return psr_next(); }
+static inline void     psr_write16(uint32_t a, uint16_t v) { psr_seek(a); psr_put(v); }
 static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 
 /* Must match CORE_VERSION in mp3_soc.v. The .rom reloads in seconds but the
@@ -179,12 +227,27 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503316u   /* rev 22: clk_sys 60 -> 66.667 MHz   */
+#define EXPECT_VERSION 0x4D503317u   /* rev 23: PSRAM window               */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.5.1"
+#define APP_VER "1.6.0"
+/* Dev builds say so ON SCREEN. The default is DEV, and a release has to
+ * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
+ * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
+ * wrongly marked as a release is a support thread where nobody can tell
+ * which firmware the user actually has. Fail toward the harmless one.
+ *
+ * The release step is in the Releasing section of ROADMAP.md. */
+#ifndef APP_RELEASE
+#define APP_RELEASE 0
+#endif
+#if APP_RELEASE
+#define APP_VER_STR APP_VER
+#else
+#define APP_VER_STR APP_VER " (Dev)"
+#endif
 
 /* Developer diagnostics, OFF in a release build. Flip to 1 to bring back
  * Select+A (APF slot table, boot vs live), Select+B (the framework's file
@@ -494,6 +557,16 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
  * C requires a declaration to be visible before first use. */
 static HMP3Decoder dec;
 static uint32_t frames, errs, rate_set, min_level;
+#if FIFO_DEFICIT
+static uint16_t def_min;       /* lowest FIFO level seen this track          */
+static uint16_t def_eps;       /* starved episodes                           */
+static uint16_t def_ms_max;    /* longest single episode, ms -- THE number   */
+static uint32_t def_ms_tot;    /* total starved time, ms                     */
+static uint32_t def_t0;        /* cycles() at the start of the open episode  */
+static uint8_t  def_in;        /* currently starved                          */
+static void def_sample(void);  /* defined by und_sample(); called from
+                                * flac_emit, which is earlier in the file  */
+#endif
 static uint32_t samprate;         /* set once rate_set; needed for elapsed-time display */
 /* Samples per frame, taken from the decoder rather than assumed. MPEG-1 Layer
  * III is 1152; MPEG-2 and 2.5 are 576. Hardcoding 1152 ran the elapsed clock at
@@ -564,6 +637,9 @@ static uint32_t track_frames, track_secs;
  * use, which made both a fine seek and an accelerating scrub impossible to
  * express -- the request said which way but never how far. */
 static uint32_t seek_secs = 5u;
+/* Declared HERE, not beside the FLAC seek code, because the release
+ * handler clears it -- see the wedge note at its use. */
+static uint32_t fl_seek_intent;
 /* Average byte rate measured from real playback. Converges on the truth for
  * VBR files that carry no Xing header, which the first-frame bitrate cannot. */
 static uint32_t meas_rate;
@@ -752,9 +828,165 @@ static uint32_t fl_probe_stale;      /* poison survived a "complete" read   */
 static uint32_t fl_probe_reads;      /* probes issued, for the ratio        */
 static int32_t  vol_gain = 256;          /* Q8: 256 == unity */
 
+/* ---- Crossfeed ------------------------------------------------------------
+ *
+ * Headphones put each channel in one ear with no acoustic path to the other,
+ * which is not how ears hear a room: hard-panned material sits INSIDE the
+ * head and is tiring over a long listen. Crossfeed leaks a low-passed,
+ * attenuated copy of each channel into the other, roughly what the far ear
+ * would receive -- the standard Rockbox / Astell&Kern / FiiO feature.
+ *
+ * Low-passed because the head shadows high frequencies: only the lows bend
+ * around it. One pole, two adds and a multiply, which is what makes this
+ * affordable here at all.
+ *
+ * CUTOFF ~2 kHz, not the textbook ~700 Hz. 700 was tried first and was
+ * inaudible on real material, for a reason the textbook figure hides:
+ * bass is already mono in most mixes, so crossing over only the lows adds
+ * a channel's bass to a channel that already has it. The in-head
+ * localisation cue lives in the MIDS, and a 700 Hz pole throws all of it
+ * away. Tested on hardware 2026-10-02 -- "no major difference in depth".
+ *
+ *   lp  += (x - lp) * a         one pole, a = 24/256 ~ 700 Hz at 44.1 kHz
+ *   out  = x + lp_other * mix
+ *   out *= 256/(256+mix)        so the sum cannot clip
+ *
+ * The normalise is NOT optional: adding a copy of the other channel raises
+ * the peak, and without it a loud centred mix clips.
+ *
+ * OFF by default and not persisted, like screen blanking and the art panel.
+ * It changes the sound, so it is opt-in. Select+Y cycles
+ * off / low / high / MONO.
+ *
+ * MONO is the far end of the same axis -- progressively more of each
+ * channel in both ears -- which is why it sits on this control rather
+ * than its own. It is also the reason the feature earns its place: with
+ * hearing loss in one ear, crossfeed at 0.75 still loses part of the far
+ * channel, and a true sum guarantees nothing is lost at all. iOS and
+ * Android both ship exactly this toggle. User's observation, 2026-10-02.
+ *
+ * ~8 operations per stereo frame, about 1.2% of the CPU at 48 kHz. That is
+ * real against a decoder that only just cleared its deadline on the spectrum
+ * meter, so re-measure X with FIFO_DEFICIT after touching this rather than
+ * assuming it is free. */
+static uint8_t xf_mode;                  /* 0 off, 1 low, 2 high, 3 mono    */
+static int32_t xf_lp_l, xf_lp_r;         /* one-pole state                  */
+static int32_t xf_mix  = 0;              /* Q8 amount of the other channel  */
+static int32_t xf_norm = 256;            /* Q8 scale that undoes the sum    */
+#define XF_A 63                          /* Q8 one-pole, ~2 kHz at 44.1 kHz */
+
+static void xf_apply_mode(void)
+{
+    /* low 0.50, high 0.75. The old 0.30/0.50 pair was chosen to be
+     * conservative and the result was a feature nobody could hear. At
+     * 0.75 a hard-panned source puts 43% into the other ear, which is
+     * the point of the effect. */
+    xf_mix  = (xf_mode == 1u) ? 128 : (xf_mode == 2u) ? 192 : 0;
+    xf_norm = 256 * 256 / (256 + xf_mix);
+    if (xf_mode == 3u) { xf_mix = 0; xf_norm = 256; }   /* mono: see below */
+    xf_lp_l = xf_lp_r = 0;               /* no click when switching */
+}
+
+static inline void xf_filter(int32_t *l, int32_t *r)
+{
+    if (xf_mode == 3u) {                 /* mono: full sum, no filter */
+        int32_t m = (*l + *r) >> 1;      /* halved, so it cannot clip */
+        *l = *r = m;
+        return;
+    }
+    xf_lp_l += ((*l - xf_lp_l) * XF_A) >> 8;
+    xf_lp_r += ((*r - xf_lp_r) * XF_A) >> 8;
+    int32_t nl = ((*l + ((xf_lp_r * xf_mix) >> 8)) * xf_norm) >> 8;
+    int32_t nr = ((*r + ((xf_lp_l * xf_mix) >> 8)) * xf_norm) >> 8;
+    if (nl >  32767) nl =  32767; else if (nl < -32768) nl = -32768;
+    if (nr >  32767) nr =  32767; else if (nr < -32768) nr = -32768;
+    *l = nl; *r = nr;
+}
+
+/* ---- ReplayGain -----------------------------------------------------------
+ *
+ * Folded into vol_gain rather than applied per sample, so the whole feature
+ * costs NOTHING in the audio path -- the multiply it needs is the one that
+ * was already there for volume.
+ *
+ * 10^(dB/20) in Q8, one entry per dB from -30 to +12, interpolated on the
+ * centi-dB remainder. A table because there is no FPU and newlib's pow()
+ * would cost more than every ReplayGain change combined; 1 dB steps because
+ * the ear cannot hear the interpolation error and 43 entries is 86 bytes.
+ *
+ * Mode: 0 off, 1 album, 2 track. Album is the default -- it preserves the
+ * loudness relationships WITHIN a record, which track gain flattens, and
+ * flattening them is wrong on anything sequenced deliberately. */
+#if REPLAYGAIN
+#define RG_DB_LO (-30)
+#define RG_DB_HI  (12)
+static const uint16_t rg_tab[RG_DB_HI - RG_DB_LO + 1] = {
+        8,     9,    10,    11,    13,    14,    16,    18,    20,    23,
+       26,    29,    32,    36,    41,    46,    51,    57,    64,    72,
+       81,    91,   102,   114,   128,   144,   162,   181,   203,   228,
+      256,   287,   322,   362,   406,   455,   511,   573,   643,   722,
+      810,   908,  1019,
+};
+static uint8_t  rg_mode = 1u;            /* 0 off, 1 album, 2 track          */
+static int32_t  rg_q8   = 256;           /* this track's gain, Q8, 256=unity */
+static uint8_t  rg_clipped;              /* peak forced the gain down        */
+
+/* centi-dB -> Q8. Floor-divides so negatives interpolate the same way as
+   positives: C truncates toward zero, which would step the wrong way below 0
+   and put a visible kink at -0.5 dB. */
+__attribute__((noinline, optimize("Os")))
+static int32_t rg_cdb_to_q8(int32_t cdb)
+{
+    int32_t d = cdb >= 0 ? cdb / 100 : -(((-cdb) + 99) / 100);
+    int32_t f = cdb - d * 100;                  /* 0..99, always positive    */
+    if (d <  RG_DB_LO) return rg_tab[0];
+    if (d >= RG_DB_HI) return rg_tab[RG_DB_HI - RG_DB_LO];
+    int32_t a = rg_tab[d - RG_DB_LO];
+    int32_t b = rg_tab[d - RG_DB_LO + 1];
+    return a + (b - a) * f / 100;
+}
+
+static void vol_apply(void);   /* defined just below; rg_update folds into it */
+
+/* Recomputes this track's gain. Called once per load, never per sample.
+ *
+ * Peak limiting is the part most players skip: a track tagged +3 dB whose
+ * peak is already 0.99 will clip when the gain is applied, and the result is
+ * distortion that sounds like a bad rip. If gain x peak would pass full
+ * scale, the gain is reduced until it does not -- quieter than the tag asked
+ * for, which is the right way to be wrong. */
+__attribute__((noinline, optimize("Os")))
+static void rg_update(int16_t track_cdb, int16_t album_cdb,
+                      uint16_t peak_q12, uint8_t have)
+{
+    rg_q8 = 256; rg_clipped = 0;
+    if (!rg_mode || !have) { vol_apply(); return; }
+    int16_t cdb;
+    if (rg_mode == 1u && (have & 2u))      cdb = album_cdb;   /* album    */
+    else if (have & 1u)                    cdb = track_cdb;   /* fallback */
+    else if (have & 2u)                    cdb = album_cdb;
+    else { vol_apply(); return; }
+    int32_t g = rg_cdb_to_q8(cdb);
+    if ((have & 4u) && peak_q12) {
+        /* full scale is 4096 in Q12; cap so g * peak <= 4096 */
+        int32_t cap = (4096 * 256) / (int32_t)peak_q12;
+        if (g > cap) { g = cap; rg_clipped = 1u; }
+    }
+    if (g < 1) g = 1;
+    rg_q8 = g;
+    vol_apply();
+}
+
+static void rg_reapply(void);   /* defined after flac_t fl below */
+#endif  /* REPLAYGAIN */
+
 static void vol_apply(void)
 {
-    vol_gain = (int32_t)(volume * 256u / 100u);
+    int32_t g = (int32_t)(volume * 256u / 100u);
+#if REPLAYGAIN
+    if (rg_mode && rg_q8 != 256) g = (g * rg_q8) >> 8;
+#endif
+    vol_gain = g;
 }
 /* ------------------------------------------------------------- playlist ----
  * State only. The logic is in playlist.inc, which has to be included further
@@ -805,7 +1037,48 @@ static void vol_apply(void)
  * function moves, no static is exported, nothing is reordered. */
 #define PL_TEXT_MAX  12288u
 
-static char     pl_text[PL_TEXT_MAX];
+/* pl_text LIVES IN PSRAM as of rev 23 -- 12,288 bytes that used to sit in
+ * the CPU's 256 KB, which had 288 bytes free with four features queued.
+ *
+ * ONE BYTE PER 16-BIT WORD, deliberately. Packing two would halve the
+ * footprint and force a read-modify-write on every byte store, which is a
+ * whole class of bug for no gain: this is 24 KB of a 32 MB part that nothing
+ * else touches. Spend the address space, keep the code obvious.
+ *
+ * Every access is ~20 cycles instead of one, so this is only safe because
+ * pl_text is COLD -- parsed once at load, never touched while audio runs.
+ * A 12 KB parse costs ~4 ms against a load that already takes 1241 ms. */
+#define PLT_BASE 0u            /* PSRAM word address of pl_text[0] */
+static inline char plt_get(uint32_t i)
+{
+    return (char)(uint8_t)psr_read16(PLT_BASE + i);
+}
+static inline void plt_set(uint32_t i, char c)
+{
+    psr_write16(PLT_BASE + i, (uint16_t)(uint8_t)c);
+}
+
+/* A staging copy for the one name a caller needs RIGHT NOW. PSRAM cannot
+ * hand out a char*, and the callers want a C string, so the string is
+ * materialised here instead. 256 bytes of RAM to free 12,288 of it.
+ *
+ * The buffer is SHARED and overwritten on every call: a caller must not hold
+ * two names at once, and nothing does -- they are consumed immediately, by
+ * pl_open_name or by one row of the browser. */
+static char plt_name[256];
+static const char *plt_name_at(uint32_t off)
+{
+    psr_seek(PLT_BASE + off);
+    uint32_t j = 0;
+    while (j + 1u < sizeof(plt_name)) {
+        char c = (char)(uint8_t)psr_next();
+        plt_name[j] = c;
+        if (!c) return plt_name;
+        j++;
+    }
+    plt_name[j] = 0;
+    return plt_name;
+}
 /* Set when the .m3u did not fit -- either the text buffer filled or PL_MAX was
  * reached with lines still to read. Without this a clipped playlist is
  * indistinguishable from a short one: the screen just shows a smaller number. */
@@ -918,6 +1191,13 @@ static uint16_t resume_saves;     /* times resume_pump has published a point  */
 
 static uint32_t blank_min;            /* 0 = never; set by Select+Down        */
 static uint32_t blank_sec;            /* whole seconds since the last button   */
+/* Sleep timer. Counts SECONDS off a one-second tick, exactly like the blank
+ * timeout above, because cycles() wraps every 64 s at 66.667 MHz and a
+ * 60-minute deadline cannot be held in one 32-bit value. Not persisted:
+ * a sleep timer that survived a power cycle would be a trap. */
+static uint32_t sleep_min;            /* 0 = off; set by Select+Up             */
+static uint32_t sleep_sec;
+static uint32_t sleep_tick;
 static uint32_t blank_tick;           /* cycles() deadline for the next second */
 static uint8_t  screen_blank;         /* the screen is currently black         */
 static uint32_t ui_mode_dirty = 1u;      /* repaint the mode icons / N-of-M   */
@@ -1310,6 +1590,79 @@ static uint32_t ui_toast_end;              /* x the last toast draw reached    *
 #ifndef UI_SHOW_SPEED_DIAG
 #define UI_SHOW_SPEED_DIAG 0
 #endif
+/* FIFO deficit measurement. EXTRA_CFLAGS="-DFIFO_DEFICIT=1 -Os"
+ *
+ * Answers ONE question, asked 2026-10-01 before committing to the 1.6.0
+ * SDRAM migration: would a DEEPER PCM FIFO actually have caught the FLAC
+ * dropouts, or would it just make them rarer?
+ *
+ * The FIFO is 2048 entries = 46 ms. Doubling it to 4096 adds 46 ms of shock
+ * absorber and costs 8 M10K the design does not have -- which is what the
+ * whole migration exists to free. So the number that decides it is **how
+ * long the FIFO actually sits EMPTY**: that is exactly the audio the decoder
+ * failed to supply, and therefore exactly the extra buffering that would
+ * have covered it.
+ *
+ *   X < 46 ms   a 4096-entry FIFO absorbs it. Build the migration.
+ *   X > 46 ms   it does not. The Rice decoder (E2) is the only thing that
+ *               closes a gap that size, and the migration is the wrong
+ *               target -- three sessions saved.
+ *
+ * Row: L<min level> E<episodes> X<longest, ms> T<total, ms>, per track.
+ * Measured off pcm_level() rather than the underrun flag, because that flag
+ * is STICKY until a flush and so cannot time anything.
+ *
+ * Replaces the D/O/U row rather than joining it -- that row already clips
+ * past 296px at two digits, and these are separate investigations. */
+#ifndef FIFO_DEFICIT
+#define FIFO_DEFICIT 0
+#endif
+/* PSRAM bring-up test. EXTRA_CFLAGS="-DPSRAM_TEST=1 -Os"
+ *
+ * Nothing has ever driven cram0 in this core, so the window is unproven
+ * hardware. Prove it BEFORE pl_text depends on it -- a bad window found
+ * through a corrupted playlist parser would be miserable to diagnose.
+ *
+ * The pattern is derived from the ADDRESS, not a constant, so a stuck or
+ * swapped address line shows up as a mismatch instead of passing. Both
+ * paths are covered: a sequential pass that leans on auto-increment, then
+ * a strided re-read that seeks every time. Those fail differently -- the
+ * first catches the increment logic, the second catches the addressing.
+ * -Os is not optional; the image has 288 bytes free. */
+#ifndef PSRAM_TEST
+#define PSRAM_TEST 0
+#endif
+/* ReplayGain. OFF, and off for a measured reason rather than caution.
+ *
+ * Surveyed 2026-10-02 against the user's actual libraries:
+ *   FLAC, 1,514 files : 100% tagged, every value +0.00 dB -- inert.
+ *   MP3,  sampled 150 :   9% tagged, real values -7.6 to -10.0 dB.
+ *
+ * The MP3 number is the one that decides it, and it argues AGAINST the
+ * feature. Every real value is negative, so applying gain to the tagged
+ * 9% makes those files quieter than the untagged 91% -- it introduces an
+ * 8 dB step into the library whose complaint is inconsistent loudness.
+ * ReplayGain only helps at near-total coverage; partial coverage is
+ * worse than none.
+ *
+ * Kept rather than deleted: the dB->Q8 table (no FPU, so pow() was never
+ * available), the clip-safe peak handling, and the Vorbis parsing are the
+ * hard parts, and they cost nothing while this is 0. Turn it on with
+ * -DREPLAYGAIN=1 if a library is tagged throughout.
+ *
+ * NOTE for whoever revisits: MP3 gains live in ID3v2 TXXX frames, which
+ * nothing here parses. This path is FLAC/Vorbis only. */
+#ifndef REPLAYGAIN
+#define REPLAYGAIN 0
+#endif
+#if PSRAM_TEST
+/* LATCHED, not toasted. The test runs immediately after the interlock
+ * check -- before the UI can draw -- so the first attempt showed nothing
+ * at all. The result is held and redrawn every second instead, which
+ * also means it cannot be missed by looking away. */
+static uint32_t psr_bad_seq, psr_bad_rnd, psr_first, psr_words;
+static uint32_t ui_last_psr = 0xFFFFFFFFu;
+#endif
 /* Resume instrumentation. EXTRA_CFLAGS="-DUI_SHOW_RESUME_DIAG=1 -Os"
  *
  * The -Os is not optional: the normal build has under 1 KB of heap left and
@@ -1477,6 +1830,9 @@ static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
 static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
+#if FIFO_DEFICIT
+static uint32_t ui_last_def = 0xFFFFFFFFu;   /* FIFO deficit row, 1 Hz */
+#endif
 /* One marquee per scrollable line. Title and artist can both overflow, and
  * they scroll independently -- a shared position would drag the shorter one
  * around for no reason. */
@@ -2937,6 +3293,9 @@ static void ui_draw_chrome(void)
     ui_last_pause = 0xFFFFFFFFu;
     ui_last_stall = 0xFFFFFFFFu;
     ui_last_spd   = 0xFFFFFFFFu;   /* or the diag row dies on the first reload */
+#if FIFO_DEFICIT
+    ui_last_def   = 0xFFFFFFFFu;   /* same, and the same trap */
+#endif
     /* THIRD entry to be forgotten from this list, after ui_last_stall and the
      * mode row. A toast is drawn only when its fade step CHANGES, so once
      * chrome has painted over one, ui_toast_step still says "already drawn"
@@ -3050,7 +3409,7 @@ static void ui_splash_bg(void)
                   UI_INNER_W + 16u, UI_CARD_H, 8u, UI_PANEL);
 
     fb_set_color(UI_DIM, UI_PANEL);
-    fb_text_clipped(UI_MARGIN, UI_SPL_VER_Y, "v" APP_VER, TS_1X, TS_1X,
+    fb_text_clipped(UI_MARGIN, UI_SPL_VER_Y, "v" APP_VER_STR, TS_1X, TS_1X,
                     UI_INNER_W);
 }
 
@@ -3883,7 +4242,7 @@ static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
 {
     out[0] = 0;
     if (pos >= pl_count) return;
-    const char *nm = &pl_text[pl_off[pl_order[pos]]];
+    const char *nm = plt_name_at(pl_off[pl_order[pos]]);
 
     uint32_t start = 0;
     for (uint32_t i = 0; nm[i]; i++)
@@ -5968,6 +6327,55 @@ ui_tail:
     }
 #endif
 
+#if FIFO_DEFICIT
+    /* Same row and cadence as the speed diag, drawn instead of it.
+     *
+     * X is the whole point: the longest single stretch the FIFO sat empty.
+     * Against the 46 ms a 2048-entry FIFO holds, X says whether doubling it
+     * covers the gap or merely narrows it.
+     *
+     * L is the companion reading, and it matters on the tracks that do NOT
+     * drop out: one that never goes below L800 has margin, one that grazes
+     * L20 is a dropout that happened not to land. Judging the fix on the
+     * failures alone would miss how close the rest are running. */
+    if (ui_sec != ui_last_def) {
+        ui_last_def = ui_sec;
+        char b[48], *q = b;
+        *q++ = 'L'; q = ui_dec(q, def_min == 0xFFFFu ? 0u : def_min);
+        *q++ = ' '; *q++ = 'E'; q = ui_dec(q, def_eps);
+        *q++ = ' '; *q++ = 'X'; q = ui_dec(q, def_ms_max);
+        *q++ = ' '; *q++ = 'T'; q = ui_dec(q, def_ms_tot);
+        *q = 0;
+        uint16_t dbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), dbg);
+        fb_set_color(UI_RED, dbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+#if PSRAM_TEST
+    if (ui_sec != ui_last_psr) {
+        ui_last_psr = ui_sec;
+        char b[48], *q = b;
+        if (!psr_bad_seq && !psr_bad_rnd) {
+            const char *m = "PSRAM OK ";
+            while (*m) *q++ = *m++;
+            q = ui_dec(q, psr_words);
+        } else {
+            const char *m = "PSR S";
+            while (*m) *q++ = *m++;
+            q = ui_dec(q, psr_bad_seq);
+            *q++ = ' '; *q++ = 'R'; q = ui_dec(q, psr_bad_rnd);
+            *q++ = ' '; *q++ = '@'; q = ui_dec(q, psr_first);
+        }
+        *q = 0;
+        uint16_t pbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), pbg);
+        fb_set_color(UI_RED, pbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
 #if UI_SHOW_RESUME_DIAG
     {
         char b[40], *q = b;
@@ -6369,6 +6777,21 @@ static void seek_trace_dump(void)
 }
 #endif
 
+static void sleep_pump(void)
+{
+    if (!sleep_min) return;
+    if ((int32_t)(cycles() - sleep_tick) < 0) return;
+    sleep_tick = cycles() + CLK_HZ;
+    if (sleep_sec < 0xFFFFu) sleep_sec++;
+    if (sleep_sec >= sleep_min * 60u) {
+        sleep_min = 0;                 /* one shot; re-arm deliberately */
+        stopped   = 1u;
+        paused   |= 1u;
+        stop_req  = 1u;
+        ui_toast_msg("SLEEP");
+    }
+}
+
 static void ui_blank_pump(void)
 {
     if (screen_blank || !blank_min) return;
@@ -6547,6 +6970,20 @@ static void poll_input(void)
         if (!(keys & KEY_A)) a_armed = 0u;
     }
     if (edge & KEY_X) {
+        /* Select+X: ReplayGain off -> album -> track. The slot the dropped
+         * reverse-meter cycle left behind, and X/Y with Select are now the
+         * audio-mode pair. */
+#if REPLAYGAIN
+        if (keys & KEY_SELECT) {
+            sel_used = 1;
+            rg_mode  = (uint8_t)((rg_mode + 1u) % 3u);
+            rg_reapply();
+            ui_toast_msg(rg_mode == 0u ? "REPLAYGAIN OFF"
+                       : rg_mode == 1u ? "REPLAYGAIN ALBUM"
+                                       : "REPLAYGAIN TRACK");
+        } else
+#endif
+        {
         /* Forward only. A reverse on Select+X existed and was dropped: nine
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
@@ -6578,11 +7015,25 @@ static void poll_input(void)
                    : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
                                             : "METER: CASSETTE");
         settings_mark_dirty();
+        }
     }
     if (edge & KEY_Y) {
-        /* Forward only, matching X. Y was completely unused before the EQ. */
-        eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
-        eq_apply = 1u;
+        /* Select+Y: crossfeed. Y is the EQ, so Select+Y is its
+         * audio-processing sibling -- X and Y with Select are the two
+         * audio modes. */
+        if (keys & KEY_SELECT) {
+            sel_used = 1;
+            xf_mode  = (uint8_t)((xf_mode + 1u) % 4u);
+            xf_apply_mode();
+            ui_toast_msg(xf_mode == 0u ? "CROSSFEED OFF"
+                       : xf_mode == 1u ? "CROSSFEED LOW"
+                       : xf_mode == 2u ? "CROSSFEED HIGH"
+                                       : "MONO");
+        } else {
+            /* Forward only, matching X. Y was unused before the EQ. */
+            eq_idx = (uint8_t)((eq_idx + 1u) % EQ_COUNT);
+            eq_apply = 1u;
+        }
     }
     if (edge & KEY_START) {
 #if DEBUG_DIAG
@@ -6709,6 +7160,12 @@ static void poll_input(void)
                     else          ui_toast_msg("NO PLAYLIST");
                 }
                 lr_fired[i] = 0;
+                /* The run is over, so the intent is spent. Its lifetime
+                 * is the HOLD, which is what it was always meant to be;
+                 * the 30-second staleness window at the use site was a
+                 * stand-in for this and it collided with the step size.
+                 * See the wedge note there. */
+                fl_seek_intent = 0;
             }
         }
     }
@@ -6734,6 +7191,22 @@ static void poll_input(void)
      * Sits beside Select+L (repeat) and Select+R (shuffle), which is where a
      * user already looks for settings-ish combos. Not persisted: it is back to
      * OFF every launch, which is the honest cost of the trade. */
+    /* Select+Up: the sleep timer, opposite Select+Down's screen blank.
+     * Two timeouts, mirrored on the pad -- one turns the screen off, the
+     * other turns the music off. ARMS the tick: a deadline left at 0 is
+     * dead for up to 64 s rather than due now. */
+    else if (edge & KEY_UP) {
+        static const uint8_t sl[] = { 0u, 15u, 30u, 60u };
+        uint32_t i = 0;
+        while (i < sizeof(sl) / sizeof(sl[0]) && sl[i] != sleep_min) i++;
+        i = (i + 1u) % (sizeof(sl) / sizeof(sl[0]));
+        sleep_min  = sl[i];
+        sleep_sec  = 0;
+        sleep_tick = cycles() + CLK_HZ;
+        sel_used   = 1;
+        if (sleep_min) ui_toast_set("SLEEP", sleep_min, " MIN");
+        else           ui_toast_msg("SLEEP OFF");
+    }
     else if (edge & KEY_DOWN) {
         static const uint8_t bl[] = { 0u, 1u, 5u, 10u, 30u };
         uint32_t i = 0;
@@ -7327,6 +7800,20 @@ static void target_flush_slot_cache(void)
  * mislabelled file should not silently fail. */
 /* Declared up with the other track state -- see fl_first_frame. */
 static flac_t   fl;
+
+#if REPLAYGAIN
+/* Re-run the gain for the track already playing, after a mode change.
+ * fl stays populated for the life of a FLAC, so the tags are still
+ * there; an MP3 has none and goes back to unity. */
+static void rg_reapply(void)
+{
+    if (track_fmt == FMT_FLAC)
+        rg_update(fl.rg_track_cdb, fl.rg_album_cdb, fl.rg_peak_q12, fl.rg_have);
+    else
+        rg_update(0, 0, 0, 0);
+}
+#endif
+
 static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
 #include "art.inc"
@@ -7530,8 +8017,6 @@ static uint32_t fl_cap;            /* max_blocksize, kept across reopens */
  * presses advances monotonically whatever the landings do, while the clock
  * stays truthful about where the audio is. The guard band drops the intent
  * once ordinary playback has caught up, so it never lingers. */
-static uint32_t fl_seek_intent;
-
 static uint32_t fl_seek_off;      /* absolute offset of the SEEKTABLE body  */
 
 static uint32_t fl_seek_pts;      /* 18-byte points; 0 = no table           */
@@ -7831,6 +8316,21 @@ static uint32_t fl_meter_n;
 static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
 {
     (void)ctx;
+#if FIFO_DEFICIT
+    /* HERE, not in the frame loop. The first attempt sampled once per loop
+     * iteration, and an iteration IS a frame -- so the finest empty period it
+     * could report was one frame period, and it duly reported exactly that
+     * (X104 on two different files). That was the sampling interval, not the
+     * fault.
+     *
+     * flac_emit runs every 64 samples, ~1.45 ms, which is 70x finer and fast
+     * enough to resolve a real episode. It is also the right PLACE: emission
+     * only runs while the SECOND channel is decoded, so the window where the
+     * FIFO drains unreplenished is precisely the gap between consecutive
+     * calls here. Sampling on entry, before this call's pushes, catches the
+     * trough rather than the refill. */
+    def_sample();
+#endif
     /* Safe here: ui_draw_dynamic() performs no I/O and cannot re-enter the
      * decoder. It reads position from `frames`, which has not been advanced
      * for the frame in flight, so the clock trails by at most one frame.
@@ -7884,6 +8384,7 @@ static void flac_emit(void *ctx, const int16_t *src, uint32_t frames)
          * Same order as MP3: volume first, then the fade, so a fade-in at low
          * volume stays at low volume. Capped at unity, so it only ever
          * attenuates and cannot overflow. */
+        if (xf_mode) xf_filter(&l, &r);
         if (vol_gain != 256) {
             l = (l * vol_gain) >> 8;
             r = (r * vol_gain) >> 8;
@@ -7992,6 +8493,34 @@ static void und_sample(void)
         }
     }
     und_prev = now;
+}
+#endif
+
+#if FIFO_DEFICIT
+/* Times how long the PCM FIFO sits at zero. Called from both decode loops.
+ *
+ * Sampling is opportunistic -- the loop only runs while decoding -- which is
+ * exactly right here: during a starvation the decoder is working flat out, so
+ * the loop iterates and the episode is seen. It would UNDER-report a stall
+ * that also stopped the decoder, and that is a different fault with its own
+ * symptom (O, not U).
+ *
+ * cycles() wraps every ~64 s at 66.667 MHz. Unsigned subtraction survives one
+ * wrap, and no starved episode approaches a minute -- if one ever did, the
+ * core would have stopped, not stuttered. */
+static void def_sample(void)
+{
+    uint32_t lvl = pcm_level();
+    if (lvl < def_min) def_min = (uint16_t)lvl;
+    if (lvl == 0u) {
+        if (!def_in) { def_in = 1u; def_t0 = cycles(); def_eps++; }
+    } else if (def_in) {
+        def_in = 0u;
+        uint32_t ms = (cycles() - def_t0) / (CLK_HZ / 1000u);
+        def_ms_tot += ms;
+        if (ms > 65535u) ms = 65535u;
+        if ((uint16_t)ms > def_ms_max) def_ms_max = (uint16_t)ms;
+    }
 }
 #endif
 
@@ -8457,7 +8986,13 @@ static uint32_t vbr_frame_count(void)
 }
 
 /* Reads the head of the file and skips any ID3 tag, leaving the ring and
- * file_pos positioned at real audio. Returns 0 on I/O failure. */
+ * file_pos positioned at real audio. Returns 0 on I/O failure.
+ *
+ * -Os, like load_track above it and for the same reason: this runs once per
+ * track change and was 5,068 bytes at -O2, the largest genuinely cold
+ * function in the build. Image space is the binding constraint on every
+ * feature now queued -- 1,424 bytes were free when this was added. */
+__attribute__((optimize("Os")))
 static int read_track_head(void)
 {
     refill_drain();     /* settle anything in flight before touching the ring */
@@ -8796,6 +9331,28 @@ static int load_track(void)
     pcm_flush();
 
     frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+    /* Unity until proven otherwise. An MP3 carries no Vorbis comments, and
+     * a FLAC without ReplayGain tags must not inherit the previous track's
+     * gain -- that would present as "one album plays quiet" and be close to
+     * untraceable. Both track-reset sites do it. */
+#if REPLAYGAIN
+    rg_update(0, 0, 0, 0);
+#endif
+    /* A new track makes any pending seek intent meaningless: ui_sec has
+     * gone back to 0 while the intent still refers to the OLD track's
+     * timeline. It was never cleared here, which is why loading one
+     * track and then another made the seek wedge reproducible when the
+     * second track alone did not -- user, 2026-10-02.
+     *
+     * This matters MORE since the staleness window was widened to 300 to
+     * fix the step collision: at 30 a stale cross-track intent was simply
+     * ignored, at 300 it would be trusted. Widening that window without
+     * this reset would have traded one wedge for another. */
+    fl_seek_intent = 0;
+#if FIFO_DEFICIT
+    def_min = 0xFFFFu; def_eps = 0u; def_ms_max = 0u;
+    def_ms_tot = 0u; def_in = 0u;
+#endif
     /* A NEW track starts at 0:00, and this is the one place that knows one
      * started. ui_draw_chrome used to do it, which caught every repaint too. */
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
@@ -8916,6 +9473,13 @@ static int load_track(void)
             rate_unsupported = 1u;
             return 0;
         }
+        /* flac_open has parsed the Vorbis comments by here, and the file
+         * is known playable, so this is the first valid point. */
+#if REPLAYGAIN
+        rg_update(fl.rg_track_cdb, fl.rg_album_cdb, fl.rg_peak_q12,
+                  fl.rg_have);
+#endif
+
         fl_buf = (int32_t *)malloc((size_t)fl.max_blocksize * sizeof(int32_t));
         if (!fl_buf) { REG(R_STAT2) = 0xC1000000u; return 0; }
         fl.ch0     = fl_buf;
@@ -9268,6 +9832,41 @@ int main(void)
         for (;;) { }
     }
 
+#if PSRAM_TEST
+    {
+        /* 8192 words = 16 KB, comfortably past the 12,288 bytes pl_text
+         * needs. Pattern is a function of the address so a swapped or stuck
+         * address line cannot pass. */
+        const uint32_t N = 8192u;
+        uint32_t bad_seq = 0, bad_rnd = 0, first = 0xFFFFFFFFu;
+
+        psr_seek(0);
+        for (uint32_t i = 0; i < N; i++) psr_put((uint16_t)(i ^ 0xA5A5u));
+
+        /* Pass 1: sequential, exercising auto-increment. */
+        psr_seek(0);
+        for (uint32_t i = 0; i < N; i++) {
+            if (psr_next() != (uint16_t)(i ^ 0xA5A5u)) {
+                bad_seq++;
+                if (first == 0xFFFFFFFFu) first = i;
+            }
+        }
+
+        /* Pass 2: strided, seeking every time. A prime stride so the walk
+         * does not sit on one set of address bits. */
+        for (uint32_t i = 0; i < N; i += 7u) {
+            if (psr_read16(i) != (uint16_t)(i ^ 0xA5A5u)) {
+                bad_rnd++;
+                if (first == 0xFFFFFFFFu) first = i;
+            }
+        }
+
+        psr_bad_seq = bad_seq; psr_bad_rnd = bad_rnd;
+        psr_first   = (first == 0xFFFFFFFFu) ? 0u : first;
+        psr_words   = N;
+    }
+#endif
+
     vol_apply();
 
     /* ---- DIAGNOSTIC: dump APF's datatable, hold SELECT at boot ----
@@ -9462,6 +10061,7 @@ int main(void)
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
         ui_blank_pump();
+        sleep_pump();
 #if SEEK_TRACE
         seek_trace_dump();
 #endif
@@ -10018,6 +10618,24 @@ int main(void)
             pcm_flush();
             refill_drain();
             frames = 0; errs = 0; rate_set = 0; min_level = 0xFFFFFFFFu;
+    /* Unity until proven otherwise. An MP3 carries no Vorbis comments, and
+     * a FLAC without ReplayGain tags must not inherit the previous track's
+     * gain -- that would present as "one album plays quiet" and be close to
+     * untraceable. Both track-reset sites do it. */
+#if REPLAYGAIN
+    rg_update(0, 0, 0, 0);
+#endif
+    /* A new track makes any pending seek intent meaningless: ui_sec has
+     * gone back to 0 while the intent still refers to the OLD track's
+     * timeline. It was never cleared here, which is why loading one
+     * track and then another made the seek wedge reproducible when the
+     * second track alone did not -- user, 2026-10-02.
+     *
+     * This matters MORE since the staleness window was widened to 300 to
+     * fix the step collision: at 30 a stale cross-track intent was simply
+     * ignored, at 300 it would be trusted. Widening that window without
+     * this reset would have traded one wedge for another. */
+    fl_seek_intent = 0;
             track_kbps = 0; track_hz = 0;
             file_pos  = audio_start;
             ring_fill = 0; ring_rd = 0;
@@ -10219,7 +10837,29 @@ int main(void)
                 while (szp_phase && szp_phase < 4u && ++guard < 64u)
                     size_probe_step();
 
-                uint32_t z = slot_size ? slot_size : probe_file_size();
+                /* ALWAYS measure. This read `slot_size ? slot_size :
+                 * probe_file_size()`, which short-circuits the instant
+                 * slot_size is non-zero -- so z == slot_size, the test
+                 * below is false, and nothing is corrected. The probe
+                 * fired only when the size was MISSING, and the comment
+                 * above already says the real fault is the size being
+                 * WRONG. That lesson was written down and then undone by
+                 * this one expression.
+                 *
+                 * Measured 2026-10-02: Load MP3, then Load Playlist, then
+                 * seek. slot_size still held the MP3's size, and
+                 * flac_seek_locate brackets between fl_first_frame and
+                 * slot_size -- so every target beyond the stale figure
+                 * pinned at it. The cap tracked the PREVIOUS file: a
+                 * ~28 MB FLAC first gave 3:50 of Julius, a ~10 MB MP3
+                 * first gave 1:20, and Julius runs 120,350 bytes/s.
+                 * Dividing one by the other is where those times come
+                 * from.
+                 *
+                 * Still bounded to ONCE per track by seek_size_tried, and
+                 * the incremental search above has usually finished
+                 * during playback, so this is normally free. */
+                uint32_t z = probe_file_size();
                 if (z > slot_size) {
                     slot_size = z;
                     /* The bitrate was derived from the old figure and is on
@@ -10262,7 +10902,27 @@ int main(void)
                  * transport can wedge -- measured under tools/rv32sim.py as
                  * +22, +11, +5, +0, +0, +0. */
                 uint32_t base = ui_sec;
-                if (fl_seek_intent > ui_sec && fl_seek_intent - ui_sec < 30u)
+                /* WEDGE, found 2026-10-02 by reading after a live repro.
+                 * This window was 30 and the hold acceleration tops out
+                 * at seek_secs = 30 -- the same number, and they must
+                 * disagree.
+                 *
+                 * Presses repeat every 250 ms but each seek takes longer
+                 * to land, so the intent runs ahead of ui_sec. The moment
+                 * that gap reached 30 the guard failed, base fell back to
+                 * ui_sec, and the next target was ui_sec + 30 -- BEHIND
+                 * where it had already got to. That is the jump
+                 * backwards. From then on the gap was pinned at exactly
+                 * 30, so the guard failed forever and the transport could
+                 * never advance again. Only restarting the CORE cleared
+                 * it, because that reset the intent.
+                 *
+                 * The real fix is above: the intent is cleared when the
+                 * hold is RELEASED, so its lifetime is the run rather
+                 * than a timeout. This bound is now only a sanity check
+                 * against a stale value, and is deliberately far larger
+                 * than any step so the two can never meet again. */
+                if (fl_seek_intent > ui_sec && fl_seek_intent - ui_sec < 300u)
                     base = fl_seek_intent;
                 if (seek_req == 1u) {
                     tgt = base + secs;
@@ -10759,6 +11419,9 @@ int main(void)
 #if UI_SHOW_DIAG
         und_sample();
 #endif
+#if FIFO_DEFICIT
+        def_sample();
+#endif
         if (!under_shadow && pcm_underrun()) {
             under_shadow = 1u;
             pcm_under_n++;
@@ -10775,6 +11438,7 @@ int main(void)
             int32_t r = stereo ? pcm[i + 1] : l;
             /* Capped at unity, so this only ever attenuates and cannot
              * overflow -- no clamp needed. */
+            if (xf_mode) xf_filter(&l, &r);
             if (vol_gain != 256) {
                 l = (l * vol_gain) >> 8;
                 r = (r * vol_gain) >> 8;

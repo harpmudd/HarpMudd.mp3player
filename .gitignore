@@ -99,3 +99,9 @@ tools/host/*.elf
 sim/mp3font_head.hex
 # ad-hoc quartus_sta report
 src/fpga/paths_sdram.txt
+mp3player_FIFO_DEFICIT.rom
+mp3player_LPC_DEFICIT.rom
+mp3player_UNROLL_DEFICIT.rom
+mp3player_RICE_DEFICIT.rom
+mp3player_v160_candidate.rom
+mp3player_PLT.rom

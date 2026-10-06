@@ -449,7 +449,10 @@ static uint32_t pl_read_raw(void)
 
         step = want;                       /* start the next chunk here */
         any = 1;
-        for (uint32_t k = 0; k < n; k++) pl_text[got + k] = (char)tagbuf[k];
+        /* Streamed: one seek, then the hardware auto-increment carries the
+         * rest. Per-byte psr_write16 would cost three MMIO writes a byte. */
+        psr_seek(PLT_BASE + got);
+        for (uint32_t k = 0; k < n; k++) psr_put((uint16_t)tagbuf[k]);
         got += n;
         if (n < want) break;                            /* short read = tail */
     }
@@ -479,14 +482,14 @@ static void pl_parse(uint32_t len)
     /* A UTF-8 byte order mark, which Windows editors put at the front of a
      * saved .m3u. Left in place it rides on the FIRST entry's name -- drawn as
      * a stray glyph, and handed to APF as a filename that does not exist. */
-    if (len >= 3u && (uint8_t)pl_text[0] == 0xEFu && (uint8_t)pl_text[1] == 0xBBu
-                  && (uint8_t)pl_text[2] == 0xBFu) i = 3u;
+    if (len >= 3u && (uint8_t)plt_get(0) == 0xEFu && (uint8_t)plt_get(1) == 0xBBu
+                  && (uint8_t)plt_get(2) == 0xBFu) i = 3u;
     while (i < len && pl_count < PL_MAX) {
-        while (i < len && (pl_text[i] == '\n' || pl_text[i] == '\r')) i++;
+        while (i < len && (plt_get(i) == '\n' || plt_get(i) == '\r')) i++;
         if (i >= len) break;
 
         uint32_t start = i;
-        while (i < len && pl_text[i] != '\n' && pl_text[i] != '\r') i++;
+        while (i < len && plt_get(i) != '\n' && plt_get(i) != '\r') i++;
         uint32_t end = i;
 
         /* Step PAST the line terminator BEFORE writing the NUL over it.
@@ -496,21 +499,21 @@ static void pl_parse(uint32_t len)
          * line began at the NUL rather than at its first real character. A line
          * starting with NUL is not '#', so EVERY COMMENT LINE COUNTED AS A
          * TRACK -- a 23-line comment header parsed as 23 tracks. */
-        if (i < len && pl_text[i] == '\r') i++;
-        if (i < len && pl_text[i] == '\n') i++;
+        if (i < len && plt_get(i) == '\r') i++;
+        if (i < len && plt_get(i) == '\n') i++;
 
         /* Trailing whitespace, and the \r of a Windows line ending that a
          * hand-edited file will almost always have. */
-        while (end > start && (pl_text[end-1] == ' ' || pl_text[end-1] == '\t'))
+        while (end > start && (plt_get(end-1) == ' ' || plt_get(end-1) == '\t'))
             end--;
-        pl_text[end] = 0;
+        plt_set(end, 0);
 
-        if (end > start && pl_text[start] != '#')
+        if (end > start && plt_get(start) != '#')
             pl_off[pl_count++] = (uint16_t)start;
     }
 
     /* Ran out of index before running out of file. */
-    while (i < len && (pl_text[i] == '\n' || pl_text[i] == '\r')) i++;
+    while (i < len && (plt_get(i) == '\n' || plt_get(i) == '\r')) i++;
     if (i < len) pl_truncated = 1u;
 }
 
@@ -652,7 +655,7 @@ static int pl_play_span(uint16_t pos, int dir, uint16_t span)
         } else {
             pl_pos = at;
             track_from_pl = 1u;      /* the playlist started this track */
-            if (pl_open_name(&pl_text[pl_off[file_idx]])) {
+            if (pl_open_name(plt_name_at(pl_off[file_idx]))) {
                 pl_arm_load(leaving_id);
                 /* ONE line about the whole walk, not one per bad entry: a list
                  * half mistyped would otherwise queue toasts faster than they
@@ -867,22 +870,22 @@ static int pl_open_by_hash(uint32_t want)
 
     uint32_t i = 0;
     while (i < len) {
-        while (i < len && (pl_text[i] == '\n' || pl_text[i] == '\r')) i++;
+        while (i < len && (plt_get(i) == '\n' || plt_get(i) == '\r')) i++;
         uint32_t a = i;
-        while (i < len && pl_text[i] != '\n' && pl_text[i] != '\r') i++;
+        while (i < len && plt_get(i) != '\n' && plt_get(i) != '\r') i++;
         uint32_t b = i;
-        while (b > a && pl_text[b - 1u] == ' ') b--;
-        if (b <= a || pl_text[a] == '#') continue;
+        while (b > a && plt_get(b - 1u) == ' ') b--;
+        if (b <= a || plt_get(a) == '#') continue;
 
         /* Match on the last path component, so an entry may name a playlist
          * inside its album folder and still be found. */
         uint32_t base = a;
         for (uint32_t k = a; k < b; k++)
-            if (pl_text[k] == '/' || pl_text[k] == 0x5Cu) base = k + 1u;
+            if (plt_get(k) == '/' || plt_get(k) == 0x5Cu) base = k + 1u;
 
         char nm[PL_FULL_MAX + 1u];
         uint32_t n = 0;
-        for (uint32_t k = base; k < b && n < PL_FULL_MAX; k++) nm[n++] = pl_text[k];
+        for (uint32_t k = base; k < b && n < PL_FULL_MAX; k++) nm[n++] = plt_get(k);
         nm[n] = 0;
         if (pl_name_hash(nm) != want) continue;
 
@@ -890,7 +893,7 @@ static int pl_open_by_hash(uint32_t want)
          * playlist in a subfolder is reached. */
         char full[PL_FULL_MAX + 1u];
         n = 0;
-        for (uint32_t k = a; k < b && n < PL_FULL_MAX; k++) full[n++] = pl_text[k];
+        for (uint32_t k = a; k < b && n < PL_FULL_MAX; k++) full[n++] = plt_get(k);
         full[n] = 0;
         if (pl_open_into(PL_SLOT_ID, full)) return 1;
         break;
@@ -1015,7 +1018,7 @@ static void pl_load(void)
     {
         uint32_t h = 2166136261u;
         for (uint32_t i = 0; i < len; i++) {
-            h ^= (uint32_t)(uint8_t)pl_text[i];
+            h ^= (uint32_t)(uint8_t)plt_get(i);
             h *= 16777619u;
         }
         pl_sig = h ? h : 1u;               /* 0 is reserved for "none" */
