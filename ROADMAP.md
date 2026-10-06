@@ -1364,6 +1364,87 @@ is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
 
+## CUSTOM EQ -- user-set bands, held as a 9th preset. Requested 2026-10-06
+
+**Operation, as asked for:** hold **Y** to open an EQ overlay; **Up/Down**
+moves the selected band's gain, **Left/Right** moves between bands, hold **Y**
+again to close. The result is saved as **CUSTOM**, which joins the cycle that
+a plain **Y** tap already walks, and persists.
+
+### It is more tractable than it looks, because the bands are FIXED
+
+The EQ is five bands at fixed frequencies -- lowshelf 80 Hz, peaks at 250,
+1k and 4k, highshelf 12 kHz -- with five Q2.16 coefficients each, generated
+by `tools/gen_eq_coeffs.py`. The filter runs in RTL and `R_EQ` selects a
+preset by index.
+
+A fixed centre frequency means `cos(omega)` and `alpha` are CONSTANTS per
+band. Only `A = 10^(gain/40)` varies, and after normalising by a0 every
+coefficient is a short expression in `alpha*A` and `alpha/A`. So this does
+NOT need a runtime filter designer, which is what makes it affordable on a
+CPU with no FPU. Note also that `b1` and `a1` are both `-2cos(omega)`, so
+they do not move with gain at all.
+
+**crom is `romstyle = "logic"`, not M10K.** A 9th preset's 25 coefficients
+plus its preamp is ~468 bits of registers -- ALMs, which are 35% used. This
+costs no block RAM, which is the resource that would otherwise veto it.
+
+### Two ways to get the coefficients, and the safer one is bigger
+
+**Build-time table (preferred).** Extend `gen_eq_coeffs.py` to emit every
+(band, gain-step) combination as a C array. At 25 steps (-12..+12 dB in 1 dB)
+that is 5 x 25 x 5 coefficients, roughly 1,900 bytes. No runtime arithmetic,
+and the values come from the same generator that already produces the eight
+shipped presets, so they inherit whatever validation those get.
+
+**Runtime computation.** ~400-600 bytes of code plus two small constant
+tables (10 values for cos/alpha, 25 for A). Cheaper in space, allows finer
+steps, and needs five divides per change -- nothing, since it only runs when
+the user moves a slider.
+
+**Prefer the table.** An IIR with bad coefficients does not degrade quietly;
+an unstable 2-pole section produces full-scale noise into headphones. If the
+runtime path is taken anyway, it MUST validate before applying -- a stable
+section needs |a2| < 1 and |a1| < 1 + a2, which is two comparisons.
+
+### Cost
+
+| part | estimate |
+|---|---|
+| coefficient table | ~1,900 B image (or ~600 B of code if computed) |
+| overlay UI, five bars | ~600-800 B |
+| modal input handling | ~300 B |
+| RTL: writable coefficients + MMIO | small; ALMs, no M10K; needs a compile |
+| persistence | 5 bands x 5 bits = **25 bits, one settings word** |
+
+Three `interact.json` slots are free, so the gains fit in one of them.
+
+### Four things that will bite
+
+1. **`EQ_COUNT` 8 -> 9 means widening the EQ preset slider's `max` from 7 to
+   8 in `interact.json`.** Forget it and the preset silently stops persisting
+   with everything still looking correct -- this already happened once with a
+   meter. Widening a max is the one safe edit to that file.
+2. **Y is getting crowded.** Tap cycles the preset, Select+Y is crossfeed as
+   of 1.6.0, and hold would be the overlay. Three functions on one button is
+   more than any other key here carries; A has two.
+3. **The overlay is MODAL**, and the only other modal screen is the playlist
+   browser. While it is open, Up/Down must drive the band and not the volume,
+   and Left/Right must not seek. The browser already shows the shape to copy
+   -- it masks the key bits on the way out.
+4. **Preamp.** Each shipped preset carries one (`prom[0:7]`) to stop boosted
+   bands clipping. A user who lifts every band needs the same protection
+   computed for them, or CUSTOM will clip where the presets do not.
+
+### Worth doing?
+
+Yes, and it is a better fit than most of the queue: it costs no M10K, the
+persistence fits one word, and the hard part -- designing filters on a CPU
+with no FPU -- dissolves once you notice the band frequencies never move.
+The RTL change is small but real, so it wants to ride along with another
+compile rather than paying for its own.
+
+
 ## Japanese and accented text — BUILT for 1.5.0, 2026-09-15
 
 Requested by a user: Japanese tags and filenames showed as blanks. The font ROM
