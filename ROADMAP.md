@@ -12,7 +12,40 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
-# v1.6.0 -- FLAC, fixed
+# v1.6.0 -- RELEASED 2026-10-06
+
+Merged `ff89864`, tagged `v1.6.0`, published with the zip attached and
+verified byte-for-byte against the hardware-tested card. Interlock rev 23.
+
+Shipped as **crossfeed and mono, a sleep timer, and FLAC a third faster** --
+headlined on crossfeed rather than the decoder work, because "faster FLAC"
+immediately after v1.5.1's performance release reads as the same release
+twice. The accessibility use of mono is what gives it a story the speed
+work does not have.
+
+**Two release-time traps, both caught only at the last check:**
+
+1. `dist/` still held the **v1.5.1 bitstream** -- repeated `git checkout --
+   dist/` during testing had reverted it. Rev 23 firmware against rev 22
+   silicon is the mismatch screen for every user.
+2. `src/fpga/output_files/` is gitignored and **not per-branch**, so it held
+   another branch's build. A release bitstream must be recompiled on the
+   release branch.
+
+Both argue the same rule: **verify CORE_VERSION against EXPECT_VERSION from
+the actual dist/ files immediately before tagging**, and never assume the
+build output belongs to the branch you are on.
+
+**Tested throughout the build rather than as one pass at the end:** the
+PSRAM window, playlists after the pl_text migration, the seek wedge via the
+user's own reproduction, crossfeed in all four modes, demanding FLAC clean
+on every meter, and the release build on the card. `docs/QA_1.6.0.md` is a
+regression checklist for future releases.
+
+---
+
+# The v1.6.0 plan, as written before the work (kept for the reasoning)
+
 
 ## SOLVED 2026-10-02, in FIRMWARE. Phase 1 is not needed and is dropped.
 
@@ -704,6 +737,11 @@ code would have pointed at slot_size.
 **User, 2026-09-30, and it was reliable at the time:** hold seek-forward on a
 FLAC; somewhere around 3-4 minutes in it stops advancing and starts jumping
 BACKWARDS, and will not recover -- only restarting the track clears it.
+**[CORRECTED 2026-10-06: it was the CORE that had to be restarted, not the
+track. That fits the root cause and the original wording did not -- a track
+change could not have helped, because the stale slot_size was inherited
+ACROSS loads. Reading it as "restart the track" pointed the early hunt at
+per-track state and away from the value that survived one.]**
 Reproduced "every time" on Circles Around the Sun, Widespread Panic and Phish.
 Played from a PLAYLIST. Never seen on MP3.
 
@@ -1414,6 +1452,87 @@ trigger the defect, and changing the load path for a reason that is not present
 is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
+
+## CUSTOM EQ -- user-set bands, held as a 9th preset. Requested 2026-10-06
+
+**Operation, as asked for:** hold **Y** to open an EQ overlay; **Up/Down**
+moves the selected band's gain, **Left/Right** moves between bands, hold **Y**
+again to close. The result is saved as **CUSTOM**, which joins the cycle that
+a plain **Y** tap already walks, and persists.
+
+### It is more tractable than it looks, because the bands are FIXED
+
+The EQ is five bands at fixed frequencies -- lowshelf 80 Hz, peaks at 250,
+1k and 4k, highshelf 12 kHz -- with five Q2.16 coefficients each, generated
+by `tools/gen_eq_coeffs.py`. The filter runs in RTL and `R_EQ` selects a
+preset by index.
+
+A fixed centre frequency means `cos(omega)` and `alpha` are CONSTANTS per
+band. Only `A = 10^(gain/40)` varies, and after normalising by a0 every
+coefficient is a short expression in `alpha*A` and `alpha/A`. So this does
+NOT need a runtime filter designer, which is what makes it affordable on a
+CPU with no FPU. Note also that `b1` and `a1` are both `-2cos(omega)`, so
+they do not move with gain at all.
+
+**crom is `romstyle = "logic"`, not M10K.** A 9th preset's 25 coefficients
+plus its preamp is ~468 bits of registers -- ALMs, which are 35% used. This
+costs no block RAM, which is the resource that would otherwise veto it.
+
+### Two ways to get the coefficients, and the safer one is bigger
+
+**Build-time table (preferred).** Extend `gen_eq_coeffs.py` to emit every
+(band, gain-step) combination as a C array. At 25 steps (-12..+12 dB in 1 dB)
+that is 5 x 25 x 5 coefficients, roughly 1,900 bytes. No runtime arithmetic,
+and the values come from the same generator that already produces the eight
+shipped presets, so they inherit whatever validation those get.
+
+**Runtime computation.** ~400-600 bytes of code plus two small constant
+tables (10 values for cos/alpha, 25 for A). Cheaper in space, allows finer
+steps, and needs five divides per change -- nothing, since it only runs when
+the user moves a slider.
+
+**Prefer the table.** An IIR with bad coefficients does not degrade quietly;
+an unstable 2-pole section produces full-scale noise into headphones. If the
+runtime path is taken anyway, it MUST validate before applying -- a stable
+section needs |a2| < 1 and |a1| < 1 + a2, which is two comparisons.
+
+### Cost
+
+| part | estimate |
+|---|---|
+| coefficient table | ~1,900 B image (or ~600 B of code if computed) |
+| overlay UI, five bars | ~600-800 B |
+| modal input handling | ~300 B |
+| RTL: writable coefficients + MMIO | small; ALMs, no M10K; needs a compile |
+| persistence | 5 bands x 5 bits = **25 bits, one settings word** |
+
+Three `interact.json` slots are free, so the gains fit in one of them.
+
+### Four things that will bite
+
+1. **`EQ_COUNT` 8 -> 9 means widening the EQ preset slider's `max` from 7 to
+   8 in `interact.json`.** Forget it and the preset silently stops persisting
+   with everything still looking correct -- this already happened once with a
+   meter. Widening a max is the one safe edit to that file.
+2. **Y is getting crowded.** Tap cycles the preset, Select+Y is crossfeed as
+   of 1.6.0, and hold would be the overlay. Three functions on one button is
+   more than any other key here carries; A has two.
+3. **The overlay is MODAL**, and the only other modal screen is the playlist
+   browser. While it is open, Up/Down must drive the band and not the volume,
+   and Left/Right must not seek. The browser already shows the shape to copy
+   -- it masks the key bits on the way out.
+4. **Preamp.** Each shipped preset carries one (`prom[0:7]`) to stop boosted
+   bands clipping. A user who lifts every band needs the same protection
+   computed for them, or CUSTOM will clip where the presets do not.
+
+### Worth doing?
+
+Yes, and it is a better fit than most of the queue: it costs no M10K, the
+persistence fits one word, and the hard part -- designing filters on a CPU
+with no FPU -- dissolves once you notice the band frequencies never move.
+The RTL change is small but real, so it wants to ride along with another
+compile rather than paying for its own.
+
 
 ## Japanese and accented text — BUILT for 1.5.0, 2026-09-15
 
