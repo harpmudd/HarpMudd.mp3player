@@ -447,7 +447,8 @@ module mp3_fb (
     reg        char_f24;                // 24x24 cell (4bpp, 6 words/row)
     reg        char_f32;                // 32x32 cell (4bpp, 8 words/row)
     reg [24:0] char_ebase;              // SDRAM word of the glyph's row 0
-    reg [2:0]  ecnt;
+    reg [2:0]  ecnt;                  // words collected for THIS row
+    reg        bgot;                  // the current burst delivered a word
     reg [15:0] ew0, ew1, ew2, ew3, ew4, ew5, ew6;
     reg [8:0]  fw_len;                  // words in the in-flight font burst
 
@@ -666,6 +667,7 @@ module mp3_fb (
                         // command is latched or a row completes.
                         p0_addr   <= char_ebase + ext_row_off + {22'd0, ecnt};
                         p0_rd_req <= 1'b1;
+                        bgot      <= 1'b0;
                         astate    <= A_EXTRD;
                     end else if (!copy_mode && !char_ext && char_rows_left_nz
                                  && !char_row_ready) begin
@@ -716,6 +718,7 @@ module mp3_fb (
                                     : FONT_BASE + {2'd0, q_w[7:0], q_h, 6'd0};
                                 rowf_cnt  <= 2'd0;
                                 ecnt      <= 3'd0;   // first word of row 0
+                                bgot      <= 1'b0;
                                 // The SDRAM fetch is dispatched from IDLE, which
                                 // is where every bus user has to start.
                                 astate    <= (q_glyph == GLYPH_EXT) ? A_IDLE : A_ROWFETCH;
@@ -779,6 +782,7 @@ module mp3_fb (
                         // Bresenham step in Y: same accumulator idea as X, so
                         // vertical scaling can be fractional too.
                         ecnt <= 3'd0;       // next row starts at word 0
+                        bgot <= 1'b0;
                         if (acc_y + char_numy >= char_deny) begin
                             acc_y <= acc_y + char_numy - char_deny;
                             ey    <= ey + 5'd1;
@@ -814,11 +818,7 @@ module mp3_fb (
                 // writes rowhi; a 24px row runs on to the 6th.
                 A_EXTRD: begin
                     if (p0_data_available) begin
-                        // Exactly one word, then end the burst and hand the
-                        // bus back. No ordering is assumed across requests,
-                        // so neither a page-edge stop nor a refresh can
-                        // scramble the row.
-                        p0_end_burst_req <= 1'b1;
+                        bgot <= 1'b1;
                         case (ecnt)
                             3'd0: ew0 <= p0_q;
                             3'd1: ew1 <= p0_q;
@@ -833,6 +833,7 @@ module mp3_fb (
                             // on p0_q -- the ew write above lands next cycle
                             // -- so the last word of each size comes straight
                             // from p0_q.
+                            p0_end_burst_req <= 1'b1;
                             if (char_fmt1) begin
                                 {rowmid, rowlo} <= expand1(p0_q);
                             end else begin
@@ -845,9 +846,27 @@ module mp3_fb (
                             ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
                             astate <= A_COMPOSE;
                         end else begin
-                            ecnt   <= ecnt + 3'd1;
-                            astate <= A_IDLE;   // re-arbitrate for each word
+                            ecnt <= ecnt + 3'd1;   // stay here for the burst
                         end
+                    end else if (bgot) begin
+                        // The burst ended before the row was complete.
+                        // sdram_fb does that on its own: it precharges three
+                        // cycles before a page edge, and again whenever a
+                        // refresh falls due mid-burst. Go back to IDLE and
+                        // the dispatcher re-requests from the next
+                        // uncollected word.
+                        //
+                        // Resuming with a FRESH request is also what makes a
+                        // row spanning a page edge work: the new address
+                        // re-ACTIVATEs the correct row, where letting the
+                        // burst run on would have wrapped the column counter
+                        // back to the start of the same page.
+                        //
+                        // Reading a word at a time instead was measured worse
+                        // -- it fixed the garbled rows but cost the last two
+                        // ink columns of every glyph, so the normal path has
+                        // to stay a single burst.
+                        astate <= A_IDLE;
                     end
                 end
 
