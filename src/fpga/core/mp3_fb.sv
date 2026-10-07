@@ -279,6 +279,17 @@ module mp3_fb (
     // The glyph number is 10 bits, covering the 959 the generator emits. The
     // 144-word stride is 128 + 16 and the 256-word one is a plain shift, so
     // neither address needs a multiplier.
+    // Word offset of the current source row, and the index of its LAST word.
+    // ecnt walks 0..ext_last_w, one SDRAM request each.
+    wire [24:0] ext_row_off = char_fmt1 ? {20'd0, ey}
+                            : char_f32  ? {17'd0, ey, 3'b000}
+                            : char_f24  ? ({18'd0, ey, 2'b00} + {19'd0, ey, 1'b0})
+                                        : {18'd0, ey, 2'b00};
+    wire [2:0]  ext_last_w  = char_fmt1 ? 3'd0
+                            : char_f32  ? 3'd7
+                            : char_f24  ? 3'd5
+                                        : 3'd3;
+
     wire        is_f24  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[7];
     wire        is_f32  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[6];
     wire        is_big  = is_f24 || is_f32;
@@ -414,7 +425,23 @@ module mp3_fb (
     reg [31:0] rowlo, rowmid, rowhi, rowtop;  // px 0..7, 8..15, 16..23, 24..31
     reg [11:0] char_base;               // (glyph - 0x20) * 32
 
-    // Extended glyph: rows come from SDRAM, not the ROM
+    // Extended glyph: rows come from SDRAM, not the ROM.
+    //
+    // ONE WORD PER REQUEST, never a multi-word burst. sdram_fb ends a
+    // streaming read on its own in two cases -- it precharges three cycles
+    // before a page edge, and again whenever a refresh falls due mid-burst --
+    // and p0_rd_req is a single-cycle pulse, so nothing re-issues the read.
+    // A burst that assumed N words in order then assembled the row out of
+    // whatever did arrive, which drew a garbled line across one row of a
+    // glyph. Measured on hardware: 'C' at 24px row 13 lands on column 1022
+    // and broke on the page edge every time, while 'L' at 32px row 18 sits at
+    // column 0 and broke only when a refresh happened to land -- about 1.5%
+    // of rows, which is the handful of bad rows seen in a title.
+    //
+    // Reading a word at a time removes the ordering assumption altogether: it
+    // is what the 1bpp path has always done, it cannot be reordered by either
+    // mechanism, and returning to IDLE between words lets the scanout keep
+    // its priority instead of holding the bus for a whole row.
     reg        char_ext = 1'b0;
     reg        char_fmt1;               // 1bpp region
     reg        char_f24;                // 24x24 cell (4bpp, 6 words/row)
@@ -634,14 +661,11 @@ module mp3_fb (
                     // stride it is shifts and an add, not a multiplier.
                     end else if (!copy_mode && char_ext && char_rows_left_nz
                                  && !char_row_ready && can_sdram) begin
-                        p0_addr   <= char_ebase
-                                   + (char_fmt1 ? {20'd0, ey}
-                                    : char_f32  ? {17'd0, ey, 3'b000}
-                                    : char_f24  ? ({18'd0, ey, 2'b00} +
-                                                   {19'd0, ey, 1'b0})
-                                                : {18'd0, ey, 2'b00});
+                        // ecnt is NOT reset here: this branch is re-entered
+                        // once per word, and the row only restarts when the
+                        // command is latched or a row completes.
+                        p0_addr   <= char_ebase + ext_row_off + {22'd0, ecnt};
                         p0_rd_req <= 1'b1;
-                        ecnt      <= 3'd0;
                         astate    <= A_EXTRD;
                     end else if (!copy_mode && !char_ext && char_rows_left_nz
                                  && !char_row_ready) begin
@@ -691,6 +715,7 @@ module mp3_fb (
                                     ? ebase32
                                     : FONT_BASE + {2'd0, q_w[7:0], q_h, 6'd0};
                                 rowf_cnt  <= 2'd0;
+                                ecnt      <= 3'd0;   // first word of row 0
                                 // The SDRAM fetch is dispatched from IDLE, which
                                 // is where every bus user has to start.
                                 astate    <= (q_glyph == GLYPH_EXT) ? A_IDLE : A_ROWFETCH;
@@ -753,6 +778,7 @@ module mp3_fb (
                         end
                         // Bresenham step in Y: same accumulator idea as X, so
                         // vertical scaling can be fractional too.
+                        ecnt <= 3'd0;       // next row starts at word 0
                         if (acc_y + char_numy >= char_deny) begin
                             acc_y <= acc_y + char_numy - char_deny;
                             ey    <= ey + 5'd1;
@@ -788,62 +814,39 @@ module mp3_fb (
                 // writes rowhi; a 24px row runs on to the 6th.
                 A_EXTRD: begin
                     if (p0_data_available) begin
-                        if (char_fmt1) begin
-                            p0_end_burst_req <= 1'b1;
-                            {rowmid, rowlo}  <= expand1(p0_q);
+                        // Exactly one word, then end the burst and hand the
+                        // bus back. No ordering is assumed across requests,
+                        // so neither a page-edge stop nor a refresh can
+                        // scramble the row.
+                        p0_end_burst_req <= 1'b1;
+                        case (ecnt)
+                            3'd0: ew0 <= p0_q;
+                            3'd1: ew1 <= p0_q;
+                            3'd2: ew2 <= p0_q;
+                            3'd3: ew3 <= p0_q;
+                            3'd4: ew4 <= p0_q;
+                            3'd5: ew5 <= p0_q;
+                            default: ew6 <= p0_q;
+                        endcase
+                        if (ecnt == ext_last_w) begin
+                            // The word that arrived THIS cycle is still only
+                            // on p0_q -- the ew write above lands next cycle
+                            // -- so the last word of each size comes straight
+                            // from p0_q.
+                            if (char_fmt1) begin
+                                {rowmid, rowlo} <= expand1(p0_q);
+                            end else begin
+                                rowlo  <= {ew1, ew0};
+                                rowmid <= char_f24 || char_f32 ? {ew3, ew2}
+                                                               : {p0_q, ew2};
+                                rowhi  <= char_f32 ? {ew5, ew4} : {p0_q, ew4};
+                                rowtop <= {p0_q, ew6};
+                            end
                             ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
                             astate <= A_COMPOSE;
-                        end else if (char_f32) begin
-                            case (ecnt)
-                                3'd0: ew0 <= p0_q;
-                                3'd1: ew1 <= p0_q;
-                                3'd2: ew2 <= p0_q;
-                                3'd3: ew3 <= p0_q;
-                                3'd4: ew4 <= p0_q;
-                                3'd5: ew5 <= p0_q;
-                                3'd6: ew6 <= p0_q;
-                                default: begin
-                                    p0_end_burst_req <= 1'b1;
-                                    rowlo  <= {ew1, ew0};
-                                    rowmid <= {ew3, ew2};
-                                    rowhi  <= {ew5, ew4};
-                                    rowtop <= {p0_q, ew6};
-                                    ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
-                                    astate <= A_COMPOSE;
-                                end
-                            endcase
-                            ecnt <= ecnt + 3'd1;
-                        end else if (char_f24) begin
-                            case (ecnt)
-                                3'd0: ew0 <= p0_q;
-                                3'd1: ew1 <= p0_q;
-                                3'd2: ew2 <= p0_q;
-                                3'd3: ew3 <= p0_q;
-                                3'd4: ew4 <= p0_q;
-                                default: begin
-                                    p0_end_burst_req <= 1'b1;
-                                    rowlo  <= {ew1, ew0};
-                                    rowmid <= {ew3, ew2};
-                                    rowhi  <= {p0_q, ew4};
-                                    ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
-                                    astate <= A_COMPOSE;
-                                end
-                            endcase
-                            ecnt <= ecnt + 3'd1;
                         end else begin
-                            case (ecnt)
-                                3'd0: ew0 <= p0_q;
-                                3'd1: ew1 <= p0_q;
-                                3'd2: ew2 <= p0_q;
-                                default: begin
-                                    p0_end_burst_req <= 1'b1;
-                                    rowlo  <= {ew1, ew0};
-                                    rowmid <= {p0_q, ew2};
-                                    ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
-                                    astate <= A_COMPOSE;
-                                end
-                            endcase
-                            ecnt <= ecnt + 3'd1;
+                            ecnt   <= ecnt + 3'd1;
+                            astate <= A_IDLE;   // re-arbitrate for each word
                         end
                     end
                 end
