@@ -63,7 +63,12 @@ FMT1 = 1 << 17
 # keeps the 16px cell and the scales it has today.
 CELL24, BASE24 = 24, 18            # baseline 18: measured, see tools/title_fit.py
 W24 = 144                          # 16-bit words per glyph: 24 rows x 6
-FMT24 = 1 << 18
+# Bit 16, not a new bit. The 18-bit ext index is {w[8:0], h[8:0]} with bit 17
+# selecting the 1bpp region; the 4bpp region is capped at N4_MAX = 1024, so
+# with bit 17 clear only bits 9..0 can ever be set and bit 16 is free. Using
+# it meant the engine needed no new command bit, port or MMIO register --
+# mp3_fb.sv decodes it as q_w[7]. Keep the two in step.
+FMT24 = 1 << 16
 # The 24px region appends after the 1bpp one. Generator and mp3_fb.sv both
 # hard-code where it starts, exactly as they already do for FONT1_OFF, so the
 # assert below is what stops a range added to R1 from silently shifting the
@@ -277,7 +282,7 @@ h = [
     "/* Characters outside the ROM's ASCII, drawn from mp3font.bin in SDRAM.",
     " * Engine index = FEXT_1BPP (bit 17) | glyph number. See mp3_fb.sv. */",
     "#define FEXT_1BPP    0x20000u",
-    "#define FEXT_24PX    0x%05Xu     /* bit 18: 24x24 title cell */" % FMT24,
+    "#define FEXT_24PX    0x%05Xu     /* bit 16: 24x24 title cell */" % FMT24,
     "#define FEXT_GLYPH   0x7Fu        /* CHAR code meaning \"index is in SIZE\" */",
     "#define FEXT_N1_MIXED %du         /* 1bpp glyphs below this have a width bit */" % N1_MIXED,
     "#define FEXT_BYTES   %du      /* file size; smaller means not loaded */" % len(blob),

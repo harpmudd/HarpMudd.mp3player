@@ -5,7 +5,7 @@
 /* Characters outside the ROM's ASCII, drawn from mp3font.bin in SDRAM.
  * Engine index = FEXT_1BPP (bit 17) | glyph number. See mp3_fb.sv. */
 #define FEXT_1BPP    0x20000u
-#define FEXT_24PX    0x40000u     /* bit 18: 24x24 title cell */
+#define FEXT_24PX    0x10000u     /* bit 18: 24x24 title cell */
 #define FEXT_GLYPH   0x7Fu        /* CHAR code meaning "index is in SIZE" */
 #define FEXT_N1_MIXED 960u         /* 1bpp glyphs below this have a width bit */
 #define FEXT_BYTES   1109728u      /* file size; smaller means not loaded */
@@ -69,14 +69,14 @@ static const unsigned char fext_adv4[432] = {
 /* { first code point, count, engine index of first } */
 static const struct { uint16_t first, count; uint32_t base; }
 fext24_ranges[FEXT24_NRANGES] = {
-    { 0x0020,    95, 0x40000 },
-    { 0x00A0,    96, 0x4005F },
-    { 0x0100,   128, 0x400BF },
-    { 0x0370,   144, 0x4013F },
-    { 0x0400,   256, 0x401CF },
-    { 0x2000,   112, 0x402CF },
-    { 0x20A0,    48, 0x4033F },
-    { 0x2100,    80, 0x4036F },
+    { 0x0020,    95, 0x10000 },
+    { 0x00A0,    96, 0x1005F },
+    { 0x0100,   128, 0x100BF },
+    { 0x0370,   144, 0x1013F },
+    { 0x0400,   256, 0x101CF },
+    { 0x2000,   112, 0x102CF },
+    { 0x20A0,    48, 0x1033F },
+    { 0x2100,    80, 0x1036F },
 };
 
 /* 24px advances, one byte each. ZERO means the glyph has no 24px form
