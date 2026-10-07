@@ -307,8 +307,15 @@ module mp3_fb (
     // so its only near-edge row starts at 1016, trips the stop, and resumes
     // correctly -- which is why the title was clean while the artist line
     // was not.
+    // 1021 is where sdram_fb precharges (stop_burst_addr = 1023 - (CAS-1),
+    // tripped when column+1 reaches it). Ending our own burst AT that column
+    // rather than letting the controller cut it means the page case never
+    // depends on detecting a controller-initiated break at all -- the engine
+    // always finishes first, and the resume below is left to handle refresh
+    // only. Columns 1022 and 1023 each end a burst too, so a row crossing
+    // the edge is read as a short run per page.
     wire [24:0] ecur_addr = char_ebase + ext_row_off + {22'd0, ecnt};
-    wire        ecol_end  = (ecur_addr[9:0] == 10'h3FF);
+    wire        ecol_end  = (ecur_addr[9:0] >= 10'd1021);
 
     wire        is_f24  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[7];
     wire        is_f32  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[6];

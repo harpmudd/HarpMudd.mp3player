@@ -11,10 +11,10 @@
 
 module tb_write;
     localparam [24:0] FONT_BASE  = 25'h0100000;
-    localparam [24:0] FONT32_OFF = 25'd416768;   // 24px region
-    localparam        GM         = 7'h43 - 7'h20;          // 'C'
-    localparam [24:0] GBASE      = FONT_BASE + FONT32_OFF + GM * 144;
-    localparam [24:0] IDX        = 25'h10000 | GM;         // FEXT_24PX | glyph
+    localparam [24:0] FONT32_OFF = 25'd554864;   // 32px region
+    localparam        GM         = 7'h64 - 7'h20;          // 'd'
+    localparam [24:0] GBASE      = FONT_BASE + FONT32_OFF + GM * 256;
+    localparam [24:0] IDX        = 25'h8000 | GM;          // FEXT_32PX | glyph
     localparam [15:0] BG         = 16'h0842;
 
     reg clk = 0;     always #5    clk = ~clk;              // 100 MHz
@@ -67,12 +67,12 @@ module tb_write;
     );
 
     // ---- SDRAM model -------------------------------------------------------
-    reg [15:0] gmem [0:143];                 // the 'C' 24px glyph image
+    reg [15:0] gmem [0:255];                 // the 'd' 32px glyph image
     reg [15:0] fb   [0:16383];               // framebuffer words we watch
     reg [12:0] act_row [0:3];
     integer i;
     initial begin
-        $readmemh("sim/glyph_C24.hex", gmem);
+        $readmemh("sim/glyph_d32.hex", gmem);
         for (i = 0; i < 16384; i = i + 1) fb[i] = 16'hDEAD;
         for (i = 0; i < 4; i = i + 1) act_row[i] = 0;
     end
@@ -85,7 +85,7 @@ module tb_write;
     reg        rv0 = 0, rv2 = 0;
 
     function [15:0] fetch(input [24:0] a);
-        if (a >= GBASE && a < GBASE + 144) fetch = gmem[a - GBASE];
+        if (a >= GBASE && a < GBASE + 256) fetch = gmem[a - GBASE];
         else if (a < 16384)                fetch = (fb[a] === 16'hDEAD) ? 16'h0 : fb[a];
         else                               fetch = 16'h0;
     endfunction
@@ -175,13 +175,17 @@ module tb_write;
         repeat (150000) @(posedge clk);
         r13 = 13*512;
         $display("");
-        $display("C 24px row 13 -- starts at page column 1022, WRAPS");
-        $display("expected cov: .3,15,15,15,2 at cols 1..5 then 4,15,15,14,1 at 12..16");
+        $display("d 32px -- row 17 hits the STOP, row 18 is the row AFTER it");
+        $display("row 18 expected: 12,15,15,15,7 at cols 1..5 then 5,15,15,15,15,2 at 12..17");
         $display("  x    word   what");
-        for (i = 102; i <= 140; i = i + 1)
-            $display("  %0d   %h   %0s", i, fb[r13+i],
-                     (fb[r13+i] === 16'hDEAD) ? "UNWRITTEN" :
-                     (fb[r13+i] === BG)       ? "background" : "INK");
+        for (i = 102; i <= 128; i = i + 1)
+            $display("  row17 x=%0d  %h  %0s", i, fb[17*512+i],
+                     (fb[17*512+i] === 16'hDEAD) ? "UNWRITTEN" :
+                     (fb[17*512+i] === BG)       ? "background" : "INK");
+        for (i = 102; i <= 128; i = i + 1)
+            $display("  row18 x=%0d  %h  %0s", i, fb[18*512+i],
+                     (fb[18*512+i] === 16'hDEAD) ? "UNWRITTEN" :
+                     (fb[18*512+i] === BG)       ? "background" : "INK");
         $display("resume events: %0d", nresume);
         $finish;
     end
