@@ -232,7 +232,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.6.0"
+#define APP_VER "1.7.0"
 /* Dev builds say so ON SCREEN. The default is DEV, and a release has to
  * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
  * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
