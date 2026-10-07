@@ -227,7 +227,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503317u   /* rev 23: PSRAM window               */
+#define EXPECT_VERSION 0x4D503318u   /* rev 24: native 24/32px font cells  */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
@@ -275,8 +275,19 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Type scale. The engine scales fractionally (Bresenham), so there is a real
  * step between 16 and 32 px -- integer-only scaling forced a doubling, which
  * is far too coarse for setting a title against an artist line. */
-enum { TS_1X = 0, TS_15X = 1, TS_2X = 2, TS_3X = 3 };
-static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
+/* TS_24 and TS_32 are NATIVE cells: the glyph is rendered at that size in
+ * the font file rather than enlarged from the 16px one, so the engine draws
+ * them at 1:1 and no scaler touches them. Their ts_half deliberately matches
+ * the scale they replace -- TS_24 measures exactly like TS_15X and TS_32
+ * exactly like TS_2X -- so every FB_CELL, cell-width and layout calculation
+ * keeps working unchanged and a caller can simply switch size.
+ *
+ * They are NOT part of the fb_text_fit ladder: that walks scales downward
+ * assuming bigger index means bigger text, which stops being true here. */
+enum { TS_1X = 0, TS_15X = 1, TS_2X = 2, TS_3X = 3, TS_24 = 4, TS_32 = 5 };
+static const unsigned char ts_half[6] = { 2, 3, 4, 6, 3, 4 }; /* size = 16*n/2 */
+#define TS_IS_NATIVE(s)  ((s) >= TS_24)
+#define TS_FALLBACK(s)   ((s) == TS_32 ? TS_2X : TS_15X)
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
@@ -319,6 +330,59 @@ static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
     return '?';
 }
 
+/* As fb_resolve, for a NATIVE cell. Returns 0 if this code point has no glyph
+ * at that size -- 163 of them have no Inter outline and fall back to Unifont
+ * at 16px, which there is no larger version of. The caller then draws the
+ * WHOLE string a size down: mixing two cell sizes on one line looks worse
+ * than the scaling these cells exist to remove. */
+static uint32_t fb_resolve_native(uint32_t cp, uint32_t sx, uint32_t *adv)
+{
+    if (!fext_ok) return 0;
+    uint32_t nr = (sx == TS_32) ? FEXT32_NRANGES : FEXT24_NRANGES;
+    for (uint32_t r = 0; r < nr; r++) {
+        uint32_t first = (sx == TS_32) ? fext32_ranges[r].first
+                                       : fext24_ranges[r].first;
+        uint32_t cnt   = (sx == TS_32) ? fext32_ranges[r].count
+                                       : fext24_ranges[r].count;
+        uint32_t d = cp - first;
+        if (d >= cnt) continue;
+        uint32_t base = (sx == TS_32) ? fext32_ranges[r].base
+                                      : fext24_ranges[r].base;
+        uint32_t n = base + d;
+        uint32_t g = n & 0x3FFu;            /* glyph number within the region */
+        uint32_t a = (sx == TS_32) ? fext32_adv[g] : fext24_adv[g];
+        if (!a) return 0;
+        *adv = a;
+        return n | FB_EXT;
+    }
+    return 0;
+}
+
+/* The one resolve every draw and measure path goes through, so a native cell
+ * and its fallback can never disagree about which glyph or how wide. */
+static uint32_t fb_resolve_s(uint32_t cp, uint32_t sx, uint32_t *adv)
+{
+    if (TS_IS_NATIVE(sx)) {
+        uint32_t g = fb_resolve_native(cp, sx, adv);
+        if (g) return g;                    /* advance is already final */
+        sx = TS_FALLBACK(sx);               /* same cell size, scaled glyph */
+    }
+    uint32_t g = fb_resolve(cp, adv);
+    *adv = (*adv * ts_half[sx]) / 2u;
+    return g;
+}
+
+/* TS_24 / TS_32 only if EVERY code point has a glyph at that size, else the
+ * scale it replaces. Checked over the whole string up front, because the
+ * fallback has to apply to all of it or not at all. */
+static uint32_t fb_native_scale(const char *s, uint32_t sx)
+{
+    uint32_t a;
+    while (*s)
+        if (!fb_resolve_native(u8_next(&s), sx, &a)) return TS_FALLBACK(sx);
+    return sx;
+}
+
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
@@ -326,8 +390,8 @@ static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
 static uint32_t fb_adv(uint32_t cp, uint32_t sx)
 {
     uint32_t a;
-    fb_resolve(cp, &a);
-    return (a * ts_half[sx]) / 2u;
+    fb_resolve_s(cp, sx, &a);
+    return a;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -442,6 +506,11 @@ static void fb_glyph_draw(uint32_t x, uint32_t y, uint32_t g, uint32_t sx, uint3
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
     if (g & FB_EXT) {
+        /* A native glyph is already the size it will be drawn at, so it goes
+         * to the engine at 1:1. Sending a scale would put the scaler back in
+         * the path the native cell exists to remove -- and the engine ignores
+         * the fields in that case anyway, so this keeps the two in step. */
+        if (g & FEXT_NATIVE) sx = sy = TS_1X;
         REG(R_FB_SIZE) = ((g & 0x1FFu) << 9) | ((g >> 9) & 0x1FFu);
         g = FEXT_GLYPH;
     }
@@ -511,8 +580,7 @@ static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
     uint32_t limit = x + max_w;
     if (paint_r > FB_W) paint_r = FB_W;
     while (*s) {
-        uint32_t a, g = fb_resolve(u8_next(&s), &a);
-        a = (a * ts_half[sx]) / 2u;
+        uint32_t a, g = fb_resolve_s(u8_next(&s), sx, &a);
         if (x + a > limit)   break;        /* out of layout budget */
         if (x + cell > paint_r) break;     /* would paint past the box */
         fb_glyph_draw(x, y, g, sx, sy);
@@ -533,8 +601,7 @@ static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
     uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
     uint32_t limit = x + max_w;
     while (*s) {
-        uint32_t a, g = fb_resolve(u8_next(&s), &a);
-        a = (a * ts_half[sx]) / 2u;
+        uint32_t a, g = fb_resolve_s(u8_next(&s), sx, &a);
         if (x + a > limit) break;          /* out of layout budget */
         if (x + cell > FB_W) break;        /* would paint off-screen */
         fb_glyph_draw(x, y, g, sx, sy);
@@ -3213,15 +3280,21 @@ static void ui_draw_chrome(void)
      * One size for every track, and ui_marq_init below turns the scroll on for
      * anything that overflows -- which is what the marquee was already for, and
      * why it almost never ran. */
-    uint32_t ts = TS_2X;
+    /* Native 32px where the whole title has glyphs for it, else the 2x path
+     * it replaces. Same cell size either way, so nothing in the layout below
+     * cares which one came back. */
+    uint32_t ts = fb_native_scale(title, TS_32);
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
     fb_text_boxed(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts,
                   ui_text_w, UI_CARD_TEXT_R);
 
     /* Artist one step down from the title, never below 1.5x -- that step only
-     * exists because the engine can scale fractionally now. */
-    uint32_t as = (ts > TS_15X) ? (ts - 1u) : TS_15X;
+     * exists because the engine can scale fractionally now. Resolved against
+     * the ARTIST string, not derived from ts: the two can fall back
+     * independently, and an artist with a glyph the 24px cell lacks must not
+     * be decided by what the title happened to contain. */
+    uint32_t as = fb_native_scale(track_artist, TS_24);
     ui_mq_artist.on = 0;      /* no artist -> no leftover scroll from the last track */
     uint32_t y = UI_TITLE_Y + FB_CELL(ts) + 6u;
     if (track_artist[0]) {
@@ -4010,7 +4083,7 @@ static void ui_idle_screen(const char *reason)
      * as a separate alert. */
     if (reason) ui_gs_line(144u, reason, UI_RED, TS_1X);
 
-    ui_gs_line(170u, "Getting started",                     ui_accent, TS_15X);
+    ui_gs_line(170u, "Getting started",                     ui_accent, TS_24);
 
     /* 18 px within a step, 26 between them. An even pitch throughout made the
      * three steps read as one eight-line block -- the grouping has to be
@@ -4056,7 +4129,7 @@ static void ui_failed_msg(const char *l1, const char *l2)
     ui_blank_wake();
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
     fb_set_color(UI_RED, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_2X, TS_2X, UI_INNER_W);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_32, TS_32, UI_INNER_W);
 
     /* This line used to print the file's first four bytes as hex. That is a
      * debugging aid, and it was on the ONE screen a user is most likely to see
@@ -5736,9 +5809,9 @@ ui_tail:
         /* Clear FIRST, then set the colour. fb_rect() writes the colour
          * registers (fg = bg = its fill), so setting the text colour before a
          * clear leaves fg == bg and the glyphs paint invisibly. */
-        fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_15X), cbg);
+        fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_24), cbg);
         fb_set_color(UI_WHITE, cbg);
-        fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_15X, TS_15X, UI_INNER_W);
+        fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_24, TS_24, UI_INNER_W);
 
         /* 1.2x, while it is on. Right-aligned on this row, which puts it
          * directly under the track counter -- that is drawn right-aligned on
@@ -5757,8 +5830,8 @@ ui_tail:
             const char *sp = "1.2x";
             uint32_t sw = fb_text_width(sp, TS_1X);
             uint32_t sx = FB_W - UI_MARGIN - sw;
-            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_15X) > FB_CELL(TS_1X)
-                                     ? (FB_CELL(TS_15X) - FB_CELL(TS_1X)) / 2u : 0u);
+            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_24) > FB_CELL(TS_1X)
+                                     ? (FB_CELL(TS_24) - FB_CELL(TS_1X)) / 2u : 0u);
             fb_set_color(ui_accent, cbg);
             fb_text_clipped(sx, sy, sp, TS_1X, TS_1X, sw + 2u);
         }
@@ -9795,7 +9868,7 @@ static void ui_mid_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
 static void ui_mismatch_screen(uint32_t got, uint32_t want)
 {
     char b[48], *q = b;
-    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_15X);
+    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_24);
     ui_mid_line(168u, "Some core files are from a",     UI_WHITE, TS_1X);
     ui_mid_line(186u, "different version.",             UI_WHITE, TS_1X);
     ui_mid_line(220u, "Reinstall MP3 Player.",          UI_WHITE, TS_1X);

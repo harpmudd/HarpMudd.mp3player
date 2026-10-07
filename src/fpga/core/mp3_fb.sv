@@ -134,20 +134,26 @@ module mp3_fb (
     //   4bpp region: 1024 glyphs x 64 words (16 rows x 4 words), Inter.
     //   1bpp region: 16 words per glyph (one per row), Unifont.
     //   24px region: 144 words per glyph (24 rows x 6 words), Inter.
-    // The generator and this file must agree on all three constants.
+    //   32px region: 256 words per glyph (32 rows x 8 words), Inter.
+    // The generator and this file must agree on all four constants.
     //
-    // The 24px region is selected by bit 16, which is free: the 4bpp region
-    // is capped at 1024 glyphs, so with bit 17 clear only bits 9..0 of the
-    // index can ever be set. That is why the title size needed no new command
-    // bit, no new port and no MMIO change -- only this decode.
+    // The native cells are selected by bits 16 and 15, which are free: the
+    // 4bpp region is capped at 1024 glyphs, so with bit 17 clear only bits
+    // 9..0 of the index can ever be set. That is why these sizes needed no
+    // new command bit, no new port and no MMIO change -- only this decode.
     //
-    // It exists because the title line used to be a 15px glyph drawn at 1.5x,
-    // and 1.5x is the ONLY scale here that resamples (see char_num/char_den
-    // below), so stems landed a column wider than their neighbours. A 24px
-    // glyph drawn at 1x has no resampler in its path at all.
+    // They exist because the only two ways the engine can enlarge a 16px
+    // glyph both show. 1.5x is the ONLY scale that RESAMPLES (see
+    // char_num/char_den below), so the artist line and the clock came out
+    // with stems a column wider than their neighbours; 2x is clean integer
+    // replication but it is still a 15px glyph with every pixel doubled, so
+    // the title -- the largest text on screen -- had a two-pixel staircase on
+    // every edge. A glyph rendered at its final size and drawn at 1x has
+    // neither problem. Every other caller keeps the 16px cell and its scales.
     localparam [24:0] FONT_BASE  = 25'h0100000;
     localparam [24:0] FONT1_OFF  = 25'd65536;        // 1024 * 64
     localparam [24:0] FONT24_OFF = 25'd416768;       // end of the 1bpp region
+    localparam [24:0] FONT32_OFF = 25'd554864;       // end of the 24px region
     localparam [6:0]  GLYPH_EXT  = 7'h7F;
     // COPY moves a w x h block SDRAM->SDRAM. It exists for the album-art panel:
     // sliding an image by re-sending its pixels from the CPU would be thousands
@@ -264,18 +270,23 @@ module mp3_fb (
     wire [1:0]  q_sx    = cmd_q[9:8];
     wire [1:0]  q_sy    = cmd_q[7:6];
 
-    // 24px title cell: ext index bit 16 (q_w[7]) with the 1bpp bit clear.
+    // Native cells: ext index bit 16 (q_w[7]) = 24px, bit 15 (q_w[6]) = 32px,
+    // both with the 1bpp bit clear. The generator sets at most one.
     // GATED ON THE EXT GLYPH. char_fmt1 and char_ebase can be latched from a
     // stale size field harmlessly because char_ext gates every use of them,
     // but char_w applies to EVERY char -- ungated, a leftover size field would
-    // silently redraw ordinary 16px text in a 24px cell.
-    // The glyph number is 10 bits, covering the 959 the generator emits, and
-    // the 144-word stride is 128 + 16, so the address costs two shifts and an
-    // add rather than a multiplier.
+    // silently redraw ordinary 16px text in a native cell.
+    // The glyph number is 10 bits, covering the 959 the generator emits. The
+    // 144-word stride is 128 + 16 and the 256-word one is a plain shift, so
+    // neither address needs a multiplier.
     wire        is_f24  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[7];
-    wire [9:0]  g24     = {q_w[0], q_h};
+    wire        is_f32  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[6];
+    wire        is_big  = is_f24 || is_f32;
+    wire [6:0]  big_w   = is_f32 ? 7'd32 : 7'd24;
+    wire [9:0]  gbig    = {q_w[0], q_h};
     wire [24:0] ebase24 = FONT_BASE + FONT24_OFF
-                        + {8'd0, g24, 7'd0} + {11'd0, g24, 4'd0};
+                        + {8'd0, gbig, 7'd0} + {11'd0, gbig, 4'd0};
+    wire [24:0] ebase32 = FONT_BASE + FONT32_OFF + {7'd0, gbig, 8'd0};
 
     // ======================================================================
     // Scanout line buffer: parity-split double buffer, exactly as
@@ -396,19 +407,21 @@ module mp3_fb (
     reg [2:0]  char_num, char_den;      // X: src pixels per output pixel
     reg [2:0]  char_numy, char_deny;    // Y: same, latched at command pop
     reg [1:0]  rowf_cnt;                // row-fetch sequencer
-    // One source row. 16px cells fill rowlo+rowmid and leave rowhi alone --
-    // compose stops at char_w, so ex never reaches those pixels and a stale
-    // rowhi cannot bleed into a 16px glyph.
-    reg [31:0] rowlo, rowmid, rowhi;    // px 0..7, 8..15, 16..23 at 4bpp
+    // One source row. A 16px cell fills rowlo+rowmid and leaves the rest
+    // alone, and a 24px cell leaves rowtop alone -- compose stops at char_w,
+    // so ex never reaches those pixels and a stale word cannot bleed into a
+    // smaller glyph.
+    reg [31:0] rowlo, rowmid, rowhi, rowtop;  // px 0..7, 8..15, 16..23, 24..31
     reg [11:0] char_base;               // (glyph - 0x20) * 32
 
     // Extended glyph: rows come from SDRAM, not the ROM
     reg        char_ext = 1'b0;
     reg        char_fmt1;               // 1bpp region
-    reg        char_f24;                // 24x24 title cell (4bpp, 6 words/row)
+    reg        char_f24;                // 24x24 cell (4bpp, 6 words/row)
+    reg        char_f32;                // 32x32 cell (4bpp, 8 words/row)
     reg [24:0] char_ebase;              // SDRAM word of the glyph's row 0
     reg [2:0]  ecnt;
-    reg [15:0] ew0, ew1, ew2, ew3, ew4;
+    reg [15:0] ew0, ew1, ew2, ew3, ew4, ew5, ew6;
     reg [8:0]  fw_len;                  // words in the in-flight font burst
 
     // A 1bpp row is one word, bit 15 = leftmost pixel. Expanded to the same
@@ -434,7 +447,7 @@ module mp3_fb (
     // rowbits holds the CURRENT source row: 16 pixels x 4 bits, fetched as two
     // 32-bit words before the row is composed, so every pixel of the row is
     // available without another ROM access mid-compose.
-    wire [95:0] rowbits = {rowhi, rowmid, rowlo};
+    wire [127:0] rowbits = {rowtop, rowhi, rowmid, rowlo};
     wire [3:0]  cov     = rowbits[{ex, 2'b00} +: 4];
 
     // The coverage value IS the anti-aliasing -- blend fg->bg by it directly.
@@ -623,6 +636,7 @@ module mp3_fb (
                                  && !char_row_ready && can_sdram) begin
                         p0_addr   <= char_ebase
                                    + (char_fmt1 ? {20'd0, ey}
+                                    : char_f32  ? {17'd0, ey, 3'b000}
                                     : char_f24  ? ({18'd0, ey, 2'b00} +
                                                    {19'd0, ey, 1'b0})
                                                 : {18'd0, ey, 2'b00});
@@ -648,15 +662,15 @@ module mp3_fb (
                                 // EPX doubles 8x8 -> 16x16, then each axis is
                                 // replicated (scale+1) times: 16*(sx+1) wide,
                                 // 16*(sy+1) rows. Max 64x64.
-                                // A 24px glyph is drawn at 1:1 and ignores the
-                                // scale fields: the whole point of the size is
-                                // to keep the resampler out of the title.
-                                char_num  <= is_f24 ? 3'd1 : nd_x[5:3];
-                                char_den  <= is_f24 ? 3'd1 : nd_x[2:0];
-                                char_numy <= is_f24 ? 3'd1 : nd_y[5:3];
-                                char_deny <= is_f24 ? 3'd1 : nd_y[2:0];
-                                char_w            <= is_f24 ? 7'd24 : ext_x[6:0];
-                                char_rows_left    <= is_f24 ? 9'd24 : ext_y;
+                                // A native glyph is drawn at 1:1 and ignores
+                                // the scale fields: the whole point of these
+                                // sizes is to keep the scaler out of the path.
+                                char_num  <= is_big ? 3'd1 : nd_x[5:3];
+                                char_den  <= is_big ? 3'd1 : nd_x[2:0];
+                                char_numy <= is_big ? 3'd1 : nd_y[5:3];
+                                char_deny <= is_big ? 3'd1 : nd_y[2:0];
+                                char_w            <= is_big ? big_w : ext_x[6:0];
+                                char_rows_left    <= is_big ? {2'd0, big_w} : ext_y;
                                 char_rows_left_nz <= 1'b1;
                                 ey <= 5'd0; acc_y <= 3'd0;
                                 /* Glyphs below 0x20 or above 0x7E fall back to
@@ -668,10 +682,13 @@ module mp3_fb (
                                 char_ext   <= (q_glyph == GLYPH_EXT);
                                 char_fmt1  <= q_w[8];
                                 char_f24   <= is_f24;
+                                char_f32   <= is_f32;
                                 char_ebase <= q_w[8]
                                     ? FONT_BASE + FONT1_OFF + {4'd0, q_w[7:0], q_h, 4'd0}
                                     : is_f24
                                     ? ebase24
+                                    : is_f32
+                                    ? ebase32
                                     : FONT_BASE + {2'd0, q_w[7:0], q_h, 6'd0};
                                 rowf_cnt  <= 2'd0;
                                 // The SDRAM fetch is dispatched from IDLE, which
@@ -776,6 +793,26 @@ module mp3_fb (
                             {rowmid, rowlo}  <= expand1(p0_q);
                             ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
                             astate <= A_COMPOSE;
+                        end else if (char_f32) begin
+                            case (ecnt)
+                                3'd0: ew0 <= p0_q;
+                                3'd1: ew1 <= p0_q;
+                                3'd2: ew2 <= p0_q;
+                                3'd3: ew3 <= p0_q;
+                                3'd4: ew4 <= p0_q;
+                                3'd5: ew5 <= p0_q;
+                                3'd6: ew6 <= p0_q;
+                                default: begin
+                                    p0_end_burst_req <= 1'b1;
+                                    rowlo  <= {ew1, ew0};
+                                    rowmid <= {ew3, ew2};
+                                    rowhi  <= {ew5, ew4};
+                                    rowtop <= {p0_q, ew6};
+                                    ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
+                                    astate <= A_COMPOSE;
+                                end
+                            endcase
+                            ecnt <= ecnt + 3'd1;
                         end else if (char_f24) begin
                             case (ecnt)
                                 3'd0: ew0 <= p0_q;

@@ -405,7 +405,7 @@ module mp3_soc #(
     // a mismatched pair would run WRONG rather than merely degraded, which is
     // what rev 22 is: clk_sys moved and every timing constant moved with it, so
     // the wrong pairing plays 11% off pitch and says nothing.
-    localparam [31:0] CORE_VERSION = 32'h4D503317;   // "MP3" + rev 23 (PSRAM window)
+    localparam [31:0] CORE_VERSION = 32'h4D503318;   // "MP3" + rev 24 (native 24/32px cells)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 

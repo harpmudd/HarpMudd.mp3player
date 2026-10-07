@@ -75,6 +75,22 @@ FMT24 = 1 << 16
 # title font out from under the engine.
 OFF24_WORDS = 416768
 
+# ---- 32px title cell -------------------------------------------------------
+# The title is drawn at the engine's 2x, which is clean integer replication --
+# no resampling -- but it is still a 15px glyph with every pixel doubled, so
+# every edge is a two-pixel staircase. It is the largest text on the screen
+# and therefore the coarsest. A native 32px cell is the only thing that fixes
+# that; the 2x path stays for every other caller.
+#
+# Baseline 25 is where letters and digits fit EXACTLY: 25 rows above plus 7
+# below is the full 32. Only punctuation and accents overflow, and those take
+# the same squash the other sizes use. Baseline 24 clips the tallest
+# ascenders by a row, which is the one thing worth avoiding here.
+CELL32, BASE32 = 32, 25
+W32 = 256                          # 16-bit words per glyph: 32 rows x 8
+FMT32 = 1 << 15                    # another free bit; see FMT24
+OFF32_WORDS = OFF24_WORDS + 959 * W24   # asserted below
+
 # Sorted by code point. The firmware searches this in order.
 R4 = [  # (name, first, last) -- Inter where it has the glyph
     ("Latin-1 Supplement",  0x00A0, 0x00FF),
@@ -218,48 +234,63 @@ for name, a, b in R1:
         n1 += 1
 N1_MIXED = len(wide_bits)
 
-# ---- 24px title region -----------------------------------------------------
+# ---- large native cells (24px, 32px) ---------------------------------------
 # ASCII first so the common case is one contiguous run, then the same Latin /
-# Greek / Cyrillic / punctuation ranges the 4bpp region carries.
-squashed4 = len(SQUASHED)          # SQUASHED spans both passes; split the count
-font24 = ImageFont.truetype(str(TTF), CELL24)
-try:
-    font24.set_variation_by_axes([14.0, 600.0])
-except Exception:
-    pass
+# Greek / Cyrillic / punctuation ranges the 4bpp region carries. Both sizes
+# are the identical build with different constants, so they share this.
+squashed4 = len(SQUASHED)          # SQUASHED spans every pass; split the count
 
-data24 = bytearray()
-adv24 = []
-ranges24 = []
-n24 = 0
-for name, a, b in [("ASCII", 0x20, 0x7E)] + R4:
-    ranges24.append((a, b - a + 1, FMT24 | n24))
-    for cp in range(a, b + 1):
-        if cp in cmap:
-            cov, adv = inter_cov(cp, font24, CELL24, BASE24)
-        else:
-            # No 24px Unifont to fall back to, and a 16px bitmap dropped into
-            # a 24px cell would be worse than not offering the size at all.
-            # Advance 0 marks "no 24px glyph" and the firmware draws the whole
-            # string at 16px rather than mixing two sizes on one line.
-            cov, adv = [[0] * CELL24 for _ in range(CELL24)], 0
-        for y in range(CELL24):
-            v = 0
-            for x in range(CELL24):
-                v |= cov[y][x] << (x * 4)
-            data24 += struct.pack("<6H", *[(v >> (16 * k)) & 0xFFFF
-                                           for k in range(6)])
-        adv24.append(adv)
-        n24 += 1
+
+def big_region(cell, bline, fmt):
+    """A 4bpp region at one native cell size: (data, advances, ranges, n)."""
+    fnt = ImageFont.truetype(str(TTF), cell)
+    try:
+        fnt.set_variation_by_axes([14.0, 600.0])
+    except Exception:
+        pass
+    words = cell // 4              # 16-bit words per row at 4bpp
+    data, adv_t, rngs, n = bytearray(), [], [], 0
+    for name, a, b in [("ASCII", 0x20, 0x7E)] + R4:
+        rngs.append((a, b - a + 1, fmt | n))
+        for cp in range(a, b + 1):
+            if cp in cmap:
+                cov, adv = inter_cov(cp, fnt, cell, bline)
+            else:
+                # No Unifont at these sizes, and a 16px bitmap dropped into a
+                # big cell would look worse than not offering the size at all.
+                # Advance 0 marks "no glyph at this size"; the firmware then
+                # draws the WHOLE string a size down rather than mixing two
+                # cell sizes on one line.
+                cov, adv = [[0] * cell for _ in range(cell)], 0
+            for y in range(cell):
+                v = 0
+                for x in range(cell):
+                    v |= cov[y][x] << (x * 4)
+                data += struct.pack("<%dH" % words,
+                                    *[(v >> (16 * k)) & 0xFFFF
+                                      for k in range(words)])
+            adv_t.append(adv)
+            n += 1
+    assert all(0 <= x <= cell for x in adv_t), "advance must fit a byte"
+    return data, adv_t, rngs, n
+
+
+data24, adv24, ranges24, n24 = big_region(CELL24, BASE24, FMT24)
+squashed24 = len(SQUASHED)
+data32, adv32, ranges32, n32 = big_region(CELL32, BASE32, FMT32)
+
 assert len(data24) == n24 * W24 * 2, len(data24)
-assert all(0 <= a <= CELL24 for a in adv24), "24px advance must fit a byte"
-
+assert len(data32) == n32 * W32 * 2, len(data32)
 assert len(data4) + len(data1) == OFF24_WORDS * 2, (
     "the 1bpp region now ends at word %d, not the %d mp3_fb.sv expects -- "
     "update FONT24_OFF there and OFF24_WORDS here together"
     % ((len(data4) + len(data1)) // 2, OFF24_WORDS))
+assert (len(data4) + len(data1) + len(data24)) == OFF32_WORDS * 2, (
+    "the 24px region now ends at word %d, not the %d mp3_fb.sv expects -- "
+    "update FONT32_OFF there and OFF32_WORDS here together"
+    % ((len(data4) + len(data1) + len(data24)) // 2, OFF32_WORDS))
 
-blob = bytes(data4) + bytes(data1) + bytes(data24)
+blob = bytes(data4) + bytes(data1) + bytes(data24) + bytes(data32)
 BIN.parent.mkdir(parents=True, exist_ok=True)
 BIN.write_bytes(blob)
 
@@ -282,7 +313,10 @@ h = [
     "/* Characters outside the ROM's ASCII, drawn from mp3font.bin in SDRAM.",
     " * Engine index = FEXT_1BPP (bit 17) | glyph number. See mp3_fb.sv. */",
     "#define FEXT_1BPP    0x20000u",
-    "#define FEXT_24PX    0x%05Xu     /* bit 16: 24x24 title cell */" % FMT24,
+    "#define FEXT_24PX    0x%05Xu     /* bit 16: 24x24 native cell */" % FMT24,
+    "#define FEXT_32PX    0x%05Xu     /* bit 15: 32x32 native cell */" % FMT32,
+    "#define FEXT_NATIVE  0x%05Xu     /* either native cell */"
+    % (FMT24 | FMT32),
     "#define FEXT_GLYPH   0x7Fu        /* CHAR code meaning \"index is in SIZE\" */",
     "#define FEXT_N1_MIXED %du         /* 1bpp glyphs below this have a width bit */" % N1_MIXED,
     "#define FEXT_BYTES   %du      /* file size; smaller means not loaded */" % len(blob),
@@ -303,32 +337,33 @@ h += [
 for i in range(0, len(nib), 16):
     h.append("    " + ",".join("0x%02X" % v for v in nib[i:i + 16]) + ",")
 
-h += [
-    "};",
-    "",
-    "/* ---- 24px title cell ------------------------------------------- */",
-    "#define FEXT24_NRANGES %du" % len(ranges24),
-    "#define FEXT24_CELL    %du" % CELL24,
-    "",
-    "/* { first code point, count, engine index of first } */",
-    "static const struct { uint16_t first, count; uint32_t base; }",
-    "fext24_ranges[FEXT24_NRANGES] = {",
-]
-for a, c, base in sorted(ranges24):
-    h.append("    { 0x%04X, %5d, 0x%05X }," % (a, c, base))
-h += [
-    "};",
-    "",
-    "/* 24px advances, one byte each. ZERO means the glyph has no 24px form",
-    " * and the caller must draw the whole string at 16px instead. */",
-    "static const unsigned char fext24_adv[%d] = {" % len(adv24),
-]
-for i in range(0, len(adv24), 16):
-    h.append("    " + ",".join("%d" % v for v in adv24[i:i + 16]) + ",")
+h += ["};", ""]
+for tag, cell, rngs, advs in (("24", CELL24, ranges24, adv24),
+                              ("32", CELL32, ranges32, adv32)):
+    h += [
+        "/* ---- %dpx native cell ------------------------------------------ */"
+        % cell,
+        "#define FEXT%s_NRANGES %du" % (tag, len(rngs)),
+        "#define FEXT%s_CELL    %du" % (tag, cell),
+        "",
+        "/* { first code point, count, engine index of first } */",
+        "static const struct { uint16_t first, count; uint32_t base; }",
+        "fext%s_ranges[FEXT%s_NRANGES] = {" % (tag, tag),
+    ]
+    for a, c, base in sorted(rngs):
+        h.append("    { 0x%04X, %5d, 0x%05X }," % (a, c, base))
+    h += [
+        "};",
+        "",
+        "/* %dpx advances, one byte each. ZERO means the glyph has no %dpx" % (cell, cell),
+        " * form and the caller must draw the whole string a size down. */",
+        "static const unsigned char fext%s_adv[%d] = {" % (tag, len(advs)),
+    ]
+    for i in range(0, len(advs), 16):
+        h.append("    " + ",".join("%d" % v for v in advs[i:i + 16]) + ",")
+    h += ["};", ""]
 
 h += [
-    "};",
-    "",
     "/* 1bpp full-width flags for glyph numbers below FEXT_N1_MIXED. */",
     "static const unsigned char fext_wide1[%d] = {" % len(bitmap),
 ]
@@ -386,7 +421,10 @@ print(f"4bpp: {n4} glyphs ({fallback4} from Unifont, {squashed4} squashed to fit
       f"region {len(data4)} B")
 print(f"1bpp: {n1} glyphs ({missing1} blank), {N1_MIXED} with width bits, {len(data1)} B")
 print(f"24px: {n24} glyphs ({sum(1 for a in adv24 if not a)} with no 24px form, "
-      f"{len(SQUASHED) - squashed4} squashed to fit), region {len(data24)} B, "
+      f"{squashed24 - squashed4} squashed to fit), region {len(data24)} B, "
       f"at word {OFF24_WORDS}")
+print(f"32px: {n32} glyphs ({sum(1 for a in adv32 if not a)} with no 32px form, "
+      f"{len(SQUASHED) - squashed24} squashed to fit), region {len(data32)} B, "
+      f"at word {OFF32_WORDS}")
 print(f"mp3font.bin {len(blob):,} B; header {len(nib)} adv bytes + {len(bitmap)} width bytes"
       f" + {len(ranges)} ranges")
