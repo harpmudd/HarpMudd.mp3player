@@ -290,6 +290,26 @@ module mp3_fb (
                             : char_f24  ? 3'd5
                                         : 3'd3;
 
+    // Address of the word ecnt is waiting for, and whether it is the LAST
+    // column of its SDRAM page.
+    //
+    // A burst must never be allowed to run past a page edge. sdram_fb stops
+    // three columns early (at 1021) and that stop is handled by the resume
+    // below -- but a burst that STARTS past the stop, at 1022 or 1023, never
+    // trips it. The column counter then wraps to the beginning of the SAME
+    // page instead of advancing into the next row, so the rest of the row
+    // comes from whatever glyph lives at the start of that page, silently
+    // and with no break to detect.
+    //
+    // That is exactly what was on screen: the 24px cell is 6 words a row, so
+    // rows land on any column and some start at 1022 ('C' row 13, 'n' row 5,
+    // both visibly wrong). The 32px cell is 8 words from an 8-aligned base,
+    // so its only near-edge row starts at 1016, trips the stop, and resumes
+    // correctly -- which is why the title was clean while the artist line
+    // was not.
+    wire [24:0] ecur_addr = char_ebase + ext_row_off + {22'd0, ecnt};
+    wire        ecol_end  = (ecur_addr[9:0] == 10'h3FF);
+
     wire        is_f24  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[7];
     wire        is_f32  = (q_glyph == GLYPH_EXT) && !q_w[8] && q_w[6];
     wire        is_big  = is_f24 || is_f32;
@@ -846,7 +866,14 @@ module mp3_fb (
                             ox <= 7'd0; ex <= 5'd0; acc_x <= 3'd0;
                             astate <= A_COMPOSE;
                         end else begin
-                            ecnt <= ecnt + 3'd1;   // stay here for the burst
+                            ecnt <= ecnt + 3'd1;
+                            // Hand the bus back at a page edge and re-request:
+                            // the next word is in a different SDRAM row, and
+                            // only a fresh ACTIVE will reach it.
+                            if (ecol_end) begin
+                                p0_end_burst_req <= 1'b1;
+                                astate <= A_IDLE;
+                            end
                         end
                     end else if (bgot) begin
                         // The burst ended before the row was complete.
