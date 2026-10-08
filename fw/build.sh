@@ -131,13 +131,22 @@ img   = sym['__bss_end']
 heap  = sym['_heap_end'] - sym['_heap_start']
 ram   = sym['_stack_top']
 tail  = ram - sym['_tag_start']
-HELIX = 23816
+# The old line subtracted Helix's 23816 bytes from the heap. That was right
+# when Helix malloc'd from the linker heap; it has not been since fw/alloc.c
+# took malloc over and started serving it from a STATIC arena -- which lives
+# in .bss, and is therefore already counted in `img` and already deducted from
+# the heap by the linker. Subtracting it again double-counts, and the report
+# cried WARNING with 27 KB actually free.
+#
+# What the ASSERT in link.ld tests is _heap_start < _tag_start, so the gap
+# between them IS the headroom, in full. The guard that matters for the
+# decoder is ARENA_BYTES in alloc.c, which is exact and enforced there.
 print('$ROM: %d B image, %d B resident (%.1f%% of %d KB)'
       % (n, img, 100.0*img/ram, ram//1024))
-print('  heap %d B; Helix takes %d B -> %d B slack' % (heap, HELIX, heap - HELIX))
+print('  headroom %d B before the link fails (arena is inside .bss)' % heap)
 print('  reserved tail %d B (tag + ring + stack)' % tail)
-if heap - HELIX < 4096:
-    print('  WARNING: under 4 KB of heap slack left')
+if heap < 4096:
+    print('  WARNING: under 4 KB of headroom left')
 "
 # The splash version and the version the Pocket shows in its core list live in
 # two different files, and they drifted: v1.3.0 was built, tested and pushed to

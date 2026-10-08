@@ -487,6 +487,37 @@ static uint32_t pl_read_raw(void)
     return got;
 }
 
+/* The duration out of an extended-m3u "#EXTINF:<seconds>,<title>" line, or 0
+ * when the line is not one or does not carry a usable number.
+ *
+ * Seconds may be fractional ("367.5") and the format also allows -1 for
+ * "unknown". Taking digits up to the first non-digit handles the first and
+ * rejects the second for free: "-1" has no leading digit, so n stays 0.
+ *
+ * Worth having because of what it costs the files that need it. A headerless
+ * MP3 has no declared duration, so size_probe_pump() goes looking for the file
+ * size with far reads on the slot the decoder is streaming from -- 8.2 s into
+ * a 256 kbps track, and heard as a stutter when the fragment cache drops. One
+ * number in the playlist retires that whole search. */
+static uint16_t pl_extinf(uint32_t a, uint32_t b)
+{
+    static const char K[] = "#EXTINF:";
+    uint32_t i = 0;
+    while (K[i]) {
+        if (a + i >= b || plt_get(a + i) != K[i]) return 0u;
+        i++;
+    }
+    uint32_t p = a + i, v = 0, n = 0;
+    while (p < b) {
+        char c = plt_get(p);
+        if (c < '0' || c > '9') break;
+        v = v * 10u + (uint32_t)(c - '0');
+        if (v > 65000u) return 0u;          /* nonsense; treat as absent */
+        n++; p++;
+    }
+    return n ? (uint16_t)v : 0u;
+}
+
 /* Split the .m3u into names. Blank lines and #-comments are skipped, which
  * covers the extended format's #EXTM3U / #EXTINF lines, so both plain and
  * extended .m3u work with no separate parser. */
@@ -494,6 +525,7 @@ static void pl_parse(uint32_t len)
 {
     pl_count = 0;
     uint32_t i = 0;
+    uint16_t pend = 0;           /* EXTINF seen, awaiting its entry */
     /* A UTF-8 byte order mark, which Windows editors put at the front of a
      * saved .m3u. Left in place it rides on the FIRST entry's name -- drawn as
      * a stray glyph, and handed to APF as a filename that does not exist. */
@@ -523,8 +555,18 @@ static void pl_parse(uint32_t len)
             end--;
         plt_set(end, 0);
 
-        if (end > start && plt_get(start) != '#')
+        /* An EXTINF line describes the entry that FOLLOWS it, so the figure is
+         * held until that entry arrives rather than attached to the comment.
+         * Still skipped as a comment for every other purpose, so a plain .m3u
+         * and one with a stray comment between the two lines both behave. */
+        if (end > start && plt_get(start) != '#') {
+            pl_secs[pl_count] = pend;
             pl_off[pl_count++] = (uint16_t)start;
+            pend = 0;
+        } else if (end > start) {
+            uint16_t v = pl_extinf(start, end);
+            if (v) pend = v;
+        }
     }
 
     /* Ran out of index before running out of file. */
@@ -670,6 +712,7 @@ static int pl_play_span(uint16_t pos, int dir, uint16_t span)
         } else {
             pl_pos = at;
             track_from_pl = 1u;      /* the playlist started this track */
+            pl_hint_secs  = pl_secs[file_idx];
             if (pl_open_name(plt_name_at(pl_off[file_idx]))) {
                 pl_arm_load(leaving_id);
                 /* ONE line about the whole walk, not one per bad entry: a list

@@ -1163,6 +1163,14 @@ static const char *plt_name_at(uint32_t off)
  * indistinguishable from a short one: the screen just shows a smaller number. */
 static uint8_t  pl_truncated;
 static uint16_t pl_off[PL_MAX];          /* byte offset of each name in pl_text */
+/* The duration an extended .m3u declares for each entry, 0 when it does not.
+ * Two bytes an entry, 512 in all, which buys the headerless file everything a
+ * Xing header would have given it. */
+static uint16_t pl_secs[PL_MAX];
+/* The figure for the load the playlist has just armed. Consumed by load_track
+ * and zeroed there, so it can never be applied to a track the user goes on to
+ * pick from the menu. */
+static uint32_t pl_hint_secs;
 static uint16_t pl_order[PL_MAX];        /* play order -> file index            */
 static uint16_t pl_count;                /* 0 = no playlist loaded              */
 static uint16_t pl_pos;                  /* index INTO pl_order                 */
@@ -9929,6 +9937,28 @@ static int load_track(void)
      * end-of-track check, none of which matter in the first second.
      *
      * A file that declares its own length still skips all of this. */
+    /* A PLAYLIST can declare the duration the file does not. Extended .m3u
+     * carries "#EXTINF:<seconds>" ahead of each entry and pl_parse keeps it,
+     * so a headerless track arrives already knowing how long it is.
+     *
+     * This is the whole point of it: size_probe_pump() opens with
+     * `if (track_secs) return 0;`, so a declared duration retires the far-read
+     * search outright -- and with it the fragment-cache drop that was heard as
+     * a stutter 8.2 s into a 256 kbps headerless track. ui_total_secs(), the
+     * progress bar and the meas_rate branch all consult track_secs first, so
+     * they come good at the first painted clock rather than eight seconds in.
+     *
+     * Only when the FILE does not say. A Xing/VBRI header is exact and lands a
+     * frame or two later, during decode, and is deliberately left to overwrite
+     * this; FLAC has already set track_secs from STREAMINFO by here. So the
+     * playlist is the LAST resort, never a second opinion.
+     *
+     * Consumed, not read: zeroing it here means a figure armed by the playlist
+     * cannot leak onto a track the user then picks from the menu, which needs
+     * no hint anyway -- an 008A pick carries the real size with it. */
+    if (!track_secs && pl_hint_secs) track_secs = pl_hint_secs;
+    pl_hint_secs = 0;
+
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
     if (slot_size <= audio_start)
