@@ -1968,6 +1968,11 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * 16 lines of headroom over the longest real file is enough. Each line costs 4
  * bytes of index, so this is the cheapest dial in the feature. */
 #define LRC_LINES     80u
+/* Rows one lyric line may wrap to. Three, because 15 lines on this card
+ * exceed what two rows hold at the art-panel width however they are
+ * broken. The meter shows five rows total, so a three-row line eats its
+ * neighbours' context rather than being cut. */
+#define LRC_WRAP_MAX  3u
 #define LRC_NOTIME    0xFFFFu
 
 static char     lrc_text[LRC_TEXT_MAX];
@@ -4524,16 +4529,8 @@ static void pl_ui_draw(void)
  * whole. Breaks at the last SPACE before the limit so words stay intact --
  * breaking mid-word is worse than clipping, because it reads as corruption
  * rather than as a wrap. */
-static uint32_t lrc_split(const char *s, uint32_t maxw)
-{
-    uint32_t w = 0, sp = 0;
-    for (uint32_t i = 0; s[i]; i++) {
-        if (s[i] == ' ') sp = i;
-        w += fb_adv(s[i], TS_1X);
-        if (w > maxw) return sp ? sp : i;
-    }
-    return 0;
-}
+/* lrc_split() lived here. Replaced by lrc_wrap() below, which breaks
+ * EVERY row rather than only the first. */
 
 /* Wrap width. Reserves a whole CELL, not 8 px.
  *
@@ -4560,9 +4557,51 @@ static uint32_t lrc_painted_w(const char *s)
     return (cell > last) ? w + (cell - last) : w;
 }
 
+/* Where each row of a wrapped line STARTS. Returns the number of rows.
+ *
+ * Replaces lrc_split(), which returned ONE break point and guaranteed
+ * only that the text BEFORE it fitted -- the remainder was drawn at
+ * whatever length it happened to be. At full width the tails fitted by
+ * luck, which is why it went unnoticed; with the art panel shown the box
+ * is 252 px instead of 360 and 21 rows across six sheets ran past the
+ * edge, EVERY ONE of them a tail.
+ *
+ * Two rows are not enough either: 15 lines here exceed what two rows can
+ * hold at 252 px however they are broken -- Sultans of Swing has one at
+ * 561 px against a 472 px ceiling -- so a line may take three.
+ *
+ * Breaking at lrc_maxw() is what makes each row FIT: a row whose
+ * advances total at most ww - cell paints at most ww, because the final
+ * cell overhangs the advances by (cell - last advance). */
+static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
+{
+    uint32_t mx = lrc_maxw(ww);
+    uint32_t n = 1u, i = 0, w = 0, sp = 0, start = 0;
+    st[0] = 0;
+    while (s[i]) {
+        if (s[i] == ' ') sp = i;
+        /* unsigned: a signed char would make a UTF-8 lead byte negative
+         * and fb_adv() index far out of range. */
+        w += fb_adv((unsigned char)s[i], TS_1X);
+        if (w > mx && n < LRC_WRAP_MAX) {
+            uint32_t b = (sp > start) ? sp : i;
+            while (s[b] == ' ') b++;          /* next row starts after it */
+            /* A single word wider than the box would otherwise break at
+             * the same place forever. Always move on. */
+            if (b <= start) b = start + 1u;
+            st[n++] = (uint16_t)b;
+            start = b; i = b; w = 0; sp = 0;
+            continue;
+        }
+        i++;
+    }
+    return n;
+}
+
 static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
 {
-    return lrc_split(lrc_text + lrc_off[idx], lrc_maxw(ww)) ? 2u : 1u;
+    uint16_t st[LRC_WRAP_MAX];
+    return lrc_wrap(lrc_text + lrc_off[idx], ww, st);
 }
 
 /* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
@@ -4600,13 +4639,16 @@ static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
     const char *s = lrc_text + lrc_off[idx];
     uint32_t len = 0;
     while (s[len]) len++;
-    uint32_t c = lrc_split(s, lrc_maxw(ww));
 
-    if (row >= 0 && row < 5)
-        lrc_row(top + 8u + (uint32_t)row * 16u, ww, s, 0, c ? c : len, is_cur);
-    if (c && row + 1 >= 0 && row + 1 < 5)
-        lrc_row(top + 8u + (uint32_t)(row + 1) * 16u, ww, s, c, len, is_cur);
-    return c ? 2u : 1u;
+    uint16_t st[LRC_WRAP_MAX];
+    uint32_t n = lrc_wrap(s, ww, st);
+    for (uint32_t k = 0; k < n; k++) {
+        int32_t r = row + (int32_t)k;
+        if (r < 0 || r >= 5) continue;        /* outside the visible five */
+        uint32_t to = (k + 1u < n) ? st[k + 1u] : len;
+        lrc_row(top + 8u + (uint32_t)r * 16u, ww, s, st[k], to, is_cur);
+    }
+    return n;
 }
 
 static void ui_draw_dynamic(void)
