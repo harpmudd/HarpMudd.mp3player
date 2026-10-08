@@ -227,12 +227,12 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503317u   /* rev 23: PSRAM window               */
+#define EXPECT_VERSION 0x4D503318u   /* rev 24: native 24/32px font cells  */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.6.0"
+#define APP_VER "1.7.0"
 /* Dev builds say so ON SCREEN. The default is DEV, and a release has to
  * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
  * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
@@ -275,8 +275,19 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Type scale. The engine scales fractionally (Bresenham), so there is a real
  * step between 16 and 32 px -- integer-only scaling forced a doubling, which
  * is far too coarse for setting a title against an artist line. */
-enum { TS_1X = 0, TS_15X = 1, TS_2X = 2, TS_3X = 3 };
-static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
+/* TS_24 and TS_32 are NATIVE cells: the glyph is rendered at that size in
+ * the font file rather than enlarged from the 16px one, so the engine draws
+ * them at 1:1 and no scaler touches them. Their ts_half deliberately matches
+ * the scale they replace -- TS_24 measures exactly like TS_15X and TS_32
+ * exactly like TS_2X -- so every FB_CELL, cell-width and layout calculation
+ * keeps working unchanged and a caller can simply switch size.
+ *
+ * They are NOT part of the fb_text_fit ladder: that walks scales downward
+ * assuming bigger index means bigger text, which stops being true here. */
+enum { TS_1X = 0, TS_15X = 1, TS_2X = 2, TS_3X = 3, TS_24 = 4, TS_32 = 5 };
+static const unsigned char ts_half[6] = { 2, 3, 4, 6, 3, 4 }; /* size = 16*n/2 */
+#define TS_IS_NATIVE(s)  ((s) >= TS_24)
+#define TS_FALLBACK(s)   ((s) == TS_32 ? TS_2X : TS_15X)
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
@@ -319,6 +330,59 @@ static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
     return '?';
 }
 
+/* As fb_resolve, for a NATIVE cell. Returns 0 if this code point has no glyph
+ * at that size -- 163 of them have no Inter outline and fall back to Unifont
+ * at 16px, which there is no larger version of. The caller then draws the
+ * WHOLE string a size down: mixing two cell sizes on one line looks worse
+ * than the scaling these cells exist to remove. */
+static uint32_t fb_resolve_native(uint32_t cp, uint32_t sx, uint32_t *adv)
+{
+    if (!fext_ok) return 0;
+    uint32_t nr = (sx == TS_32) ? FEXT32_NRANGES : FEXT24_NRANGES;
+    for (uint32_t r = 0; r < nr; r++) {
+        uint32_t first = (sx == TS_32) ? fext32_ranges[r].first
+                                       : fext24_ranges[r].first;
+        uint32_t cnt   = (sx == TS_32) ? fext32_ranges[r].count
+                                       : fext24_ranges[r].count;
+        uint32_t d = cp - first;
+        if (d >= cnt) continue;
+        uint32_t base = (sx == TS_32) ? fext32_ranges[r].base
+                                      : fext24_ranges[r].base;
+        uint32_t n = base + d;
+        uint32_t g = n & 0x3FFu;            /* glyph number within the region */
+        uint32_t a = (sx == TS_32) ? fext32_adv[g] : fext24_adv[g];
+        if (!a) return 0;
+        *adv = a;
+        return n | FB_EXT;
+    }
+    return 0;
+}
+
+/* The one resolve every draw and measure path goes through, so a native cell
+ * and its fallback can never disagree about which glyph or how wide. */
+static uint32_t fb_resolve_s(uint32_t cp, uint32_t sx, uint32_t *adv)
+{
+    if (TS_IS_NATIVE(sx)) {
+        uint32_t g = fb_resolve_native(cp, sx, adv);
+        if (g) return g;                    /* advance is already final */
+        sx = TS_FALLBACK(sx);               /* same cell size, scaled glyph */
+    }
+    uint32_t g = fb_resolve(cp, adv);
+    *adv = (*adv * ts_half[sx]) / 2u;
+    return g;
+}
+
+/* TS_24 / TS_32 only if EVERY code point has a glyph at that size, else the
+ * scale it replaces. Checked over the whole string up front, because the
+ * fallback has to apply to all of it or not at all. */
+static uint32_t fb_native_scale(const char *s, uint32_t sx)
+{
+    uint32_t a;
+    while (*s)
+        if (!fb_resolve_native(u8_next(&s), sx, &a)) return TS_FALLBACK(sx);
+    return sx;
+}
+
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
@@ -326,8 +390,8 @@ static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
 static uint32_t fb_adv(uint32_t cp, uint32_t sx)
 {
     uint32_t a;
-    fb_resolve(cp, &a);
-    return (a * ts_half[sx]) / 2u;
+    fb_resolve_s(cp, sx, &a);
+    return a;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -442,6 +506,11 @@ static void fb_glyph_draw(uint32_t x, uint32_t y, uint32_t g, uint32_t sx, uint3
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
     if (g & FB_EXT) {
+        /* A native glyph is already the size it will be drawn at, so it goes
+         * to the engine at 1:1. Sending a scale would put the scaler back in
+         * the path the native cell exists to remove -- and the engine ignores
+         * the fields in that case anyway, so this keeps the two in step. */
+        if (g & FEXT_NATIVE) sx = sy = TS_1X;
         REG(R_FB_SIZE) = ((g & 0x1FFu) << 9) | ((g >> 9) & 0x1FFu);
         g = FEXT_GLYPH;
     }
@@ -511,8 +580,7 @@ static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
     uint32_t limit = x + max_w;
     if (paint_r > FB_W) paint_r = FB_W;
     while (*s) {
-        uint32_t a, g = fb_resolve(u8_next(&s), &a);
-        a = (a * ts_half[sx]) / 2u;
+        uint32_t a, g = fb_resolve_s(u8_next(&s), sx, &a);
         if (x + a > limit)   break;        /* out of layout budget */
         if (x + cell > paint_r) break;     /* would paint past the box */
         fb_glyph_draw(x, y, g, sx, sy);
@@ -533,8 +601,7 @@ static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
     uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
     uint32_t limit = x + max_w;
     while (*s) {
-        uint32_t a, g = fb_resolve(u8_next(&s), &a);
-        a = (a * ts_half[sx]) / 2u;
+        uint32_t a, g = fb_resolve_s(u8_next(&s), sx, &a);
         if (x + a > limit) break;          /* out of layout budget */
         if (x + cell > FB_W) break;        /* would paint off-screen */
         fb_glyph_draw(x, y, g, sx, sy);
@@ -616,6 +683,17 @@ static void pcm_rate_apply(uint32_t hz)
     REG(R_PCM_RATE) = (uint32_t)inc;
 }
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
+/* Xing seek table: 100 entries, entry k being the byte offset at k% of the
+ * DURATION, as a fraction of track_bytes scaled to 0..255. It is what makes
+ * seeking a VBR file accurate, and the core used to SKIP it -- the parser
+ * stepped over the 100 bytes purely to reach the LAME extension behind it.
+ *
+ * Measured on the test card against the linear estimate it replaces:
+ * Feel Good Inc. is out by +3.5 s a quarter of the way in, Bad Religion by
+ * +0.5 s. The first of those matches the -3.4 s that was measured BY EAR
+ * and sat in the roadmap for months -- the same defect, found twice. */
+static uint8_t  xing_toc[100];
+static uint8_t  xing_toc_ok;
 static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
 enum { FMT_MP3 = 0, FMT_FLAC };
 static uint8_t  track_fmt;
@@ -1868,6 +1946,47 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * for and it is doubled; the tail merely rests longer than it needs to, which
  * costs nothing but a little patience. Revisit when there is image space. */
 #define MQ_HOLD  (CLK_HZ * 4u)
+/* Lyrics state, hoisted above ui_draw_dynamic() for the reason given in
+ * lyrics.inc: that function is defined before any include in this file, so the
+ * meter cannot see anything declared later. The logic stays in lyrics.inc,
+ * which must follow playlist.inc for pl_open_try(). */
+#define LRC_SLOT_ID   4u        /* data.json slot 4, deferload, no filename */
+/* 4 KB, was 3072. A real sheet overran it by TEN bytes -- Feel Good Inc.'s
+ * is 3,082 -- and the overflow landed mid-word, so the last line read
+ * "feel goo". Sized to clear a typical sheet rather than to sit on the
+ * boundary of one. Costs .bss, which comes straight out of heap slack --
+ * 3584 rather than a round 4096 because the sheet that exposed this is
+ * 3,082 bytes, so 500 spare covers it while leaving the heap above the
+ * build's warning line. Overrunning is no longer silent anyway: a full
+ * buffer drops its incomplete last line rather than showing it cut. */
+#define LRC_TEXT_MAX  3584u
+/* 80, not 64. Measured on the card: the longest sheet there is 66 lines, so 64
+ * silently dropped the end of it -- and a lyric that stops two lines early
+ * reads as a bug, not as a limit.
+ *
+ * 80 rather than 96 because 96 put the image 64 bytes over the link guard, and
+ * 16 lines of headroom over the longest real file is enough. Each line costs 4
+ * bytes of index, so this is the cheapest dial in the feature. */
+#define LRC_LINES     80u
+/* Rows one lyric line may wrap to. Three, because 15 lines on this card
+ * exceed what two rows hold at the art-panel width however they are
+ * broken. The meter shows five rows total, so a three-row line eats its
+ * neighbours' context rather than being cut. */
+#define LRC_WRAP_MAX  3u
+#define LRC_NOTIME    0xFFFFu
+
+static char     lrc_text[LRC_TEXT_MAX];
+static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
+static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
+static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
+static uint16_t lrc_drawn_w;            /* width it was laid out for          */
+static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
+static uint16_t lrc_n;                  /* lines parsed                       */
+static uint8_t  lrc_synced;             /* at least one real timestamp        */
+static uint32_t lrc_index_for(uint32_t t10);  /* both defined in lyrics.inc */
+static uint32_t lrc_now10(void);
+
+
 /* Visualisations, cycled with X. The choice persists via interact.json.
  *
  * All three run off what the decoder already produces -- there are no frequency
@@ -1890,6 +2009,11 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
        /* Same rule again: APPENDED. Adding this required the Meter slider's
         * max in interact.json to go from 10 to 11. */
        VIZ_TAPE,
+       /* Same rule a third time: APPENDED. Adding this required the Meter
+        * slider's max in interact.json to go from 11 to 12, and that edit
+        * ships in the SAME build -- widening it first would offer an index
+        * equal to VIZ_COUNT, which nothing can select. */
+       VIZ_LYRICS,
        VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
@@ -2711,6 +2835,36 @@ static uint32_t ui_byte_rate(void)
     return bytes_per_sec;
 }
 
+/* Byte offset of a point in the track, read out of the Xing TOC.
+ *
+ * The table is indexed in PERCENT of duration, so the remainder of that
+ * division is interpolated rather than thrown away -- at 100 entries one
+ * index is 2.2 s on a 3:41 track, which is most of the error being fixed.
+ *
+ * Returns 0 when there is no usable table, which the caller reads as
+ * "fall back to the linear estimate": a file with no Xing TOC keeps the
+ * behaviour it has always had. */
+static uint32_t xing_byte_at(uint32_t secs)
+{
+    if (!xing_toc_ok || !track_secs || !track_bytes) return 0;
+    if (secs >= track_secs) return 0;
+
+    uint32_t num = secs * 100u;
+    uint32_t idx = num / track_secs;          /* 0..99 */
+    uint32_t rem = num - idx * track_secs;    /* how far into that entry */
+    if (idx > 99u) return 0;
+
+    uint32_t a = xing_toc[idx];
+    uint32_t b = (idx < 99u) ? xing_toc[idx + 1u] : 256u;
+    uint32_t v = (b > a) ? a + ((b - a) * rem) / track_secs : a;
+
+    /* 64-bit because the product overflows 32: a 50 MB file times 256 is
+     * 12.8 G. Dividing first would throw away up to 255 bytes of offset,
+     * which is a frame and a half. */
+    uint32_t off = (uint32_t)(((uint64_t)track_bytes * v) >> 8);
+    return audio_start + off;
+}
+
 /* Byte rate for the SEEK LIMIT specifically. Deliberately not ui_byte_rate():
  * that falls back to meas_rate, which converges all through playback, so a limit
  * derived from it drifts a little on every repeat. The parked position then
@@ -3213,15 +3367,21 @@ static void ui_draw_chrome(void)
      * One size for every track, and ui_marq_init below turns the scroll on for
      * anything that overflows -- which is what the marquee was already for, and
      * why it almost never ran. */
-    uint32_t ts = TS_2X;
+    /* Native 32px where the whole title has glyphs for it, else the 2x path
+     * it replaces. Same cell size either way, so nothing in the layout below
+     * cares which one came back. */
+    uint32_t ts = fb_native_scale(title, TS_32);
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
     fb_text_boxed(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts,
                   ui_text_w, UI_CARD_TEXT_R);
 
     /* Artist one step down from the title, never below 1.5x -- that step only
-     * exists because the engine can scale fractionally now. */
-    uint32_t as = (ts > TS_15X) ? (ts - 1u) : TS_15X;
+     * exists because the engine can scale fractionally now. Resolved against
+     * the ARTIST string, not derived from ts: the two can fall back
+     * independently, and an artist with a glyph the 24px cell lacks must not
+     * be decided by what the title happened to contain. */
+    uint32_t as = fb_native_scale(track_artist, TS_24);
     ui_mq_artist.on = 0;      /* no artist -> no leftover scroll from the last track */
     uint32_t y = UI_TITLE_Y + FB_CELL(ts) + 6u;
     if (track_artist[0]) {
@@ -4010,7 +4170,7 @@ static void ui_idle_screen(const char *reason)
      * as a separate alert. */
     if (reason) ui_gs_line(144u, reason, UI_RED, TS_1X);
 
-    ui_gs_line(170u, "Getting started",                     ui_accent, TS_15X);
+    ui_gs_line(170u, "Getting started",                     ui_accent, TS_24);
 
     /* 18 px within a step, 26 between them. An even pitch throughout made the
      * three steps read as one eight-line block -- the grouping has to be
@@ -4056,7 +4216,7 @@ static void ui_failed_msg(const char *l1, const char *l2)
     ui_blank_wake();
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
     fb_set_color(UI_RED, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_2X, TS_2X, UI_INNER_W);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_32, TS_32, UI_INNER_W);
 
     /* This line used to print the file's first four bytes as hex. That is a
      * debugging aid, and it was on the ONE screen a user is most likely to see
@@ -4365,6 +4525,132 @@ static void pl_ui_draw(void)
 }
 
 
+/* Where a line must be split so its first row fits `maxw`, or 0 if it fits
+ * whole. Breaks at the last SPACE before the limit so words stay intact --
+ * breaking mid-word is worse than clipping, because it reads as corruption
+ * rather than as a wrap. */
+/* lrc_split() lived here. Replaced by lrc_wrap() below, which breaks
+ * EVERY row rather than only the first. */
+
+/* Wrap width. Reserves a whole CELL, not 8 px.
+ *
+ * fb_text_width sums ADVANCES, but the engine paints a 16 px cell per
+ * glyph, so a line's painted right edge sits (cell - last advance) past
+ * where its advances end -- up to 12 px for a narrow final letter. With
+ * only 8 px reserved, a centred line that just fits the wrap ends up with
+ * dx = 4 either side, the final cell crosses paint_r, and fb_text_boxed
+ * DROPS that glyph rather than painting over the art panel. Reserving the
+ * cell keeps the painted line inside the box by construction. */
+static uint32_t lrc_maxw(uint32_t ww)
+{
+    uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
+    return (ww > cell) ? ww - cell : ww;
+}
+
+/* Advance width PLUS the final cell's overhang -- what the line actually
+ * paints, which is what has to be centred if the result is to fit. */
+static uint32_t lrc_painted_w(const char *s)
+{
+    uint32_t w = 0, last = 0;
+    while (*s) { last = fb_adv(u8_next(&s), TS_1X); w += last; }
+    uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
+    return (cell > last) ? w + (cell - last) : w;
+}
+
+/* Where each row of a wrapped line STARTS. Returns the number of rows.
+ *
+ * Replaces lrc_split(), which returned ONE break point and guaranteed
+ * only that the text BEFORE it fitted -- the remainder was drawn at
+ * whatever length it happened to be. At full width the tails fitted by
+ * luck, which is why it went unnoticed; with the art panel shown the box
+ * is 252 px instead of 360 and 21 rows across six sheets ran past the
+ * edge, EVERY ONE of them a tail.
+ *
+ * Two rows are not enough either: 15 lines here exceed what two rows can
+ * hold at 252 px however they are broken -- Sultans of Swing has one at
+ * 561 px against a 472 px ceiling -- so a line may take three.
+ *
+ * Breaking at lrc_maxw() is what makes each row FIT: a row whose
+ * advances total at most ww - cell paints at most ww, because the final
+ * cell overhangs the advances by (cell - last advance). */
+static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
+{
+    uint32_t mx = lrc_maxw(ww);
+    uint32_t n = 1u, i = 0, w = 0, sp = 0, start = 0;
+    st[0] = 0;
+    while (s[i]) {
+        if (s[i] == ' ') sp = i;
+        /* unsigned: a signed char would make a UTF-8 lead byte negative
+         * and fb_adv() index far out of range. */
+        w += fb_adv((unsigned char)s[i], TS_1X);
+        if (w > mx && n < LRC_WRAP_MAX) {
+            uint32_t b = (sp > start) ? sp : i;
+            while (s[b] == ' ') b++;          /* next row starts after it */
+            /* A single word wider than the box would otherwise break at
+             * the same place forever. Always move on. */
+            if (b <= start) b = start + 1u;
+            st[n++] = (uint16_t)b;
+            start = b; i = b; w = 0; sp = 0;
+            continue;
+        }
+        i++;
+    }
+    return n;
+}
+
+static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
+{
+    uint16_t st[LRC_WRAP_MAX];
+    return lrc_wrap(lrc_text + lrc_off[idx], ww, st);
+}
+
+/* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
+ * left-aligned, because a lyric line has no left edge to align to -- lengths
+ * vary wildly and a ragged right margin reads as a list rather than as verse.
+ *
+ * Background is sampled at this row, not shared: the box is a ramp and a glyph
+ * cell paints its own background, so one value for all five rows would band. */
+static void lrc_row(uint32_t y, uint32_t ww, const char *s,
+                    uint32_t from, uint32_t to, int is_cur)
+{
+    char t[80];
+    uint32_t n = 0;
+    while (from + n < to && n < sizeof(t) - 1u) { t[n] = s[from + n]; n++; }
+    while (n && t[n - 1u] == ' ') n--;          /* no dangling space on a wrap */
+    t[n] = 0;
+    if (!n) return;
+
+    uint16_t bg = ui_grad_at(y + 8u);
+    /* Centre on the PAINTED width. Centring on the advance width left the
+     * final cell hanging past the box on a line that nearly filled it. */
+    uint32_t w  = lrc_painted_w(t);
+    uint32_t dx = (ww > w) ? (ww - w) / 2u : 0u;
+    fb_set_color(is_cur ? ui_accent : ui_mix(bg, UI_DIM, 1u, 3u), bg);
+    fb_text_boxed(UI_MARGIN + dx, y, t, TS_1X, TS_1X,
+                  (ww > dx) ? ww - dx : 2u, UI_MARGIN + ww);
+}
+
+/* Emit one lyric line at `row`, wrapping to a second row if it does not fit.
+ * Rows outside the visible five are simply skipped, so clipping at either end
+ * needs no special case. Returns the rows the line occupies. */
+static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
+                         int32_t row, int is_cur)
+{
+    const char *s = lrc_text + lrc_off[idx];
+    uint32_t len = 0;
+    while (s[len]) len++;
+
+    uint16_t st[LRC_WRAP_MAX];
+    uint32_t n = lrc_wrap(s, ww, st);
+    for (uint32_t k = 0; k < n; k++) {
+        int32_t r = row + (int32_t)k;
+        if (r < 0 || r >= 5) continue;        /* outside the visible five */
+        uint32_t to = (k + 1u < n) ? st[k + 1u] : len;
+        lrc_row(top + 8u + (uint32_t)r * 16u, ww, s, st[k], to, is_cur);
+    }
+    return n;
+}
+
 static void ui_draw_dynamic(void)
 {
     if (screen_blank) return;
@@ -4560,6 +4846,70 @@ static void ui_draw_dynamic(void)
          * about a centre line instead of colour-coded from the bottom -- a
          * DAW-style envelope building up left to right. ~5 commands a frame,
          * because COPY moves the whole strip for the price of one. */
+        if (viz_mode == VIZ_LYRICS) {
+            /* Five rows. The CURRENT line is anchored at row 2 and stays there
+             * whatever the neighbours do -- a line that moves as its context
+             * changes length is much harder to read than one that holds still.
+             * Earlier lines are laid out backwards from it and later ones
+             * forwards, so a wrapped neighbour eats a row of context rather
+             * than displacing the line being sung.
+             *
+             * Redrawn only when the LINE changes, a few times a minute. */
+            const uint32_t top  = UI_WAVE_Y - UI_WAVE_TOP;
+            const uint32_t boxh = UI_WAVE_H + UI_WAVE_TOP;
+
+            uint32_t t10 = lrc_now10();
+            uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(t10) : 0u;
+            if (wf) lrc_drawn = 0xFFFFu;
+
+            /* The line index alone is NOT enough to gate the redraw, and
+             * assuming it was produced both reported bugs.
+             *
+             * WIDTH: the art panel gives the meter box its right-hand end
+             * back, so ww changes the moment the panel is toggled. The
+             * lyrics are laid out and centred for a width, so the old
+             * layout is wrong immediately -- but the line has not changed,
+             * so nothing repainted until the next lyric came round.
+             *
+             * BACKWARDS TIME: B restarts the track. Checking the position
+             * rather than listing the restart sites is deliberate -- this
+             * cache was already missing from all six places that reset
+             * ui_sec, and a seventh would have missed it again. Any
+             * backward jump, restart or seek, invalidates here. */
+            if (ww != lrc_drawn_w || t10 < lrc_last_t10) lrc_drawn = 0xFFFFu;
+            lrc_drawn_w = (uint16_t)ww;
+            lrc_last_t10 = t10;
+
+            if (cur != lrc_drawn) {
+                lrc_drawn = (uint16_t)cur;
+                ui_bg_restore(UI_MARGIN, top, ww, boxh);
+
+                if (!lrc_n) {
+                    /* Most tracks have no sidecar. Say so -- an empty box reads
+                     * as a broken meter rather than as an absent file. */
+                    uint32_t y = top + boxh / 2u - 8u;
+                    uint32_t w = fb_text_width("NO LYRICS", TS_1X);
+                    fb_set_color(UI_FAINT, ui_grad_at(y + 8u));
+                    fb_text_boxed(UI_MARGIN + ((ww > w) ? (ww - w) / 2u : 0u),
+                                  y, "NO LYRICS", TS_1X, TS_1X, ww,
+                                  UI_MARGIN + ww);
+                } else {
+                    uint32_t used = lrc_emit(top, ww, cur, 2, 1);
+
+                    int32_t r = 2 + (int32_t)used;
+                    for (uint32_t k = 1u; cur + k < lrc_n && r < 5; k++)
+                        r += (int32_t)lrc_emit(top, ww, cur + k, r, 0);
+
+                    r = 2;
+                    for (uint32_t k = 1u; k <= cur && r > 0; k++) {
+                        r -= (int32_t)lrc_rows(cur - k, ww);
+                        lrc_emit(top, ww, cur - k, r, 0);
+                    }
+                }
+            }
+            goto viz_done;
+        }
+
         if (viz_mode == VIZ_SCROLL) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
@@ -5736,9 +6086,9 @@ ui_tail:
         /* Clear FIRST, then set the colour. fb_rect() writes the colour
          * registers (fg = bg = its fill), so setting the text colour before a
          * clear leaves fg == bg and the glyphs paint invisibly. */
-        fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_15X), cbg);
+        fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_24), cbg);
         fb_set_color(UI_WHITE, cbg);
-        fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_15X, TS_15X, UI_INNER_W);
+        fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_24, TS_24, UI_INNER_W);
 
         /* 1.2x, while it is on. Right-aligned on this row, which puts it
          * directly under the track counter -- that is drawn right-aligned on
@@ -5757,8 +6107,8 @@ ui_tail:
             const char *sp = "1.2x";
             uint32_t sw = fb_text_width(sp, TS_1X);
             uint32_t sx = FB_W - UI_MARGIN - sw;
-            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_15X) > FB_CELL(TS_1X)
-                                     ? (FB_CELL(TS_15X) - FB_CELL(TS_1X)) / 2u : 0u);
+            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_24) > FB_CELL(TS_1X)
+                                     ? (FB_CELL(TS_24) - FB_CELL(TS_1X)) / 2u : 0u);
             fb_set_color(ui_accent, cbg);
             fb_text_clipped(sx, sy, sp, TS_1X, TS_1X, sw + 2u);
         }
@@ -5788,6 +6138,7 @@ ui_tail:
             uint32_t dirty = 0;
             if (art_x > prev) { ui_art_bg_range(prev, art_x - prev); dirty = 1; }
             if (right < FB_W) { ui_art_bg_range(right, FB_W - right); dirty = 1; }
+            if (dirty) lrc_drawn = 0xFFFFu;   /* slide repaints over the box */
             if (dirty)
                 for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                     wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
@@ -7013,7 +7364,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
                    : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
                    : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
-                                            : "METER: CASSETTE");
+                   : viz_mode == VIZ_TAPE   ? "METER: CASSETTE"
+                                            : "METER: LYRICS");
         settings_mark_dirty();
         }
     }
@@ -7818,6 +8170,7 @@ static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
 #include "art.inc"
 #include "playlist.inc"
+#include "lyrics.inc"        /* AFTER playlist.inc -- uses pl_open_try() */
 #include "settings.inc"
 
 /* Slide unconsumed bytes down and pull in ONE chunk. Compaction keeps Helix's
@@ -8953,6 +9306,13 @@ static uint32_t vbr_frame_count(void)
             uint32_t e = i + 8u;
             if (flags & 1u) e += 4u;            /* FRAMES  */
             if (flags & 2u) e += 4u;            /* BYTES   */
+            /* Keep the TOC on the way past rather than only stepping
+             * over it. Requires the whole table to be in the buffer:
+             * a half-read one would aim seeks into nowhere. */
+            if ((flags & 4u) && e + 100u <= lim) {
+                for (uint32_t k = 0; k < 100u; k++) xing_toc[k] = ring[e + k];
+                xing_toc_ok = 1u;
+            }
             if (flags & 4u) e += 100u;          /* TOC     */
             if (flags & 8u) e += 4u;            /* QUALITY */
 
@@ -9632,6 +9992,14 @@ static int load_track(void)
         art_file_id = cur_file_id;
     }
     art_ready = 1;
+
+    /* Lyrics ride the artwork's gap deliberately. Both are far reads on a slot
+     * that is not the stream, both are wanted before the first note, and doing
+     * them here means neither ever happens during playback -- which is the one
+     * thing that would reintroduce the fragment-cache stutter. Costs one open
+     * and one read beside artwork's 43 to 207. */
+    lrc_load();
+
     ld_art = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
@@ -9795,7 +10163,7 @@ static void ui_mid_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
 static void ui_mismatch_screen(uint32_t got, uint32_t want)
 {
     char b[48], *q = b;
-    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_15X);
+    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_24);
     ui_mid_line(168u, "Some core files are from a",     UI_WHITE, TS_1X);
     ui_mid_line(186u, "different version.",             UI_WHITE, TS_1X);
     ui_mid_line(220u, "Reinstall MP3 Player.",          UI_WHITE, TS_1X);
@@ -10886,6 +11254,11 @@ int main(void)
 
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
             uint32_t want;
+            /* Set when the TOC supplied the target, so the clock can be
+             * assigned the second asked for instead of being re-derived
+             * from the landed byte through the same flat average that
+             * put the seek in the wrong place. 0 = no TOC, linear path. */
+            uint32_t seek_exact = 0u;
 
             /* FLAC with a seek table works in TIME, not bytes: the target
              * second is exact, and flac_seek_locate() MEASURES the offset
@@ -11016,7 +11389,34 @@ int main(void)
                 goto seek_done;
             }
 
-            if (seek_req == 1u) {
+            /* MP3 with a Xing TOC seeks in TIME, the way FLAC with a seek
+             * table already does. The byte path below computes a target
+             * from a flat average, which on a variable file is wrong by
+             * seconds -- and then derives the CLOCK from that same
+             * average, so the two agree with each other and disagree with
+             * the audio. That is why the lyrics drifted after a seek while
+             * the seek itself felt fine: nothing was out of step except
+             * the number being displayed.
+             *
+             * A file with no TOC falls through to the byte path unchanged. */
+            if (track_fmt == FMT_MP3 && xing_toc_ok && track_secs) {
+                uint32_t secs = seek_secs ? seek_secs : 5u;
+                uint32_t tgt;
+                if (seek_req == 1u) {
+                    tgt = ui_sec + secs;
+                    /* Three seconds of tail, the same rule both other
+                     * paths use, so the end stays audible. */
+                    uint32_t last = (track_secs > 3u) ? track_secs - 3u : 0u;
+                    if (tgt > last) tgt = last;
+                } else {
+                    tgt = (ui_sec > secs) ? ui_sec - secs : 0u;
+                }
+                uint32_t at = xing_byte_at(tgt);
+                if (at) { want = at; seek_exact = tgt + 1u; }
+                else if (seek_req == 1u) want = file_pos + step;
+                else want = (file_pos > audio_start + step)
+                          ? file_pos - step : audio_start;
+            } else if (seek_req == 1u) {
                 /* Forward stops short of the end. Backward has always clamped
                  * to audio_start; forward never did, so holding it walked
                  * file_pos past the end of the file, the refill came back empty
@@ -11067,7 +11467,12 @@ int main(void)
                 stopped  = 0;                 /* no longer at 0:00 */
 
                 uint32_t rate = ui_byte_rate();
-                ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
+                /* The TOC path asked for a SECOND and got the byte for
+                 * it, so the second is the answer. Re-deriving it from
+                 * the byte would reintroduce the very error the table
+                 * was read to avoid. */
+                ui_sec      = seek_exact ? seek_exact - 1u
+                            : (rate ? (file_pos - audio_start) / rate : 0u);
                 ui_sec_acc  = 0;
                 ui_last_sec = 0xFFFFFFFFu;
                 ui_prog_sec = 0xFFFFFFFFu;

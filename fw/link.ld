@@ -6,8 +6,14 @@
  * Layout, low -> high:
  *   .text/.rodata/.data/.bss
  *   heap            (Helix mallocs its 23816-byte decoder instance here)
- *   MP3 ring buffer (32 KB, RESERVED -- APF DMAs into it)
- *   stack           (16 KB)
+ *   tag buffer      (4 KB, _tag_size -- the ID3 re-probe landing zone)
+ *   MP3 ring buffer (24 KB, _ring_size, RESERVED -- APF DMAs into it)
+ *   stack           (9 KB, _stack_size)
+ *
+ * The three tail sizes above are the symbols, not prose: they have drifted
+ * before (this comment said 32 KB and 16 KB long after they were 24 and 9),
+ * and fw/build.sh now reports the map from the linked symbols so a stale
+ * number here cannot mislead anyone about the real headroom.
  *
  * The ring is carved out explicitly rather than hardcoded at some address the
  * heap might one day grow into: it is a DMA target, so a collision would show

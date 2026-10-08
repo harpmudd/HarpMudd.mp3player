@@ -146,6 +146,57 @@ cheap software wins are spent, and the SDRAM migration is what affords the
 block buffer. That is a coherent 1.7.0 worth 437 files, and a far better
 justification than either had before.
 
+### M10K diet -- DONE on `feature/m10k-diet`, held for 1.6.1 or 1.7.0
+
+**301 -> 294 blocks; free headroom doubled, 7 -> 14.** Held out of 1.6.0
+deliberately: the release gains nothing from it (no 1.6.0 feature spends the
+blocks), it is untested on hardware, and it touches the CPU register file and
+cache tags -- where a subtle fault means intermittent wrong results rather
+than a clean crash. Including it would also have made the 1.6.0 regression
+pass ambiguous.
+
+Five arrays moved out of block RAM, no behavioural change:
+
+| array | was | now |
+|---|---|---|
+| `fw_mem` | 4096 bits, 40% of a block | 8 MLABs |
+| `glyphbuf` | 2048 bits, 20% | 4 MLABs |
+| `sync_fifo` | 128 bits, **1%** | logic, `use_eab = "OFF"` |
+| VexRiscv regfile x2 | 1024 bits each, 10% | MLAB |
+| VexRiscv cache tags x2 | 2816 bits each, 28% | MLAB |
+
+**The finding worth keeping: Quartus honours `ramstyle`, and the VexRiscv
+generator emits `ram_style` -- the Xilinx spelling, silently ignored.** So the
+netlist's `ram_style = "block"` was never forcing anything; Quartus simply
+defaulted to M10K. Measured both ways: 298 with the wrong spelling, 294 with
+the right one. An attribute that does not apply produces no warning, so audit
+any other vendor-crossed attribute in third-party RTL.
+
+Cost: ALMs 33% -> 35% (12 MLABs of ~460). Setup slack +1.538 -> +1.699 ns on
+clk_sys -- better, because MLABs sit in the fabric beside the logic that reads
+them. No MMIO change, so CORE_VERSION stays rev 23.
+
+**Rejected on inspection:** the APF datatable's 2 blocks for 8192 bits. Both
+ports are genuinely driven -- bridge writes, SoC reads -- so 32-bit True Dual
+Port needs two.
+
+**Still available, roughly in order of value per risk:**
+
+| item | blocks | note |
+|---|---|---|
+| `font_rom` reshape | 4 | 3040x32 needs 12 blocks; depth is padded to 4096 |
+| CPU RAM 256 -> 248 KB | 8 | needs the power-of-two banking first |
+| `font_rom` -> SDRAM | ~14 | the extended-glyph path already works; needs a small fallback ROM or a missing font file means NO text |
+| cold code -> SDRAM via I-cache | 20-30+ | research spike. The 4 KB I-cache currently fronts single-cycle BRAM and does almost nothing |
+
+**The rule for what can move anywhere** (SDRAM, PSRAM): access FREQUENCY, not
+what it holds. `pl_text` moved because it is read ~12,000 times sequentially,
+once per load. Anything touched per pixel, per sample or per cycle stays:
+`linebuf`, `cmd_mem`, `pcm_fifo`, the cache data arrays, the Helix arena,
+`art_acc`. And "move it to SD" is never literal -- the card is not addressable;
+it means shipping an asset file that is loaded into SDRAM at boot, which is
+what `mp3font.bin` already is.
+
 ### Still open
 
 - **24-bit bit-exactness is NOT verified.** 16-bit is (`bit-exact: yes` over

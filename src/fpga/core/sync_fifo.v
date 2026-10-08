@@ -45,7 +45,10 @@ module sync_fifo #(
       dcfifo_component.overflow_checking = "ON",
       dcfifo_component.rdsync_delaypipe = 5,
       dcfifo_component.underflow_checking = "ON",
-      dcfifo_component.use_eab = "ON",
+      // OFF: this FIFO is 4 x 32 = 128 bits and "ON" spends a whole 10 Kbit
+      // M10K on it -- 1% used, the worst ratio in the design. In logic it
+      // costs a few ALMs, and ALMs are 33% used.
+      dcfifo_component.use_eab = "OFF",
       dcfifo_component.wrsync_delaypipe = 5;
 
   reg [1:0] read_state = 0;
