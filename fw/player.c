@@ -1955,6 +1955,8 @@ static char     lrc_text[LRC_TEXT_MAX];
 static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
 static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
 static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
+static uint16_t lrc_drawn_w;            /* width it was laid out for          */
+static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
 static uint8_t  lrc_synced;             /* at least one real timestamp        */
 static uint32_t lrc_index_for(uint32_t t10);  /* both defined in lyrics.inc */
@@ -4484,7 +4486,30 @@ static uint32_t lrc_split(const char *s, uint32_t maxw)
     return 0;
 }
 
-static uint32_t lrc_maxw(uint32_t ww) { return (ww > 8u) ? ww - 8u : ww; }
+/* Wrap width. Reserves a whole CELL, not 8 px.
+ *
+ * fb_text_width sums ADVANCES, but the engine paints a 16 px cell per
+ * glyph, so a line's painted right edge sits (cell - last advance) past
+ * where its advances end -- up to 12 px for a narrow final letter. With
+ * only 8 px reserved, a centred line that just fits the wrap ends up with
+ * dx = 4 either side, the final cell crosses paint_r, and fb_text_boxed
+ * DROPS that glyph rather than painting over the art panel. Reserving the
+ * cell keeps the painted line inside the box by construction. */
+static uint32_t lrc_maxw(uint32_t ww)
+{
+    uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
+    return (ww > cell) ? ww - cell : ww;
+}
+
+/* Advance width PLUS the final cell's overhang -- what the line actually
+ * paints, which is what has to be centred if the result is to fit. */
+static uint32_t lrc_painted_w(const char *s)
+{
+    uint32_t w = 0, last = 0;
+    while (*s) { last = fb_adv(u8_next(&s), TS_1X); w += last; }
+    uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
+    return (cell > last) ? w + (cell - last) : w;
+}
 
 static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
 {
@@ -4508,7 +4533,9 @@ static void lrc_row(uint32_t y, uint32_t ww, const char *s,
     if (!n) return;
 
     uint16_t bg = ui_grad_at(y + 8u);
-    uint32_t w  = fb_text_width(t, TS_1X);
+    /* Centre on the PAINTED width. Centring on the advance width left the
+     * final cell hanging past the box on a line that nearly filled it. */
+    uint32_t w  = lrc_painted_w(t);
     uint32_t dx = (ww > w) ? (ww - w) / 2u : 0u;
     fb_set_color(is_cur ? ui_accent : ui_mix(bg, UI_DIM, 1u, 3u), bg);
     fb_text_boxed(UI_MARGIN + dx, y, t, TS_1X, TS_1X,
@@ -4740,8 +4767,27 @@ static void ui_draw_dynamic(void)
             const uint32_t top  = UI_WAVE_Y - UI_WAVE_TOP;
             const uint32_t boxh = UI_WAVE_H + UI_WAVE_TOP;
 
-            uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(lrc_now10()) : 0u;
+            uint32_t t10 = lrc_now10();
+            uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(t10) : 0u;
             if (wf) lrc_drawn = 0xFFFFu;
+
+            /* The line index alone is NOT enough to gate the redraw, and
+             * assuming it was produced both reported bugs.
+             *
+             * WIDTH: the art panel gives the meter box its right-hand end
+             * back, so ww changes the moment the panel is toggled. The
+             * lyrics are laid out and centred for a width, so the old
+             * layout is wrong immediately -- but the line has not changed,
+             * so nothing repainted until the next lyric came round.
+             *
+             * BACKWARDS TIME: B restarts the track. Checking the position
+             * rather than listing the restart sites is deliberate -- this
+             * cache was already missing from all six places that reset
+             * ui_sec, and a seventh would have missed it again. Any
+             * backward jump, restart or seek, invalidates here. */
+            if (ww != lrc_drawn_w || t10 < lrc_last_t10) lrc_drawn = 0xFFFFu;
+            lrc_drawn_w = (uint16_t)ww;
+            lrc_last_t10 = t10;
 
             if (cur != lrc_drawn) {
                 lrc_drawn = (uint16_t)cur;
@@ -6001,6 +6047,7 @@ ui_tail:
             uint32_t dirty = 0;
             if (art_x > prev) { ui_art_bg_range(prev, art_x - prev); dirty = 1; }
             if (right < FB_W) { ui_art_bg_range(right, FB_W - right); dirty = 1; }
+            if (dirty) lrc_drawn = 0xFFFFu;   /* slide repaints over the box */
             if (dirty)
                 for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                     wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
