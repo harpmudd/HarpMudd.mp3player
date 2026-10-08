@@ -7904,8 +7904,11 @@ static int probe_readable(uint32_t off)
 static uint8_t  szp_phase;
 static uint32_t szp_lo, szp_hi;
 
+static uint32_t szp_arm_at;         /* when the search was armed */
+
 static void size_probe_arm(void)
 {
+    szp_arm_at = cycles();
     szp_phase = 1u;
     szp_lo = 0; szp_hi = 1u << 22;      /* start at 4 MB, as the blocking one does */
 }
@@ -7919,8 +7922,29 @@ static void size_probe_arm(void)
  * been READ is direct evidence the slot is streaming properly, and it is a
  * better gate than a timer because it is the same thing the probe depends on.
  * A file smaller than this reaches eof_hit instead, and refill_pump() records
- * the true end there for free. */
-#define SZP_START_AFTER (256u * 1024u)
+ * the true end there for free.
+ *
+ * 64 KB, was 256 KB. The REASONING above is right -- bytes actually read
+ * are better evidence than a timer -- but the amount was far more than
+ * settling needs, and because reads are paced by CONSUMPTION the
+ * wall-clock wait scaled inversely with bitrate:
+ *
+ *     1000 kbps FLAC   2.1 s        256 kbps MP3   8.2 s
+ *      320 kbps MP3    6.6 s        160 kbps MP3  13.1 s
+ *
+ * The duration, the progress bar and the seek bracket all wait on this,
+ * so a low-bitrate track sat at --:-- for thirteen seconds. Reported
+ * against Stockholm Syndrome at 8-9 s, which is 8.2 s exactly.
+ *
+ * 64 KB is still sixteen successful refills. And an attempt that is
+ * nonetheless too early is not fatal: probe_readable() failing drops it
+ * to phase 4, and the re-arm in refill_drain() picks it up again when
+ * playback runs past whatever was measured.
+ *
+ * The time floor is the one thing a byte count cannot express: a fast
+ * stream can read 64 KB before the slot has physically settled. */
+#define SZP_START_AFTER (64u * 1024u)
+#define SZP_START_MS    1000u
 
 /* One step. Returns 1 when a size has just been established. */
 static int size_probe_step(void)
@@ -7944,7 +7968,9 @@ static int size_probe_step(void)
      * from either zero or whatever the last FLAC left behind. */
     uint32_t first_audio = (track_fmt == FMT_FLAC) ? fl_first_frame : audio_start;
     if (szp_phase == 1u && !eof_hit &&
-        file_pos < first_audio + SZP_START_AFTER) return 0;
+        (file_pos < first_audio + SZP_START_AFTER ||
+         (int32_t)(cycles() - szp_arm_at) <
+             (int32_t)(CLK_HZ / 1000u * SZP_START_MS))) return 0;
 
     switch (szp_phase) {
     case 1:
