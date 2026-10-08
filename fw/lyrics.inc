@@ -93,6 +93,13 @@ static uint32_t lrc_read_raw(void)
  * than pointers -- the buffer is the storage and the index at once. */
 static void lrc_parse(uint32_t len)
 {
+    /* A buffer filled to capacity was TRUNCATED, and the cut lands
+     * wherever it lands -- mid-word, usually. Showing that last partial
+     * line is worse than not showing it: it reads as a rendering fault
+     * ("feel goo") rather than as a sheet that did not fit. Drop it.
+     * Applies to BOTH sources: the sidecar read and the USLT decode stop
+     * at the same cap. */
+    uint32_t cut = (len + 1u >= LRC_TEXT_MAX);
     lrc_n = 0; lrc_synced = 0;
     uint32_t i = 0;
 
@@ -168,6 +175,11 @@ static void lrc_parse(uint32_t len)
             lrc_n++;
         }
     }
+
+    /* The last line of a truncated buffer is incomplete by definition:
+     * the cut fell inside it, not on the newline that would have ended
+     * it. Only drop it if there is something left to show. */
+    if (cut && lrc_n > 1u) lrc_n--;
 }
 
 /* Playback position in TENTHS. ui_sec alone is a second wide, which is enough

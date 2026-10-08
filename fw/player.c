@@ -1940,7 +1940,11 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * meter cannot see anything declared later. The logic stays in lyrics.inc,
  * which must follow playlist.inc for pl_open_try(). */
 #define LRC_SLOT_ID   4u        /* data.json slot 4, deferload, no filename */
-#define LRC_TEXT_MAX  3072u     /* ~60 lines of ~45 chars; truncates beyond */
+/* 4 KB, was 3072. A real sheet overran it by TEN bytes -- Feel Good Inc.'s
+ * is 3,082 -- and the overflow landed mid-word, so the last line read
+ * "feel goo". Sized to clear a typical sheet rather than to sit on the
+ * boundary of one. Costs 1 KB of .bss, which comes out of heap slack. */
+#define LRC_TEXT_MAX  4096u
 /* 80, not 64. Measured on the card: the longest sheet there is 66 lines, so 64
  * silently dropped the end of it -- and a lyric that stops two lines early
  * reads as a bug, not as a limit.
