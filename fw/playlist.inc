@@ -662,8 +662,15 @@ static int pl_play_span(uint16_t pos, int dir, uint16_t span)
                  * can be read. (A "2 of 14" figure would need every entry
                  * probed at load time, and probing costs a cluster walk each --
                  * so this counts what this attempt actually walked past.) */
+                /* "UNREADABLE" on its own says nothing actionable, and
+                 * it cost a diagnosis: a Japanese-named track reported it
+                 * and the code was the only thing that could have
+                 * distinguished a name APF cannot match from a transient
+                 * busy answer. PLF_SKIP means APF ANSWERED and the code
+                 * was not 4, so there is always a code worth showing. */
                 if (nmiss)      ui_toast_set("SKIPPED", nmiss, " MISSING");
-                else if (nfail) ui_toast_set("SKIPPED", nfail, " UNREADABLE");
+                else if (nfail) ui_toast_set("UNREADABLE, 0192 ERR",
+                                             pl_open_errcode, 0);
                 return 1;
             }
 
