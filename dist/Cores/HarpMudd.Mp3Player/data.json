@@ -33,6 +33,16 @@
                 ]
             },
             {
+                "name": "Lyrics",
+                "id": 4,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x1",
+                "extensions": [
+                    "lrc"
+                ]
+            },
+            {
                 "name": "Font",
                 "id": 5,
                 "required": false,
