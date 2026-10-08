@@ -4579,21 +4579,29 @@ static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
     uint32_t n = 1u, i = 0, w = 0, sp = 0, start = 0;
     st[0] = 0;
     while (s[i]) {
-        if (s[i] == ' ') sp = i;
-        /* unsigned: a signed char would make a UTF-8 lead byte negative
-         * and fb_adv() index far out of range. */
-        w += fb_adv((unsigned char)s[i], TS_1X);
+        /* CODE POINTS, not bytes. Measuring per byte made a 3-byte kana
+         * count as three Latin advances -- a Japanese sheet measured 270
+         * px where it paints 144 -- so 26 of 44 lines wrapped when 4
+         * needed to, and the break landed INSIDE a sequence 13 times,
+         * which draws as garbage. i is always a character boundary, so
+         * breaking there is safe. */
+        const char *p = s + i;
+        uint32_t cp  = u8_next(&p);
+        uint32_t nxt = (uint32_t)(p - s);
+        if (cp == ' ') sp = i;
+        w += fb_adv(cp, TS_1X);
         if (w > mx && n < LRC_WRAP_MAX) {
             uint32_t b = (sp > start) ? sp : i;
             while (s[b] == ' ') b++;          /* next row starts after it */
-            /* A single word wider than the box would otherwise break at
-             * the same place forever. Always move on. */
-            if (b <= start) b = start + 1u;
+            /* A single glyph wider than the box would otherwise break at
+             * the same place forever. Step past THIS character, which
+             * keeps the offset on a boundary. */
+            if (b <= start) b = nxt;
             st[n++] = (uint16_t)b;
             start = b; i = b; w = 0; sp = 0;
             continue;
         }
-        i++;
+        i = nxt;
     }
     return n;
 }

@@ -5,6 +5,22 @@
 static const unsigned char ts_half[6]={2,3,4,6,3,4};
 static const unsigned char font_adv[95]={4,5,9,12,11,15,13,6,7,6,10,11,6,8,5,8,11,7,10,10,12,10,11,10,11,11,5,5,11,11,12,10,16,14,11,13,12,10,10,13,12,5,10,12,10,15,12,13,11,13,12,11,12,12,13,16,13,12,11,7,8,6,9,9,6,10,11,11,11,11,8,11,10,5,5,11,5,15,10,11,11,11,8,10,7,10,11,15,11,11,10,8,6,7,11};
 static uint32_t fb_adv(uint32_t cp,uint32_t sx){(void)sx;return (cp>=32u&&cp<32u+95u)?font_adv[cp-32u]:font_adv[31];}
+static uint32_t u8_next(const char **p)
+{
+    const unsigned char *s = (const unsigned char *)*p;
+    uint32_t c = s[0], n;
+    if (c < 0x80u) { *p += 1; return c; }
+    if      (c >= 0xC2u && c <= 0xDFu) { n = 1u; c &= 0x1Fu; }
+    else if (c >= 0xE0u && c <= 0xEFu) { n = 2u; c &= 0x0Fu; }
+    else if (c >= 0xF0u && c <= 0xF4u) { n = 3u; c &= 0x07u; }
+    else { *p += 1; return '?'; }
+    for (uint32_t i = 1; i <= n; i++) {
+        if ((s[i] & 0xC0u) != 0x80u) { *p += 1; return '?'; }
+        c = (c << 6) | (s[i] & 0x3Fu);
+    }
+    *p += n + 1u;
+    return c;
+}
 static uint32_t lrc_maxw(uint32_t ww)
 {
     uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
@@ -16,21 +32,29 @@ static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
     uint32_t n = 1u, i = 0, w = 0, sp = 0, start = 0;
     st[0] = 0;
     while (s[i]) {
-        if (s[i] == ' ') sp = i;
-        /* unsigned: a signed char would make a UTF-8 lead byte negative
-         * and fb_adv() index far out of range. */
-        w += fb_adv((unsigned char)s[i], TS_1X);
+        /* CODE POINTS, not bytes. Measuring per byte made a 3-byte kana
+         * count as three Latin advances -- a Japanese sheet measured 270
+         * px where it paints 144 -- so 26 of 44 lines wrapped when 4
+         * needed to, and the break landed INSIDE a sequence 13 times,
+         * which draws as garbage. i is always a character boundary, so
+         * breaking there is safe. */
+        const char *p = s + i;
+        uint32_t cp  = u8_next(&p);
+        uint32_t nxt = (uint32_t)(p - s);
+        if (cp == ' ') sp = i;
+        w += fb_adv(cp, TS_1X);
         if (w > mx && n < LRC_WRAP_MAX) {
             uint32_t b = (sp > start) ? sp : i;
             while (s[b] == ' ') b++;          /* next row starts after it */
-            /* A single word wider than the box would otherwise break at
-             * the same place forever. Always move on. */
-            if (b <= start) b = start + 1u;
+            /* A single glyph wider than the box would otherwise break at
+             * the same place forever. Step past THIS character, which
+             * keeps the offset on a boundary. */
+            if (b <= start) b = nxt;
             st[n++] = (uint16_t)b;
             start = b; i = b; w = 0; sp = 0;
             continue;
         }
-        i++;
+        i = nxt;
     }
     return n;
 }
@@ -337,6 +361,50 @@ static const char *L[]={
 "Promises of what I seemed to be",
 "Only watched the time go by",
 "All of these things I've said to you",
+"ドブネズミみたいに",
+"美しくなりたい",
+"写真には写らない",
+"美しさがあるから",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"もしも僕がいつか君と出会い話し合うなら",
+"そんな時はどうか愛の意味を知って下さい",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"ドブネズミみたいに",
+"誰よりもやさしい",
+"ドブネズミみたいに",
+"何よりもあたたかく",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"もしも僕がいつか君と出会い話し合うなら",
+"そんな時はどうか愛の意味を知って下さい",
+"愛じゃなくても",
+"恋じゃなくても",
+"君を離しはしない",
+"決して負けない",
+"強い力を",
+"僕は一つだけ持つ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
+"リンダリンダ",
+"リンダリンダリンダ",
 "The only one I know, has come to take me away",
 "The only one I know, is mine when she stitches me",
 "The only one I see, has found an aching in me",
@@ -356,15 +424,17 @@ static const char *L[]={
 "Everyone has been burned before",
 "Everybody knows the pain",
 };
-#define NL 320u
+#define NL 364u
 int main(void){ uint32_t wws[2]={252u,360u};
  for(int q=0;q<2;q++){ uint32_t ww=wws[q]; uint32_t bad=0;
   for(uint32_t i=0;i<NL;i++){ const char*s=L[i]; uint16_t st[LRC_WRAP_MAX];
    uint32_t n=lrc_wrap(s,ww,st); uint32_t len=0; while(s[len])len++;
    for(uint32_t k=0;k<n;k++){ uint32_t a=st[k], b=(k+1<n)?st[k+1]:len;
     while(b>a&&s[b-1]==32)b--; if(b<=a)continue;
-    uint32_t w=0,last=0; for(uint32_t j=a;j<b;j++){last=fb_adv((unsigned char)s[j],0);w+=last;}
+    uint32_t w=0,last=0; const char*q=s+a;
+    while((uint32_t)(q-s)<b){last=fb_adv(u8_next(&q),0);w+=last;}
     uint32_t pw=w+((16u>last)?(16u-last):0u); if(pw>ww){bad++;}
+    if(a>0 && ((unsigned char)s[a]&0xC0u)==0x80u){bad++;}
    } }
   hputu(ww);hputc(32);hputu(bad);hnl(); }
  return 0;}
