@@ -704,6 +704,7 @@ static uint8_t  ui_size_warned;
  * dominates it is the hiccup. Measured rather than reasoned about: four
  * attempts at this were aimed by theory and three of them made it worse. */
 static uint16_t ld_head, ld_size, ld_art, ld_pre, ld_total;
+static uint16_t ld_lrc;   /* lyrics phase, split out of ld_art */
 static uint8_t  ui_ld_shown;
 #define LD_MS(c) ((uint16_t)((c) / (CLK_HZ / 1000u)))
 /* Total frames declared by a Xing/Info/VBRI header, 0 when the file has none.
@@ -10032,9 +10033,9 @@ static int load_track(void)
      * Gated rather than made faster because the user's call was that
      * lyrics must not cost anything when unused. Switching TO the meter
      * loads them then; see the meter cycle. */
-    if (viz_mode == VIZ_LYRICS) lrc_load(); else lrc_clear();
-
     ld_art = LD_MS(cycles() - tphase); tphase = cycles();
+    if (viz_mode == VIZ_LYRICS) lrc_load(); else lrc_clear();
+    ld_lrc = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
      * rather than animated -- a track change should not look like a slide. */
@@ -10156,12 +10157,12 @@ static int load_track(void)
          * only ever cost this row the width that clipped T -- "T3731" showed
          * as "T373", a total smaller than one of its own parts. */
         char b[40], *q = b;
-        const char *lbl = "HSAT";
-        const uint16_t v[4] = { ld_head, ld_size, ld_art, ld_total };
-        for (uint32_t k = 0; k < 4u; k++) {
+        const char *lbl = "HSALT";
+        const uint16_t v[5] = { ld_head, ld_size, ld_art, ld_lrc, ld_total };
+        for (uint32_t k = 0; k < 5u; k++) {
             *q++ = lbl[k];
             q = ui_dec(q, v[k]);
-            if (k < 3u) *q++ = ' ';
+            if (k < 4u) *q++ = ' ';
         }
         *q = 0;
         ui_toast_set(b, 0xFFFFFFFFu, 0);
