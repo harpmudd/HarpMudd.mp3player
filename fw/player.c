@@ -683,6 +683,17 @@ static void pcm_rate_apply(uint32_t hz)
     REG(R_PCM_RATE) = (uint32_t)inc;
 }
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
+/* Xing seek table: 100 entries, entry k being the byte offset at k% of the
+ * DURATION, as a fraction of track_bytes scaled to 0..255. It is what makes
+ * seeking a VBR file accurate, and the core used to SKIP it -- the parser
+ * stepped over the 100 bytes purely to reach the LAME extension behind it.
+ *
+ * Measured on the test card against the linear estimate it replaces:
+ * Feel Good Inc. is out by +3.5 s a quarter of the way in, Bad Religion by
+ * +0.5 s. The first of those matches the -3.4 s that was measured BY EAR
+ * and sat in the roadmap for months -- the same defect, found twice. */
+static uint8_t  xing_toc[100];
+static uint8_t  xing_toc_ok;
 static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
 enum { FMT_MP3 = 0, FMT_FLAC };
 static uint8_t  track_fmt;
@@ -1943,8 +1954,12 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
 /* 4 KB, was 3072. A real sheet overran it by TEN bytes -- Feel Good Inc.'s
  * is 3,082 -- and the overflow landed mid-word, so the last line read
  * "feel goo". Sized to clear a typical sheet rather than to sit on the
- * boundary of one. Costs 1 KB of .bss, which comes out of heap slack. */
-#define LRC_TEXT_MAX  4096u
+ * boundary of one. Costs .bss, which comes straight out of heap slack --
+ * 3584 rather than a round 4096 because the sheet that exposed this is
+ * 3,082 bytes, so 500 spare covers it while leaving the heap above the
+ * build's warning line. Overrunning is no longer silent anyway: a full
+ * buffer drops its incomplete last line rather than showing it cut. */
+#define LRC_TEXT_MAX  3584u
 /* 80, not 64. Measured on the card: the longest sheet there is 66 lines, so 64
  * silently dropped the end of it -- and a lyric that stops two lines early
  * reads as a bug, not as a limit.
@@ -2813,6 +2828,36 @@ static uint32_t ui_byte_rate(void)
     if (!vbr_seen && bytes_per_sec) return bytes_per_sec;
     if (meas_rate) return meas_rate;
     return bytes_per_sec;
+}
+
+/* Byte offset of a point in the track, read out of the Xing TOC.
+ *
+ * The table is indexed in PERCENT of duration, so the remainder of that
+ * division is interpolated rather than thrown away -- at 100 entries one
+ * index is 2.2 s on a 3:41 track, which is most of the error being fixed.
+ *
+ * Returns 0 when there is no usable table, which the caller reads as
+ * "fall back to the linear estimate": a file with no Xing TOC keeps the
+ * behaviour it has always had. */
+static uint32_t xing_byte_at(uint32_t secs)
+{
+    if (!xing_toc_ok || !track_secs || !track_bytes) return 0;
+    if (secs >= track_secs) return 0;
+
+    uint32_t num = secs * 100u;
+    uint32_t idx = num / track_secs;          /* 0..99 */
+    uint32_t rem = num - idx * track_secs;    /* how far into that entry */
+    if (idx > 99u) return 0;
+
+    uint32_t a = xing_toc[idx];
+    uint32_t b = (idx < 99u) ? xing_toc[idx + 1u] : 256u;
+    uint32_t v = (b > a) ? a + ((b - a) * rem) / track_secs : a;
+
+    /* 64-bit because the product overflows 32: a 50 MB file times 256 is
+     * 12.8 G. Dividing first would throw away up to 255 bytes of offset,
+     * which is a frame and a half. */
+    uint32_t off = (uint32_t)(((uint64_t)track_bytes * v) >> 8);
+    return audio_start + off;
 }
 
 /* Byte rate for the SEEK LIMIT specifically. Deliberately not ui_byte_rate():
@@ -9219,6 +9264,13 @@ static uint32_t vbr_frame_count(void)
             uint32_t e = i + 8u;
             if (flags & 1u) e += 4u;            /* FRAMES  */
             if (flags & 2u) e += 4u;            /* BYTES   */
+            /* Keep the TOC on the way past rather than only stepping
+             * over it. Requires the whole table to be in the buffer:
+             * a half-read one would aim seeks into nowhere. */
+            if ((flags & 4u) && e + 100u <= lim) {
+                for (uint32_t k = 0; k < 100u; k++) xing_toc[k] = ring[e + k];
+                xing_toc_ok = 1u;
+            }
             if (flags & 4u) e += 100u;          /* TOC     */
             if (flags & 8u) e += 4u;            /* QUALITY */
 
@@ -11160,6 +11212,11 @@ int main(void)
 
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
             uint32_t want;
+            /* Set when the TOC supplied the target, so the clock can be
+             * assigned the second asked for instead of being re-derived
+             * from the landed byte through the same flat average that
+             * put the seek in the wrong place. 0 = no TOC, linear path. */
+            uint32_t seek_exact = 0u;
 
             /* FLAC with a seek table works in TIME, not bytes: the target
              * second is exact, and flac_seek_locate() MEASURES the offset
@@ -11290,7 +11347,34 @@ int main(void)
                 goto seek_done;
             }
 
-            if (seek_req == 1u) {
+            /* MP3 with a Xing TOC seeks in TIME, the way FLAC with a seek
+             * table already does. The byte path below computes a target
+             * from a flat average, which on a variable file is wrong by
+             * seconds -- and then derives the CLOCK from that same
+             * average, so the two agree with each other and disagree with
+             * the audio. That is why the lyrics drifted after a seek while
+             * the seek itself felt fine: nothing was out of step except
+             * the number being displayed.
+             *
+             * A file with no TOC falls through to the byte path unchanged. */
+            if (track_fmt == FMT_MP3 && xing_toc_ok && track_secs) {
+                uint32_t secs = seek_secs ? seek_secs : 5u;
+                uint32_t tgt;
+                if (seek_req == 1u) {
+                    tgt = ui_sec + secs;
+                    /* Three seconds of tail, the same rule both other
+                     * paths use, so the end stays audible. */
+                    uint32_t last = (track_secs > 3u) ? track_secs - 3u : 0u;
+                    if (tgt > last) tgt = last;
+                } else {
+                    tgt = (ui_sec > secs) ? ui_sec - secs : 0u;
+                }
+                uint32_t at = xing_byte_at(tgt);
+                if (at) { want = at; seek_exact = tgt + 1u; }
+                else if (seek_req == 1u) want = file_pos + step;
+                else want = (file_pos > audio_start + step)
+                          ? file_pos - step : audio_start;
+            } else if (seek_req == 1u) {
                 /* Forward stops short of the end. Backward has always clamped
                  * to audio_start; forward never did, so holding it walked
                  * file_pos past the end of the file, the refill came back empty
@@ -11341,7 +11425,12 @@ int main(void)
                 stopped  = 0;                 /* no longer at 0:00 */
 
                 uint32_t rate = ui_byte_rate();
-                ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
+                /* The TOC path asked for a SECOND and got the byte for
+                 * it, so the second is the answer. Re-deriving it from
+                 * the byte would reintroduce the very error the table
+                 * was read to avoid. */
+                ui_sec      = seek_exact ? seek_exact - 1u
+                            : (rate ? (file_pos - audio_start) / rate : 0u);
                 ui_sec_acc  = 0;
                 ui_last_sec = 0xFFFFFFFFu;
                 ui_prog_sec = 0xFFFFFFFFu;
