@@ -16,6 +16,7 @@ TC="$ROOT/toolchain/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
 GCC="$TC/riscv-none-elf-gcc.exe"
 OBJCOPY="$TC/riscv-none-elf-objcopy.exe"
 SIZE="$TC/riscv-none-elf-size.exe"
+NM="$TC/riscv-none-elf-nm.exe"
 FW="$ROOT/fw"
 HELIX="$ROOT/third_party/libhelix-mp3"
 OUT="$ROOT/dist/Assets/mp3player/common"
@@ -91,12 +92,34 @@ grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
 "$SIZE" "$FW/fw.elf"
 "$OBJCOPY" -O binary "$FW/fw.elf" "$OUT/$ROM"
 
+# Report the memory map from the LINKER's own symbols rather than a
+# hardcoded ceiling. The old check compared the ROM image against
+# 192K-16K: both numbers were stale (RAM is 256 KB and the stack is 9 KB,
+# not 16), and it ignored .bss entirely -- so it measured something that
+# was not the constraint, as a percentage of a size that does not exist.
+#
+# The real constraint is the HEAP: Helix mallocs a ~23.8 KB decoder
+# instance out of it, so heap-minus-Helix is the slack that actually runs
+# out. The hard gate stays where it belongs, in player.ld's ASSERT.
+"$NM" "$FW/fw.elf" > "$FW/fw.sym"
 python -c "
 import os
-n = os.path.getsize(r'$OUT/$ROM')
-lim = 192*1024 - 16*1024        # RAM minus stack reserve
-print('$ROM: %d bytes (%.1f%% of usable RAM)' % (n, 100.0*n/lim))
-assert n < lim, 'firmware image exceeds usable RAM'
+sym = {}
+for line in open(r'$FW/fw.sym'):
+    f = line.split()
+    if len(f) == 3: sym[f[2]] = int(f[0], 16)
+n     = os.path.getsize(r'$OUT/$ROM')
+img   = sym['__bss_end']
+heap  = sym['_heap_end'] - sym['_heap_start']
+ram   = sym['_stack_top']
+tail  = ram - sym['_tag_start']
+HELIX = 23816
+print('$ROM: %d B image, %d B resident (%.1f%% of %d KB)'
+      % (n, img, 100.0*img/ram, ram//1024))
+print('  heap %d B; Helix takes %d B -> %d B slack' % (heap, HELIX, heap - HELIX))
+print('  reserved tail %d B (tag + ring + stack)' % tail)
+if heap - HELIX < 4096:
+    print('  WARNING: under 4 KB of heap slack left')
 "
 # The splash version and the version the Pocket shows in its core list live in
 # two different files, and they drifted: v1.3.0 was built, tested and pushed to
