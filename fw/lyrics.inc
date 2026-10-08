@@ -1,6 +1,7 @@
-/* .lrc lyrics: load beside the track, parse, and hand lines to the meter.
+/* Lyrics: sidecar first, the file's own ID3v2 USLT frame second, then
+ * parse and hand lines to the meter.
  *
- * SIDECAR, not tags. `<track>.mp3` -> `<track>.lrc` in the same folder. It
+ * SIDECAR FIRST. `<track>.mp3` -> `<track>.lrc` in the same folder. It
  * needs no tag parsing on either format, which matters because the two in-file
  * routes both have obstacles: ID3 `USLT` is not a plain text frame (encoding
  * byte, language, then a NUL-terminated descriptor before the text), and
@@ -189,6 +190,145 @@ static uint32_t lrc_index_for(uint32_t t10)
     return k;
 }
 
+
+/* ---- Lyrics embedded in the file's own ID3v2 tag -------------------------
+ *
+ * A FALLBACK behind the sidecar, not a replacement. Measured over the
+ * reference library of 7,169 MP3s: 4,618 carry a USLT frame and 4,563 of
+ * those are 12-byte EMPTY placeholders -- an encoding byte, "XXX", a BOM and
+ * nothing else, written wholesale by some tagger. Sixteen have real content
+ * and fourteen of THOSE are a filesharing watermark. Two files in seven
+ * thousand hold actual lyrics. So this earns its place only where a sidecar
+ * is absent, and an empty frame must read as "no lyrics" rather than as an
+ * empty panel.
+ *
+ * USLT is NOT a text frame, which is why id3_text_body() cannot be reused:
+ * after the encoding byte come three bytes of language and then a
+ * NUL-TERMINATED DESCRIPTOR in the frame's own encoding -- for UTF-16 that
+ * is a 16-bit terminator, and the descriptor and the text each carry their
+ * own BOM.
+ *
+ * Nothing stops anyone pasting LRC-formatted text into a lyrics tag, so the
+ * decoded body goes through the SAME lrc_parse() the sidecar uses: a tag
+ * with timestamps gives synced lyrics, one without scrolls unsynced. */
+
+/* Defined further down player.c than this include sits, same reason the
+ * FLAC and playlist declarations are hoisted. */
+static uint32_t id3_len(const uint8_t *b);
+
+/* Decode a USLT body into lrc_text as UTF-8, a tag-buffer window at a time.
+ *
+ * Windowed because the frame can exceed the 4 KB tag buffer -- the UTF-16
+ * test file's is 6 KB, and UTF-16 is the encoding every tagged file in that
+ * library uses. Wide windows are kept 2-byte aligned so a code unit is never
+ * split across a read; the 8-bit encodings copy bytes verbatim, so a split
+ * UTF-8 sequence simply continues in the next window. */
+static uint32_t lrc_uslt_decode(uint32_t pos, uint32_t len)
+{
+    uint32_t want = (len < TAG_SIZE) ? len : TAG_SIZE;
+    if (want < 6u) return 0;
+    if (!target_read_slot(MP3_SLOT_ID, pos, TAG_OFF, want)) return 0;
+
+    uint8_t  enc  = tagbuf[0];
+    int      wide = (enc == 1u || enc == 2u);
+    int      be   = (enc == 2u);
+    uint32_t s    = 4u;                  /* encoding byte + 3-byte language */
+
+    if (wide) {
+        if (enc == 1u && s + 1u < want) {
+            if (tagbuf[s] == 0xFFu && tagbuf[s + 1u] == 0xFEu)      { be = 0; s += 2u; }
+            else if (tagbuf[s] == 0xFEu && tagbuf[s + 1u] == 0xFFu) { be = 1; s += 2u; }
+        }
+        while (s + 1u < want && (tagbuf[s] || tagbuf[s + 1u])) s += 2u;
+        s += 2u;                          /* past the 16-bit terminator */
+        if (enc == 1u && s + 1u < want) { /* the TEXT carries its own BOM */
+            if (tagbuf[s] == 0xFFu && tagbuf[s + 1u] == 0xFEu)      { be = 0; s += 2u; }
+            else if (tagbuf[s] == 0xFEu && tagbuf[s + 1u] == 0xFFu) { be = 1; s += 2u; }
+        }
+    } else {
+        while (s < want && tagbuf[s]) s++;
+        s += 1u;
+    }
+    if (s >= want) return 0;
+
+    uint32_t out  = 0;                    /* bytes written to lrc_text */
+    uint32_t off  = s, have = want;
+    uint32_t fp   = pos + want;           /* next unread file offset */
+    uint32_t end  = pos + len;
+
+    while (out + 4u < LRC_TEXT_MAX) {
+        if (off + (wide ? 1u : 0u) >= have) {
+            if (fp >= end) break;
+            uint32_t n = end - fp;
+            if (n > TAG_SIZE) n = TAG_SIZE;
+            if (wide) n &= ~1u;
+            if (!n || !target_read_slot(MP3_SLOT_ID, fp, TAG_OFF, n)) break;
+            off = 0; have = n; fp += n;
+            continue;
+        }
+        uint32_t o2;
+        if (wide) {
+            uint32_t u = be ? (((uint32_t)tagbuf[off] << 8) | tagbuf[off + 1u])
+                            : (((uint32_t)tagbuf[off + 1u] << 8) | tagbuf[off]);
+            off += 2u;
+            if (!u) break;
+            if (u >= 0xD800u && u < 0xE000u) { if (u < 0xDC00u) off += 2u; u = '?'; }
+            o2 = u8_put(lrc_text, out, LRC_TEXT_MAX, u);
+        } else {
+            uint8_t c = tagbuf[off++];
+            if (!c) break;
+            if (enc == 3u) {              /* already UTF-8: copy verbatim */
+                if (out + 1u >= LRC_TEXT_MAX) break;
+                lrc_text[out] = (char)c;
+                o2 = out + 1u;
+            } else {
+                o2 = u8_put(lrc_text, out, LRC_TEXT_MAX, c);
+            }
+        }
+        if (o2 == out) break;
+        out = o2;
+    }
+    lrc_text[out] = 0;
+    return out;
+}
+
+/* Walk the tag for a USLT frame. Same shape as id3_walk_collect(): a sliding
+ * window over frame HEADERS, bodies skipped by arithmetic, so a megabyte of
+ * cover art ahead of the lyrics costs nothing. */
+static uint32_t lrc_tag_load(void)
+{
+    if (track_fmt != FMT_MP3) return 0;          /* ID3 is an MP3 tag */
+    if (!target_read_slot(MP3_SLOT_ID, 0, TAG_OFF, 512u)) return 0;
+    if (tagbuf[0] != 'I' || tagbuf[1] != 'D' || tagbuf[2] != '3') return 0;
+
+    uint8_t  major   = tagbuf[3];
+    uint32_t tag_len = id3_len(tagbuf);
+    if (tag_len < 20u) return 0;
+
+    uint32_t wo = 0, wl = 512u, p = 10u;
+    while (p + 10u <= tag_len) {
+        if (!(p >= wo && p + 10u <= wo + wl)) {
+            if (!target_read_slot(MP3_SLOT_ID, p, TAG_OFF, 512u)) return 0;
+            wo = p; wl = 512u;
+        }
+        const uint8_t *h = tagbuf + (p - wo);
+        if (h[0] == 0) return 0;                 /* padding reached */
+
+        uint32_t fsize = (major >= 4)
+            ? (((uint32_t)(h[4] & 0x7Fu) << 21) | ((uint32_t)(h[5] & 0x7Fu) << 14) |
+               ((uint32_t)(h[6] & 0x7Fu) << 7)  |  (uint32_t)(h[7] & 0x7Fu))
+            : (((uint32_t)h[4] << 24) | ((uint32_t)h[5] << 16) |
+               ((uint32_t)h[6] << 8)  |  (uint32_t)h[7]);
+        if (!fsize || p + 10u + fsize > tag_len) return 0;
+
+        if (h[0] == 'U' && h[1] == 'S' && h[2] == 'L' && h[3] == 'T')
+            return lrc_uslt_decode(p + 10u, fsize);
+
+        p += 10u + fsize;
+    }
+    return 0;
+}
+
 /* Called from load_track(). Silent when there is no sidecar -- most tracks will
  * not have one, and that is not a failure worth reporting. */
 static void lrc_load(void)
@@ -215,8 +355,17 @@ static void lrc_load(void)
     if (!m) return;                              /* no extension, no sidecar */
     nm[m] = 'l'; nm[m + 1u] = 'r'; nm[m + 2u] = 'c'; nm[m + 3u] = 0;
 
-    if (!pl_open_try(LRC_SLOT_ID, nm, MP3_SLOT_ID)) return;
+    if (pl_open_try(LRC_SLOT_ID, nm, MP3_SLOT_ID)) {
+        uint32_t len = lrc_read_raw();
+        if (len) { lrc_parse(len); if (lrc_n) return; }
+    }
 
-    uint32_t len = lrc_read_raw();
-    if (len) lrc_parse(len);
+    /* No sidecar, or one that parsed to nothing: try the file's own tag.
+     * Sidecar FIRST and unconditionally -- it is the format anyone
+     * actually produces synced lyrics in, and a file may carry both a
+     * good .lrc and one of the empty USLT placeholders this library is
+     * full of. Letting the tag win there would replace real lyrics with
+     * nothing. */
+    uint32_t tn = lrc_tag_load();
+    if (tn) lrc_parse(tn);
 }
