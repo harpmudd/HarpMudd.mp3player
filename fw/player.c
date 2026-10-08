@@ -1983,7 +1983,9 @@ static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
 static uint8_t  lrc_synced;             /* at least one real timestamp        */
-static uint32_t lrc_index_for(uint32_t t10);  /* both defined in lyrics.inc */
+static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
+static void     lrc_load(void);
+static void     lrc_clear(void);
 static uint32_t lrc_now10(void);
 
 
@@ -7347,6 +7349,12 @@ static void poll_input(void)
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
         viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        /* Lyrics are not loaded unless this meter is showing, so arriving
+         * at it mid-track has to fetch them. That is a far read on a slot
+         * that is not the stream -- the fragment-cache stutter -- but it
+         * happens ONCE, on a button the user just pressed, instead of on
+         * every track load whether they want lyrics or not. */
+        if (viz_mode == VIZ_LYRICS && !lrc_n) lrc_load();
         /* The cascade skips the split for stages the OUTGOING meter did not
          * read, so their splitter state and accumulators are stale by however
          * long that meter was up. Clear them, or the first window after a
@@ -10006,7 +10014,25 @@ static int load_track(void)
      * them here means neither ever happens during playback -- which is the one
      * thing that would reintroduce the fragment-cache stutter. Costs one open
      * and one read beside artwork's 43 to 207. */
-    lrc_load();
+    /* ONLY when the meter that uses them is showing.
+     *
+     * The comment above says this costs one open and one read. That was
+     * written assuming a missing sidecar fails fast. It does not: a file
+     * with no .lrc pays pl_template's 1 s GETFILE timeout and then
+     * pl_open_try's 3 s OPENFILE timeout, FOUR SECONDS of blocking in
+     * load_track, on every track, for a feature not in use.
+     *
+     * It showed up as the duration appearing eight or nine seconds late,
+     * with a stutter, on exactly the files that have to MEASURE their
+     * length -- no usable frame count, so the size probe runs, and the
+     * probe only gets going once this has finished blocking. Reported on
+     * Stockholm Syndrome and Widespread Panic, both of which have no
+     * .lrc and no frame count.
+     *
+     * Gated rather than made faster because the user's call was that
+     * lyrics must not cost anything when unused. Switching TO the meter
+     * loads them then; see the meter cycle. */
+    if (viz_mode == VIZ_LYRICS) lrc_load(); else lrc_clear();
 
     ld_art = LD_MS(cycles() - tphase); tphase = cycles();
 
