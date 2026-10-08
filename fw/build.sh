@@ -27,7 +27,24 @@ mkdir -p "$OUT"
 # relaxation would emit stores through an uninitialised gp.
 # EXTRA_CFLAGS lets a build turn on things that are off by default without
 # editing source, e.g.:  EXTRA_CFLAGS=-DDEBUG_DIAG=1 bash fw/build.sh
-CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Wl,--gc-sections ${EXTRA_CFLAGS:-}"
+# -Os, not -O2. This is not a preference, it is the only level that LINKS:
+# 1.7.0's native 24/32 px font cells and the lyrics engine pushed the image
+# 1488 bytes past the DMA-buffer ceiling at -O2, so link.ld's ASSERT fires and
+# no .rom is written. -Os comes in at 142240 B with 4184 B of heap slack.
+#
+# Written down here because it cost a session to re-derive: every 1.7.0
+# firmware tested on hardware was built with -Os passed by hand through
+# EXTRA_CFLAGS, while the DEFAULT build in this script could not link at all.
+# The recipe lived nowhere. A default that does not build is worse than a
+# slow one.
+#
+# The per-file -Os overrides for flac.c and picojpeg.c below are redundant
+# now, and are kept so this line can go back to -O2 without re-deriving them:
+#
+#   OPT=-O2 bash fw/build.sh     # expect the collision ASSERT until the
+#                                # image sheds ~1.5 KB
+OPT="${OPT:--Os}"
+CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax $OPT -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Wl,--gc-sections ${EXTRA_CFLAGS:-}"
 ROM="mp3player.rom"
 
 case "$TARGET" in
@@ -85,6 +102,7 @@ if ! "$GCC" $CFLAGS $INC -T "$FW/link.ld" -o "$FW/fw.elf" $SRCS -lm \
         > "$FW/build.log" 2>&1; then
     grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
     echo "*** COMPILE FAILED -- no .rom written ***" >&2
+    echo "    dist/ still holds the PREVIOUS $ROM -- do not ship it" >&2
     exit 1
 fi
 grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
@@ -164,4 +182,4 @@ fi
 
 echo "version $APP_VER (core.json date_release $JSON_DATE)"
 
-echo "built [$TARGET] -> $OUT/$ROM"
+echo "built [$TARGET] $OPT ${EXTRA_CFLAGS:-} -> $OUT/$ROM"
