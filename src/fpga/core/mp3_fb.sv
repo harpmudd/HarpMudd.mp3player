@@ -479,6 +479,30 @@ module mp3_fb (
     reg [15:0] ew0, ew1, ew2, ew3, ew4, ew5, ew6;
     reg [8:0]  fw_len;                  // words in the in-flight font burst
 
+    /* A font write burst must NEVER cross an SDRAM page edge.
+     *
+     * sdram_fb's WRITE_STREAM has no check for it, unlike READ_OUTPUT
+     * which precharges three columns early. The column counter simply
+     * wraps to the START of the same page, so the tail of a crossing
+     * burst overwrites font that has already been loaded.
+     *
+     * The framebuffer writes cannot hit this: the stride is 512 and x is
+     * under 400, so a row write never reaches column 1024. The font load
+     * can, because fw_next walks continuously through 800K words and the
+     * burst length is whatever happened to be queued -- lengths that do
+     * not divide the page.
+     *
+     * Measured in sim/tb_fontload.v before this clamp: feeding word N ==
+     * N, 18 of the first 4096 words came back wrong, the first at word
+     * 1024 exactly -- page column 0, holding what belonged at word 2048.
+     * On the real 800,368-word font that is thousands of bad words, in
+     * places that move with load timing. It renders as a glyph that is
+     * wrong for a whole session and right again after a core restart,
+     * because a restart reloads the font. */
+    wire [10:0] fw_cap0 = (fw_fill > 9'd128) ? 11'd128 : {2'd0, fw_fill};
+    wire [10:0] fw_room = 11'd1024 - {1'b0, fw_next[9:0]};
+    wire [10:0] fw_cap  = (fw_cap0 < fw_room) ? fw_cap0 : fw_room;
+
     // A 1bpp row is one word, bit 15 = leftmost pixel. Expanded to the same
     // 4bpp shape the ROM delivers so compose and blend run unchanged: a set
     // pixel is full coverage, which blends to exactly the foreground.
@@ -666,8 +690,8 @@ module mp3_fb (
                                  (fw_fill >= 9'd64 || !(char_rows_left_nz || !fifo_empty))) begin
                         p0_addr      <= FONT_BASE + {4'd0, fw_next};
                         p0_byte_en   <= 2'b11;
-                        fw_len       <= (fw_fill > 9'd128) ? 9'd128 : fw_fill;
-                        p0_wr_len    <= (fw_fill > 9'd128) ? 11'd128 : {2'd0, fw_fill};
+                        fw_len       <= fw_cap[8:0];
+                        p0_wr_len    <= fw_cap;
                         p0_wr_stream <= 1'b1;
                         p0_wr_req    <= 1'b1;
                         wr_is_char   <= 1'b0;

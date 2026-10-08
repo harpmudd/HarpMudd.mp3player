@@ -1,3 +1,5 @@
+`define FI 1
+`define FAT 4
 // Where does a glyph cell's data actually LAND, with the real controller?
 //
 // Hardware: the last one or two ink columns of every glyph are missing, the
@@ -51,7 +53,7 @@ module tb_write;
     wire [15:0] DQ; wire [12:0] A; wire [1:0] DQM, BA;
     wire nWE, nRAS, nCAS;
 
-    sdram_fb #(.CLOCK_SPEED_MHZ(100), .BURST_TYPE(0), .CAS_LATENCY(2), .WRITE_BURST(1), .FAULT_INJECT(0))
+    sdram_fb #(.CLOCK_SPEED_MHZ(100), .BURST_TYPE(0), .CAS_LATENCY(2), .WRITE_BURST(1), .FAULT_INJECT(`FI), .FAULT_AT(`FAT))
     ctl (
         .clk(clk), .reset(reset), .init_complete(init_complete),
         .p0_addr(p0_addr), .p0_data(p0_data), .p0_byte_en(p0_byte_en),

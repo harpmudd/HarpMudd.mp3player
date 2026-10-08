@@ -42,7 +42,8 @@ module sdram_fb #(
     parameter BURST_TYPE = 0,  // 1 for interleaved
     parameter CAS_LATENCY = 2,  // 1, 2, or 3 cycle delays
     parameter WRITE_BURST = 1, // MUST be 1 here: writes are full-page bursts
-    parameter FAULT_INJECT = 0 // SIM ONLY: cut every read burst after 5 words
+    parameter FAULT_INJECT = 0, // SIM ONLY: cut every read burst short
+    parameter FAULT_AT = 4     // ...after this many words
 ) (
     input wire clk,
     input wire reset,  // Used to trigger start of FSM
@@ -620,7 +621,7 @@ module sdram_fb #(
           // resume path deterministically.
           fi_cnt <= fi_cnt + 1;
           if (burst_addr[SETTING_COLUMN_BITS-1:0] + 'h1 == stop_burst_addr || p0_end_burst_req
-              || (FAULT_INJECT && fi_cnt == 3'd4)) begin
+              || (FAULT_INJECT && fi_cnt == FAULT_AT)) begin
             // Stop burst 3 cycles before edge of page
             // Precharge
             set_precharge_command();
