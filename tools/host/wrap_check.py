@@ -21,13 +21,23 @@ WMAX=int(re.search(r'#define@s+LRC_WRAP_MAX@s+(@d+)'.replace('@',BS),pc).group(1
 u8h=io.open('fw/utf8.h',encoding='utf-8').read()
 nextfn=extract(u8h,'static uint32_t u8_next')
 maxw=extract(pc,'static uint32_t lrc_maxw'); wrap=extract(pc,'static uint32_t lrc_wrap')
+# A SELF-CONTAINED corpus. This used to read .lrc files off an inserted SD
+# card, so the regression test only ran when the card happened to be in --
+# and silently skipped the Japanese that exposed the byte-wise wrapping bug.
+# The fixture carries the lines that actually broke.
+lines=[l.rstrip(chr(10)) for l in
+       io.open(os.path.join(HERE,'fixtures','lyrics.txt'),encoding='utf-8')
+       if l.strip()]
+# A card that happens to be inserted is EXTRA coverage, never the source.
 MP='E:/Assets/mp3player/common/MP3s'
-lines=[]
-for fn in sorted(os.listdir(MP)):
-    if fn.lower().endswith('.lrc'):
-        for l in io.open(os.path.join(MP,fn),encoding='utf-8',errors='replace'):
-            s=re.sub(r'^@s*(@[@d+:@d+(?:[.:]@d+)?@]@s*)+'.replace('@',BS),'',l.strip())
-            if s: lines.append(s)
+try:
+    for fn in sorted(os.listdir(MP)):
+        if fn.lower().endswith('.lrc'):
+            for l in io.open(os.path.join(MP,fn),encoding='utf-8',errors='replace'):
+                s=re.sub(r'^@s*(@[@d+:@d+(?:[.:]@d+)?@]@s*)+'.replace('@',BS),'',l.strip())
+                if s: lines.append(s)
+except OSError:
+    pass
 gen=os.path.join(HERE,'wrap_gen.c')
 with io.open(gen,'w',encoding='utf-8',newline=chr(10)) as f:
     f.write('#include "hostio.h"'+chr(10))

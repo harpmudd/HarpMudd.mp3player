@@ -108,3 +108,6 @@ mp3player_PLT.rom
 mp3player_m10kdiet.rbf_r
 mp3player_170dev.rom
 fw/fw.sym
+tools/host/*_gen.c
+tools/host/*.elf
+tools/host/*.sym
