@@ -60,6 +60,18 @@ static inline void dt_write(uint32_t word, uint32_t val)
  * skip loop in pl_play_dir() needs to tell them apart -- retrying 128 entries
  * that each take 3 s to not answer is six minutes of frozen core. */
 static uint8_t pl_cmd_timedout;
+/* The response code pl_cmd() ACTUALLY SAW, captured at the moment it
+ * decided. pl_open_try() used to re-read R_TGT_GO afterwards, which is a
+ * second read of a register that has already moved on -- so the code it
+ * reported was not the one that caused the failure.
+ *
+ * That was not only cosmetic. PLF_DEAD is gated on errcode == 4, so a
+ * genuinely missing file never got condemned: it came back as a stale 0,
+ * classified PLF_SKIP, and the walk retried it on every pick instead of
+ * marking it dead once. Caught because a deleted file reported
+ * "UNREADABLE, 0192 ERR 0" -- zero being the code for SUCCESS, which a
+ * failure path can never legitimately report. */
+static uint8_t pl_cmd_code;
 
 /* Run one target command and wait for the sequence counter to move. Same
  * discipline as target_read_poll(): never trust the `done` LEVEL, which stays
@@ -67,7 +79,7 @@ static uint8_t pl_cmd_timedout;
 static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
 {
     refill_drain();                       /* one command in flight, ever */
-    pl_cmd_timedout = 0;
+    pl_cmd_timedout = 0; pl_cmd_code = 0;
     uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
     REG(R_TGT_ID) = slot;
     REG(R_TGT_GO) = sel;
@@ -75,7 +87,10 @@ static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
     uint32_t deadline = cycles() + timeout_cycles;
     for (;;) {
         uint32_t st = REG(R_TGT_GO);
-        if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
+        if (((st >> 8) & 0xFFu) != seq0) {
+            pl_cmd_code = (uint8_t)((st >> 2) & 7u);
+            return (pl_cmd_code == 0u);
+        }
         if ((int32_t)(cycles() - deadline) >= 0) { pl_cmd_timedout = 1; return 0; }
     }
 }
@@ -207,7 +222,7 @@ static int pl_open_try(uint32_t slot, const char *name, uint32_t tmpl_slot)
     if (!pl_cmd(TGT_OPENFILE, slot, CLK_HZ * 3u)) {
         pl_open_err     = PLO_OPEN;
         pl_open_timeout = pl_cmd_timedout;
-        pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
+        pl_open_errcode = pl_cmd_code;   /* what pl_cmd saw, not a re-read */
         return 0;
     }
     return 1;
