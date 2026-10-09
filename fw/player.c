@@ -2013,35 +2013,6 @@ static char     lrc_text[LRC_TEXT_MAX];
 static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
 static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
 static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
-/* The NEXT line warms from gray to the active colour over the last 0.8 s
- * before it is sung, so the hand-off reads as movement rather than as a jump.
- *
- * 8 steps because the lyrics clock is in TENTHS -- one step per tenth is the
- * finest this can be without inventing a timebase, and it is already smooth:
- * measured over the ramp, each step moves luma by 9-10 of a 91-110 total, so
- * no step is invisible and none is a jolt.
- *
- * fade == LRC_FADE is reserved for the ACTIVE line, so the warming line runs
- * 0..LRC_FADE-1 and only the real hand-off reaches full accent. */
-#define LRC_FADE 8u
-/* How long the warm-up lasts, in HUNDREDTHS. 30 = 0.3 s.
- *
- * Was 0.7 s, driven straight off the tenths clock at one step per tenth. Too
- * slow, and it started so far ahead that it read as a second highlighted line
- * rather than as the hand-off arriving.
- *
- * Shortening it on the tenths clock would have cost smoothness -- 0.3 s is
- * three tenths, so three steps, ~30 luma each, which is a flicker not a fade.
- * Step SIZE is set by the step COUNT, not by the window, so keeping 8 steps
- * and compressing the window keeps the ramp exactly as smooth at less than
- * half the duration. That needs the hundredths clock, which is the only
- * reason it exists.
- *
- * The UI runs at ~38 fps on both decoders (see FL_UI_PERIOD), so 0.3 s is
- * about 11 frames for 8 steps -- each step gets a frame or two. Going much
- * shorter or much finer would ask for steps the display never draws. */
-#define LRC_FADE100 30u
-static uint8_t  lrc_fade_drawn;         /* fade step the next line was drawn at */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
@@ -2050,7 +2021,6 @@ static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
 static void     lrc_load(void);
 static void     lrc_clear(void);
 static uint32_t lrc_now10(void);
-static uint32_t lrc_now100(void);
 
 
 /* Visualisations, cycled with X. The choice persists via interact.json.
@@ -4692,7 +4662,7 @@ static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
  * Background is sampled at this row, not shared: the box is a ramp and a glyph
  * cell paints its own background, so one value for all five rows would band. */
 static void lrc_row(uint32_t y, uint32_t ww, const char *s,
-                    uint32_t from, uint32_t to, uint32_t fade)
+                    uint32_t from, uint32_t to, int is_cur)
 {
     char t[80];
     uint32_t n = 0;
@@ -4706,15 +4676,7 @@ static void lrc_row(uint32_t y, uint32_t ww, const char *s,
      * final cell hanging past the box on a line that nearly filled it. */
     uint32_t w  = lrc_painted_w(t);
     uint32_t dx = (ww > w) ? (ww - w) / 2u : 0u;
-    /* fade: 0 is the resting gray, LRC_FADE the active colour, between is the
-     * warm-up. Mixed from the gray rather than from bg so a warming line and a
-     * resting one share an endpoint exactly -- the row background is a ramp
-     * sampled per row, so starting from bg would make the ramp leak into the
-     * fade and the steps would differ row to row. */
-    uint16_t gray = ui_mix(bg, UI_DIM, 1u, 3u);
-    uint16_t fg   = (fade >= LRC_FADE) ? ui_accent
-                  : (fade ? ui_mix(gray, ui_accent, fade, LRC_FADE) : gray);
-    fb_set_color(fg, bg);
+    fb_set_color(is_cur ? ui_accent : ui_mix(bg, UI_DIM, 1u, 3u), bg);
     fb_text_boxed(UI_MARGIN + dx, y, t, TS_1X, TS_1X,
                   (ww > dx) ? ww - dx : 2u, UI_MARGIN + ww);
 }
@@ -4723,7 +4685,7 @@ static void lrc_row(uint32_t y, uint32_t ww, const char *s,
  * Rows outside the visible five are simply skipped, so clipping at either end
  * needs no special case. Returns the rows the line occupies. */
 static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
-                         int32_t row, uint32_t fade)
+                         int32_t row, int is_cur)
 {
     const char *s = lrc_text + lrc_off[idx];
     uint32_t len = 0;
@@ -4735,7 +4697,7 @@ static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
         int32_t r = row + (int32_t)k;
         if (r < 0 || r >= 5) continue;        /* outside the visible five */
         uint32_t to = (k + 1u < n) ? st[k + 1u] : len;
-        lrc_row(top + 8u + (uint32_t)r * 16u, ww, s, st[k], to, fade);
+        lrc_row(top + 8u + (uint32_t)r * 16u, ww, s, st[k], to, is_cur);
     }
     return n;
 }
@@ -4969,32 +4931,6 @@ static void ui_draw_dynamic(void)
             lrc_drawn_w = (uint16_t)ww;
             lrc_last_t10 = t10;
 
-            /* How warm the NEXT line should be: 0 until it is LRC_FADE tenths
-             * away, then one step per tenth up to LRC_FADE-1. It never reaches
-             * LRC_FADE here -- that value means "is the active line", and the
-             * full repaint below hands it over at the moment cur advances.
-             *
-             * Guarded on nxt > t10 rather than clamped after subtracting:
-             * these are unsigned tenths, so an equal or passed stamp would
-             * wrap to an enormous number and light the line at full accent. */
-            uint32_t fade = 0;
-            if (lrc_synced && lrc_n && cur + 1u < lrc_n) {
-                uint32_t nxt = lrc_sec[cur + 1u];
-                if (nxt != LRC_NOTIME) {
-                    uint32_t n100 = (uint32_t)nxt * 10u;   /* tenths -> 1/100 */
-                    uint32_t t100 = lrc_now100();
-                    if (n100 > t100 && n100 - t100 <= LRC_FADE100) {
-                        uint32_t gone = LRC_FADE100 - (n100 - t100);
-                        fade = (gone * LRC_FADE) / LRC_FADE100;
-                        /* gone tops out at LRC_FADE100-1, so this cannot reach
-                         * LRC_FADE today. Clamped anyway: LRC_FADE means ACTIVE,
-                         * and a future tweak to either constant must not be able
-                         * to light the next line at full accent early. */
-                        if (fade >= LRC_FADE) fade = LRC_FADE - 1u;
-                    }
-                }
-            }
-
             if (cur != lrc_drawn) {
                 lrc_drawn = (uint16_t)cur;
                 ui_bg_restore(UI_MARGIN, top, ww, boxh);
@@ -5009,15 +4945,11 @@ static void ui_draw_dynamic(void)
                                   y, "NO LYRICS", TS_1X, TS_1X, ww,
                                   UI_MARGIN + ww);
                 } else {
-                    lrc_fade_drawn = (uint8_t)fade;
-                uint32_t used = lrc_emit(top, ww, cur, 2, LRC_FADE);
+                    uint32_t used = lrc_emit(top, ww, cur, 2, 1);
 
                     int32_t r = 2 + (int32_t)used;
-                    /* Only the IMMEDIATE next line warms; the ones after it
-                     * stay at rest, or the whole box would glow at once. */
                     for (uint32_t k = 1u; cur + k < lrc_n && r < 5; k++)
-                        r += (int32_t)lrc_emit(top, ww, cur + k, r,
-                                               (k == 1u) ? fade : 0u);
+                        r += (int32_t)lrc_emit(top, ww, cur + k, r, 0);
 
                     r = 2;
                     for (uint32_t k = 1u; k <= cur && r > 0; k++) {
@@ -5025,19 +4957,6 @@ static void ui_draw_dynamic(void)
                         lrc_emit(top, ww, cur - k, r, 0);
                     }
                 }
-            } else if (fade != lrc_fade_drawn && lrc_n && cur + 1u < lrc_n) {
-                /* Only the warming line moved, so repaint only IT -- a tenth
-                 * of a second is not worth clearing and rebuilding five rows,
-                 * and ui_bg_restore over the whole box ten times a second
-                 * would be visible as flicker rather than as a fade.
-                 *
-                 * No background restore is needed: a glyph cell paints its own
-                 * background (see lrc_row), and the text, the width and the x
-                 * are all identical to the draw being replaced, so the new
-                 * colour covers the old pixel for pixel. */
-                lrc_fade_drawn = (uint8_t)fade;
-                int32_t r = 2 + (int32_t)lrc_rows(cur, ww);
-                if (r < 5) lrc_emit(top, ww, cur + 1u, r, fade);
             }
             goto viz_done;
         }

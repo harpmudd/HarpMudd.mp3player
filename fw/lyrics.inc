@@ -192,22 +192,6 @@ static uint32_t lrc_now10(void)
     return t;
 }
 
-/* The same position in HUNDREDTHS, for the next-line warm-up only.
- *
- * The line SCHEDULE is in tenths and stays there -- .lrc carries centiseconds
- * but lrc_parse rounds to tenths, and nothing about picking the current line
- * needs finer. The FADE does: the warm-up now spans 0.3 s, and eight steps
- * across three tenths cannot be addressed by a tenths clock.
- *
- * ui_sec_acc is below samprate, so the widest product here is 48000 * 100 --
- * nowhere near overflowing, same headroom the *10 version has. */
-static uint32_t lrc_now100(void)
-{
-    uint32_t t = ui_sec * 100u;
-    if (samprate) t += (ui_sec_acc * 100u) / samprate;
-    return t;
-}
-
 /* Which line belongs to `t10`: the last one whose stamp has passed. Linear over
  * at most 96 entries, which is nothing beside a single fb_rect. */
 static uint32_t lrc_index_for(uint32_t t10)
