@@ -88,9 +88,13 @@ most likely to present as an unrelated bug somewhere else.
 
 ---
 
-## 2. The splash, at native 32 px — not yet seen
+## 2. The splash, at native 32 px — CLEARED 2026-10-09
 
-The only item in this release that **has not been on screen yet**. The splash
+**Seen and confirmed good by the user.** Nothing further needed here; kept
+for the record and because the measurements explain what to expect if the
+splash is ever touched again.
+
+This was the only item in the release that had not been on screen. The splash
 heading was the last scaled text in the core and now draws from the native
 32 px cell.
 

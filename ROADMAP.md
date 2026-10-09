@@ -316,7 +316,12 @@ either needs this or is independent of it; nothing is blocked BY it. Estimate
   2026-10-02**, three causes; see the write-up below. The open defect
   carried out of v1.5.1. Not reproducible; `SEEK_TRACE` is already in the
   firmware at default 0. Highest priority -- write-up further down this file.
-- **F2. Seeking a VBR MP3 lands the clock wrong.** Deferred from v1.5.0,
+- ~~**F2. Seeking a VBR MP3 lands the clock wrong.**~~ **FIXED in 1.7.0**
+  (`cae777a`), by seeking through the Xing TOC instead of a flat average:
+  45 of 45 lookups match an independent calculation, and the convex-TOC
+  fixture in `tools/host/toc_check.py` shows the old linear estimate was
+  out by up to 21 s. Verified on hardware on the file that exposed it.
+  Original entry: deferred from v1.5.0,
   measured at -3.4 / -3.1 / -1.3 s on Xing files. Held until lyrics, because
   lyrics are what make a few seconds of clock error matter.
 - **F3. Headerless VBR estimates the total time.** Already dropped from the
@@ -333,7 +338,12 @@ either needs this or is independent of it; nothing is blocked BY it. Estimate
 - **E3. Raise the 48 kHz gate** to what the combination actually supports,
   measured rather than hoped. Today's README frames a METER cost as a hardware
   ceiling and tells users to re-encode files that play fine on bars.
-- **E4. Font: the 1.5x title scale resamples**, which is why title stems are
+- ~~**E4. Font: the 1.5x title scale resamples**~~ **DONE in 1.7.0.** Native
+  24 px and 32 px cells in the font file and the draw engine, so no scaler
+  touches them. Took four rounds of glyph corruption to land -- the last
+  cause was a font-load write burst crossing an SDRAM page edge, which is
+  why `sim/tb_fontload.v` exists. The splash was the last scaled text and
+  moved over in `c1a265c`. Original entry: which is why title stems are
   uneven. Needs a second cell size through the command, the SDRAM font path and
   glyphbuf -- RTL work, not generator work. Depends on Phase 1.
 
