@@ -8,14 +8,34 @@ def extract(s,sig):
         elif s[k]=='}':
             d-=1
             if d==0: return s[i:k+1]
-MP3=sys.argv[1]
-head=open(MP3,'rb').read(300000)
-i=head.find(b'Xing')
-flags=struct.unpack('>I',head[i+4:i+8])[0]
-o=i+8
-frames=struct.unpack('>I',head[o:o+4])[0]; o+=4
-byts=struct.unpack('>I',head[o:o+4])[0]; o+=4
-toc=list(head[o:o+100])
+# SELF-CONTAINED by default. This used to require a path on the SD card as
+# argv[1], so with no card it died with an IndexError -- which in a batch run
+# reads as a failing test rather than as a missing input. Same flaw wrap_check
+# had and had fixed: a regression test that only runs when the card happens to
+# be inserted is not a regression test.
+#
+# The synthetic TOC is CONVEX on purpose, not linear: a flat table would make
+# xing_byte_at agree with the linear estimate it exists to replace, so the test
+# would pass with the interpolation removed entirely.
+def synth():
+    frames=8900; byts=5441173
+    toc=[min(255,int(255.0*((k/99.0)**1.35))) for k in range(100)]
+    return frames,byts,toc
+if len(sys.argv)>1:
+    head=open(sys.argv[1],'rb').read(300000)
+    i=head.find(b'Xing')
+    if i<0: i=head.find(b'Info')
+    if i<0: print('no Xing/Info frame in %s'%sys.argv[1]); sys.exit(2)
+    flags=struct.unpack('>I',head[i+4:i+8])[0]
+    if (flags&7)!=7: print('that file has no TOC (flags %d)'%flags); sys.exit(2)
+    o=i+8
+    frames=struct.unpack('>I',head[o:o+4])[0]; o+=4
+    byts=struct.unpack('>I',head[o:o+4])[0]; o+=4
+    toc=list(head[o:o+100])
+    print('source: %s'%os.path.basename(sys.argv[1]))
+else:
+    frames,byts,toc=synth()
+    print('source: synthetic convex TOC (pass a VBR .mp3 path for real data)')
 dur=int(frames*1152/44100.0)
 AUDIO_START=0
 def py_byte_at(secs):

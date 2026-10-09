@@ -17,6 +17,12 @@ wrapping and char signedness as the target.
     python tools/host/text_check.py
 """
 import io
+import sys as _sys
+# This harness prints Japanese, Greek and Cyrillic. On a Windows console
+# stdout defaults to cp1252 and the print raises UnicodeEncodeError, which
+# in a batch run is indistinguishable from the text path itself failing.
+# Every other harness here already does this; this one did not.
+_sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import os
 import re
 import struct
