@@ -1224,7 +1224,8 @@ static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
 #define PL_FADE_STEP (CLK_HZ / 40u)
 static uint8_t  pl_ui_fade;        /* 0 = bare panel, PL_FADE = fully drawn   */
 static uint8_t  pl_ui_closing;     /* fading out, then restore the player     */
-static uint32_t pl_ui_fade_at;     /* next step due; ARMED, never left at 0   */
+static uint32_t pl_ui_fade_t0;     /* when the current ramp started            */
+static uint8_t  pl_ui_fade_from;   /* value it started from, for a mid-ramp turn */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
@@ -4508,9 +4509,10 @@ static uint16_t pl_fade(uint16_t c)
  * project has already lost a day to four of those. */
 static void pl_ui_dismiss(void)
 {
-    pl_ui_closing = 1u;
-    pl_ui_fade_at = cycles() + PL_FADE_STEP;
-    pl_ui_dirty   = 1u;
+    pl_ui_closing   = 1u;
+    pl_ui_fade_from = pl_ui_fade;   /* run down from wherever it got to */
+    pl_ui_fade_t0   = cycles();
+    pl_ui_dirty     = 1u;
 }
 
 static void pl_ui_row(uint32_t i)
@@ -4746,6 +4748,61 @@ static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
     return n;
 }
 
+/* Advance the overlay fade and service its repaints. Called from
+ * ui_draw_dynamic(). The fade is derived from
+ * ELAPSED TIME rather than counted one step per call. Both of those matter,
+ * and the first version got both wrong:
+ *
+ * It stepped once per MAIN LOOP pass. The main loop turns over once per
+ * decoded frame -- 1152 samples on MP3, about 38 a second, but 4608 on FLAC,
+ * about 9.6. So the same 4-step fade took 100 ms on an MP3 and 420 ms on a
+ * FLAC, which is exactly what it looked like. FL_UI_PERIOD a few thousand
+ * lines down exists for this identical reason and spells it out; I read it
+ * and put the stepping in the loop it warns about anyway.
+ *
+ * ui_draw_dynamic() is the right home because it ALREADY runs at ~38 fps on
+ * both paths: once per frame on MP3, and paced by fl_ui_next on FLAC. The
+ * cadence is uniform there by construction rather than by coincidence.
+ *
+ * Time-based on top of that, so the DURATION is right even where the cadence
+ * is not -- paused draws at 30 fps, and a blanked screen does not draw at
+ * all, which would otherwise leave a dismissed overlay open until the screen
+ * woke. Elapsed time closes it on the first draw after waking instead.
+ *
+ * Ramping from pl_ui_fade_from means a dismiss PART WAY through the fade-in
+ * runs down from where it had got to, rather than snapping to full and
+ * falling from there. */
+static void pl_ui_tick(void)
+{
+    if (!pl_ui_open) return;
+    uint32_t p = (cycles() - pl_ui_fade_t0) / PL_FADE_STEP;
+    uint8_t  want;
+    if (pl_ui_closing)
+        want = (pl_ui_fade_from > p) ? (uint8_t)(pl_ui_fade_from - p) : 0u;
+    else
+        want = (p >= PL_FADE) ? (uint8_t)PL_FADE : (uint8_t)p;
+
+    if (want != pl_ui_fade) { pl_ui_fade = want; pl_ui_dirty = 1u; }
+
+    /* Consume the repaint HERE rather than in the main loop -- same reasoning
+     * as the fade, and the same fault underneath it. A selection move was
+     * REGISTERED promptly on FLAC, because poll_input runs from flac_emit's
+     * FIFO-full wait, but the redraw waited for a main-loop pass. So held
+     * scrolling repainted at 9.6 fps against 38 on an MP3, and the list
+     * appeared to jump two rows at a time.
+     *
+     * Still GATED on pl_ui_dirty, so the NUMBER of redraws is unchanged and an
+     * idle overlay still costs nothing per frame -- which the main loop's own
+     * note says matters, because the decoder is running underneath. They just
+     * happen on the faster clock now. */
+    if (pl_ui_dirty) { pl_ui_dirty = 0; pl_ui_draw(); }
+    if (pl_ui_closing && !pl_ui_fade) {
+        pl_ui_open    = 0u;
+        pl_ui_closing = 0u;
+        pl_ui_restore = 1u;
+    }
+}
+
 static void ui_draw_dynamic(void)
 {
     if (screen_blank) return;
@@ -4764,6 +4821,9 @@ static void ui_draw_dynamic(void)
      * region is several hundred lines and every declaration in it is scoped
      * inside the sections being skipped. `viz_done` already sets the
      * precedent. */
+    /* Before the jump, so a fade that COMPLETES a dismissal this frame falls
+     * through to the normal path instead of skipping it for one more. */
+    pl_ui_tick();
     if (pl_ui_open) goto ui_tail;
 
     /* Publish the peaks once per display frame, so every meter below reads a
@@ -7742,9 +7802,10 @@ static void poll_input(void)
         if (pl_ui_open) pl_ui_dismiss();
         else if (pl_count) {
             pl_ui_open    = 1u;
-            pl_ui_fade    = 0;          /* bare panel; contents fade up */
-            pl_ui_closing = 0;
-            pl_ui_fade_at = cycles() + PL_FADE_STEP;
+            pl_ui_fade      = 0;        /* bare panel; contents fade up */
+            pl_ui_closing   = 0;
+            pl_ui_fade_from = 0;
+            pl_ui_fade_t0   = cycles();
             pl_ui_sel  = pl_pos;
             pl_ui_follow();
             pl_ui_dirty = 1u;
@@ -11755,17 +11816,6 @@ int main(void)
          * overlay is up draws straight through it -- and the '>' marker has
          * moved anyway. Comparing against what was last drawn catches both,
          * and any other route that changes the position. */
-        /* Advance the open/close fade. One place, so every route that opens or
-         * dismisses the overlay animates without knowing it does. */
-        if (pl_ui_open && (int32_t)(cycles() - pl_ui_fade_at) >= 0) {
-            pl_ui_fade_at = cycles() + PL_FADE_STEP;
-            if (pl_ui_closing) {
-                if (pl_ui_fade) { pl_ui_fade--; pl_ui_dirty = 1u; }
-                else { pl_ui_open = 0u; pl_ui_closing = 0u; pl_ui_restore = 1u; }
-            } else if (pl_ui_fade < PL_FADE) {
-                pl_ui_fade++; pl_ui_dirty = 1u;
-            }
-        }
         if (pl_ui_open && pl_ui_drawn_pos != pl_pos) pl_ui_dirty = 1u;
         if (pl_ui_open && pl_ui_dirty) {
             pl_ui_dirty = 0;
