@@ -148,9 +148,18 @@ justification than either had before.
 
 ### M10K diet -- DONE on `feature/m10k-diet`, held for 1.6.1 or 1.7.0
 
+**It is in 1.7.0 and has been running on hardware since 2026-10-07.** `b8678f6`
+and `36b7a95` both precede the rev 24 bitstream (`2e413a8`), with no later
+change to `VexRiscv_Full.v` or `sync_fifo.v` -- so every hardware session since
+has exercised it: the font work, lyrics, Japanese, VBR seek, EXTINF and the
+size guard. No fault observed. "Untested on hardware" below was true when
+written and is not now; what it has NOT had is a test aimed at it, which is
+why it leads docs/QA_1.7.0.md.
+
 **301 -> 294 blocks; free headroom doubled, 7 -> 14.** Held out of 1.6.0
 deliberately: the release gains nothing from it (no 1.6.0 feature spends the
-blocks), it is untested on hardware, and it touches the CPU register file and
+blocks), it was untested on hardware at the time, and it touches the CPU
+register file and
 cache tags -- where a subtle fault means intermittent wrong results rather
 than a clean crash. Including it would also have made the 1.6.0 regression
 pass ambiguous.
