@@ -9385,6 +9385,38 @@ static uint32_t vbr_frame_count(void)
     return 0;
 }
 
+/* The BYTES field again, from a SECOND read, with NO side effects.
+ *
+ * Deliberately not a re-run of vbr_frame_count(): that one also populates
+ * track_frames, track_encoder and the Xing TOC, and a second read exists
+ * precisely because the first one might be bad -- so it must not be able to
+ * overwrite what the load has already taken from the first.
+ *
+ * Lands in tagbuf, never the ring, for the reason given at the FLAC seektable:
+ * a buffer the decoder is not streaming from disturbs nothing. Same 2048-byte
+ * window and the same field offsets as vbr_frame_count, so the two are looking
+ * at the same bytes and a difference means a READ differed, not a parse. */
+static uint32_t vbr_bytes_again(uint32_t at)
+{
+    uint32_t lim = TAG_SIZE < 2048u ? TAG_SIZE : 2048u;
+    if (!target_read(at, TAG_OFF, lim)) return 0;
+    for (uint32_t i = 0; i + 20u < lim; i++) {
+        uint8_t a = tagbuf[i], b = tagbuf[i+1], c = tagbuf[i+2], d = tagbuf[i+3];
+        if ((a == 'X' && b == 'i' && c == 'n' && d == 'g') ||
+            (a == 'I' && b == 'n' && c == 'f' && d == 'o')) {
+            uint32_t flags = ((uint32_t)tagbuf[i+4] << 24) | ((uint32_t)tagbuf[i+5] << 16) |
+                             ((uint32_t)tagbuf[i+6] << 8)  |  (uint32_t)tagbuf[i+7];
+            if (!(flags & 1u) || !(flags & 2u)) return 0;   /* no FRAMES, or no BYTES */
+            return ((uint32_t)tagbuf[i+12] << 24) | ((uint32_t)tagbuf[i+13] << 16) |
+                   ((uint32_t)tagbuf[i+14] << 8)  |  (uint32_t)tagbuf[i+15];
+        }
+        if (a == 'V' && b == 'B' && c == 'R' && d == 'I')
+            return ((uint32_t)tagbuf[i+10] << 24) | ((uint32_t)tagbuf[i+11] << 16) |
+                   ((uint32_t)tagbuf[i+12] << 8)  |  (uint32_t)tagbuf[i+13];
+    }
+    return 0;
+}
+
 /* Reads the head of the file and skips any ID3 tag, leaving the ring and
  * file_pos positioned at real audio. Returns 0 on I/O failure.
  *
@@ -9684,8 +9716,38 @@ static int read_track_head(void)
     if (track_bytes && slot_size) {
         uint32_t real = audio_start + track_bytes;
         if (slot_size > real + real / 4u) {
-            size_suspect = 1;
-            slot_size    = real;      /* trust the audio, not the directory */
+            /* CORROBORATE before accusing the card -- the two sides of that
+             * comparison are not equally trustworthy. slot_size is a register
+             * read. track_bytes was parsed from ONE unvalidated read of the
+             * frame header, taken just after a slot switch, which is exactly
+             * where this core has a documented history of stale fragment-cache
+             * bytes. The ID3 block a few lines up already converges on two
+             * agreeing reads for that reason; this field had no such guard.
+             *
+             * And a bad read does not merely print a message: the line below
+             * also REPLACES slot_size, so a garbage BYTES field would take the
+             * total time, the progress bar, the seek bracket and end-of-track
+             * with it for the whole track.
+             *
+             * Paid only when the check is about to fire, so a healthy file
+             * costs nothing and the rare accusation costs one 2 KB read -- at
+             * load, with nothing streaming yet, near the sequential head.
+             *
+             * Disagreement means one of the two reads was wrong and there is
+             * no way to tell which, so neither is acted on: keep the
+             * directory figure and stay quiet. That degrades safely, because
+             * an inflated slot_size self-corrects at EOF (refill_pump records
+             * the true end when a read past it fails) whereas a wrongly
+             * trusted BYTES field never does.
+             *
+             * Seen once on hardware and never reproduced; the card measured
+             * clean afterwards on all 37 files carrying a BYTES field. No
+             * instrumentation added for one sighting -- if it recurs, that is
+             * the point to measure rather than guess again. */
+            if (vbr_bytes_again(skip) == track_bytes) {
+                size_suspect = 1;
+                slot_size    = real;  /* trust the audio, not the directory */
+            }
         }
     }
     /* Nothing to check on a file with no Xing/VBRI header -- it never states
