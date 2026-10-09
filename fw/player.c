@@ -619,6 +619,31 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
     return TS_1X;
 }
 
+/* The same ladder in NATIVE cells.
+ *
+ * fb_text_fit above walks the scale enum downward, which is only valid while a
+ * bigger index means bigger text -- and TS_24/TS_32 break that, which is why
+ * the comment on the enum keeps them out of it. But the native sizes are not a
+ * continuum, they are a SET of three, so walking the set explicitly costs
+ * nothing and keeps the ladder honest.
+ *
+ * Layout is unaffected by design: ts_half makes TS_32 measure exactly as TS_2X
+ * did and TS_24 exactly as TS_15X, so this picks the same step the scaled
+ * ladder would have -- the glyphs are simply rendered at that size instead of
+ * being enlarged to it. Measured on the one caller: "MP3 PLAYER" is 218 px
+ * scaled against 209 px native, both inside UI_INNER_W (360).
+ *
+ * Safe on a repertoire gap too: fb_resolve_s() falls back PER CHARACTER to the
+ * scaled glyph when a native one is missing, so the worst case is the old
+ * appearance for that character rather than a hole. */
+static uint32_t fb_text_fit_native(const char *s, uint32_t max_w)
+{
+    static const unsigned char ladder[3] = { TS_32, TS_24, TS_1X };
+    for (uint32_t k = 0; k < 3u; k++)
+        if (fb_text_width(s, ladder[k]) <= max_w) return ladder[k];
+    return TS_1X;
+}
+
 /* Declared here (rather than down with the rest of the playback state) so the
  * UI functions just below, which reference them, don't need forward decls --
  * C requires a declaration to be visible before first use. */
@@ -3586,7 +3611,11 @@ static void ui_splash_bg(void)
 
 static void ui_splash_title(uint32_t f, uint32_t den)
 {
-    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
+    /* The last scaled text in the core; everything else is already a native
+     * cell. 16 px bodies were always native, and the 24/32 px headings moved
+     * over with the font work -- this one kept the scaled ladder because the
+     * native sizes were not in it. */
+    uint32_t sc = fb_text_fit_native("MP3 PLAYER", UI_INNER_W);
     fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
 }
@@ -4234,7 +4263,10 @@ static void ui_failed_msg(const char *l1, const char *l2)
      * when something has gone wrong -- the moment they least need a hex dump.
      * Say what happened in words instead. */
     fb_set_color(UI_DIM, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u,
+    /* FB_CELL(TS_32), not FB_CELL(TS_2X): identical value -- ts_half is 4 for
+     * both -- but the heading above is drawn at TS_32, and an offset should
+     * name the cell it is clearing. */
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_32) + 14u,
                     l1, TS_1X, TS_1X, UI_INNER_W);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
                     l2, TS_1X, TS_1X, UI_INNER_W);
