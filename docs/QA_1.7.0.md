@@ -121,6 +121,27 @@ Measured before the change, against a 360 px budget: scaled 218 px, native
 
 ---
 
+## 4. The font page clamp (RTL) — CLEARED 2026-10-09
+
+**The user judges this fixed, and the evidence supports it.**
+
+`sim/tb_fontload.v` re-run against the shipping RTL reports **0 wrong, 0
+unwritten of 4096 words**, where before the clamp it miscompared 18 with the
+first at word 1024 exactly. The fix is structural rather than probabilistic --
+a burst cannot cross a page edge by construction -- so a clean sim is strong
+evidence rather than a lucky run.
+
+Alongside that, the rev 24 bitstream has been through roughly a dozen cold
+boots during this session: every firmware revision copied to the card is a
+core relaunch, and a relaunch reloads the font. No recurrence in any of them.
+
+Kept for the record because the signature is worth recognising again:
+corruption is baked in at LOAD, so a bad glyph is wrong for a whole session
+and right after a restart. If it ever returns, restarting is the test and
+`tb_fontload.v` is where to look first.
+
+The original plan follows.
+
 ## 4. The font page clamp (RTL) — the four-round bug
 
 The glyph corruption chased for four rounds ended at a font-load write burst

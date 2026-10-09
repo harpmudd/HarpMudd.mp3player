@@ -141,7 +141,12 @@ module tb_fontload;
             if (first_bad >= 0)
                 $display("  first wrong at word %0d (page column %0d): got %h want %h",
                          first_bad, first_bad % 1024, mem[first_bad], first_bad[15:0]);
-            $display(bad == 0 ? "FONT LOAD CLEAN" : "FONT LOAD CORRUPTS");
+            /* if/else, NOT $display(cond ? "A" : "B"). Verilog treats a string
+             * literal in a ternary as an integer, so that form printed the two
+             * names as one run of decimal digits -- the verdict line, the only
+             * line that matters, was the one line unreadable. */
+            if (bad == 0) $display("FONT LOAD CLEAN");
+            else          $display("FONT LOAD CORRUPTS");
         end
         $finish;
     end
