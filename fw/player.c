@@ -2024,6 +2024,23 @@ static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
  * fade == LRC_FADE is reserved for the ACTIVE line, so the warming line runs
  * 0..LRC_FADE-1 and only the real hand-off reaches full accent. */
 #define LRC_FADE 8u
+/* How long the warm-up lasts, in HUNDREDTHS. 30 = 0.3 s.
+ *
+ * Was 0.7 s, driven straight off the tenths clock at one step per tenth. Too
+ * slow, and it started so far ahead that it read as a second highlighted line
+ * rather than as the hand-off arriving.
+ *
+ * Shortening it on the tenths clock would have cost smoothness -- 0.3 s is
+ * three tenths, so three steps, ~30 luma each, which is a flicker not a fade.
+ * Step SIZE is set by the step COUNT, not by the window, so keeping 8 steps
+ * and compressing the window keeps the ramp exactly as smooth at less than
+ * half the duration. That needs the hundredths clock, which is the only
+ * reason it exists.
+ *
+ * The UI runs at ~38 fps on both decoders (see FL_UI_PERIOD), so 0.3 s is
+ * about 11 frames for 8 steps -- each step gets a frame or two. Going much
+ * shorter or much finer would ask for steps the display never draws. */
+#define LRC_FADE100 30u
 static uint8_t  lrc_fade_drawn;         /* fade step the next line was drawn at */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
@@ -2033,6 +2050,7 @@ static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
 static void     lrc_load(void);
 static void     lrc_clear(void);
 static uint32_t lrc_now10(void);
+static uint32_t lrc_now100(void);
 
 
 /* Visualisations, cycled with X. The choice persists via interact.json.
@@ -4962,8 +4980,19 @@ static void ui_draw_dynamic(void)
             uint32_t fade = 0;
             if (lrc_synced && lrc_n && cur + 1u < lrc_n) {
                 uint32_t nxt = lrc_sec[cur + 1u];
-                if (nxt != LRC_NOTIME && nxt > t10 && nxt - t10 <= LRC_FADE)
-                    fade = LRC_FADE - (nxt - t10);
+                if (nxt != LRC_NOTIME) {
+                    uint32_t n100 = (uint32_t)nxt * 10u;   /* tenths -> 1/100 */
+                    uint32_t t100 = lrc_now100();
+                    if (n100 > t100 && n100 - t100 <= LRC_FADE100) {
+                        uint32_t gone = LRC_FADE100 - (n100 - t100);
+                        fade = (gone * LRC_FADE) / LRC_FADE100;
+                        /* gone tops out at LRC_FADE100-1, so this cannot reach
+                         * LRC_FADE today. Clamped anyway: LRC_FADE means ACTIVE,
+                         * and a future tweak to either constant must not be able
+                         * to light the next line at full accent early. */
+                        if (fade >= LRC_FADE) fade = LRC_FADE - 1u;
+                    }
+                }
             }
 
             if (cur != lrc_drawn) {
