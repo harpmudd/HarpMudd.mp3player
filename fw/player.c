@@ -1206,6 +1206,25 @@ static uint16_t pl_pos;                  /* index INTO pl_order                 
 static uint8_t  pl_ui_open;        /* overlay is up                          */
 static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
 static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
+/* Contents fade up from the bare panel when the overlay opens, and back down
+ * when it is dismissed. 4 steps at 25 ms is 100 ms -- about one step per UI
+ * pass at the ~38 fps both decoders drive (see FL_UI_PERIOD).
+ *
+ * The PANEL itself snaps; only what is inside it fades. That is not a
+ * shortcut, it is the only thing the engine can express: its three ops are
+ * RUN, RECT and CHAR with no alpha, so there is no way to composite the panel
+ * against the player underneath. Everything INSIDE the panel is drawn over
+ * UI_PANEL, which IS a known colour, so mixing each of those toward UI_PANEL
+ * is a true fade rather than a trick -- the same reason the toast fade works.
+ *
+ * Affordable because a rect is one engine command: the cost of a repaint is
+ * the ~400 glyph commands for the rows, and holding a direction to scroll
+ * already pays that 16 times a second. */
+#define PL_FADE      4u
+#define PL_FADE_STEP (CLK_HZ / 40u)
+static uint8_t  pl_ui_fade;        /* 0 = bare panel, PL_FADE = fully drawn   */
+static uint8_t  pl_ui_closing;     /* fading out, then restore the player     */
+static uint32_t pl_ui_fade_at;     /* next step due; ARMED, never left at 0   */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
@@ -4471,13 +4490,37 @@ static void pl_ui_follow(void)
     if (pl_count <= PL_UI_ROWS) pl_ui_top = 0;
 }
 
+/* A colour on its way up from the bare panel. Returns it unchanged once the
+ * fade is done, so the steady state costs one compare. */
+static uint16_t pl_fade(uint16_t c)
+{
+    return (pl_ui_fade >= PL_FADE) ? c : ui_mix(UI_PANEL, c, pl_ui_fade, PL_FADE);
+}
+
 /* One row. Split out so the marquee can repaint just the selected line
  * without redrawing the whole list four times a second. */
+/* Start the fade OUT. The overlay stays open until it reaches 0, then the
+ * existing restore path repaints the player exactly as it always did -- the
+ * close is delayed, not reimplemented.
+ *
+ * Arm the deadline rather than leaving it at 0: a 0 here means "due 35.8 s
+ * ago or in a moment" depending on where the counter happens to be, and this
+ * project has already lost a day to four of those. */
+static void pl_ui_dismiss(void)
+{
+    pl_ui_closing = 1u;
+    pl_ui_fade_at = cycles() + PL_FADE_STEP;
+    pl_ui_dirty   = 1u;
+}
+
 static void pl_ui_row(uint32_t i)
 {
     uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
     uint16_t pos = (uint16_t)(pl_ui_top + i);
 
+    /* Every colour inside the panel goes through pl_fade(), so one value
+     * controls the whole overlay and no element can be left behind at full
+     * strength while the rest comes up. */
     if (pos >= pl_count) {                       /* short list: clear the row */
         fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
         return;
@@ -4492,7 +4535,7 @@ static void pl_ui_row(uint32_t i)
      * fb_round_rect_on() exists for. Unselected rows stay square -- they are
      * the panel colour, so there is no shape to see either way, and drawing
      * the corner cuts on every row would be work for nothing. */
-    uint16_t bg = (pos == pl_ui_sel) ? ui_accent : UI_PANEL;
+    uint16_t bg = (pos == pl_ui_sel) ? pl_fade(ui_accent) : UI_PANEL;
     if (pos == pl_ui_sel)
         fb_round_rect_on(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H,
                          5u, bg, UI_PANEL);
@@ -4513,8 +4556,8 @@ static void pl_ui_row(uint32_t i)
     }
 
     /* '>' rather than an arrow glyph: the font is ASCII 0x20..0x7E. */
-    fb_set_color(pos == pl_ui_sel ? UI_PANEL
-               : pos == pl_pos    ? UI_WHITE : UI_DIM, bg);
+    fb_set_color(pl_fade(pos == pl_ui_sel ? UI_PANEL
+                       : pos == pl_pos    ? UI_WHITE : UI_DIM), bg);
     if (pos == pl_pos)
         fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
     fb_text_boxed(PL_UI_TEXT_X + 8u, y, txt, TS_1X, TS_1X,
@@ -4544,7 +4587,7 @@ static void pl_ui_draw(void)
         q = ui_dec(q, pl_count);
     }
     *q = 0;
-    fb_set_color(ui_accent, UI_PANEL);
+    fb_set_color(pl_fade(ui_accent), UI_PANEL);
     fb_text_clipped(PL_UI_TEXT_X, PL_UI_Y + 10u, hdr, TS_1X, TS_1X, PL_UI_W - 20u);
 
     /* Scroll position, for lists too long to hold in your head. The header
@@ -4555,13 +4598,14 @@ static void pl_ui_draw(void)
         uint32_t track_x = PL_UI_X + PL_UI_W - 11u;
         uint32_t track_y = PL_UI_LIST_Y - 2u;
         uint32_t track_h = PL_UI_ROWS * PL_UI_ROW_H;
-        fb_rect(track_x, track_y, 3u, track_h, ui_mix(UI_PANEL, UI_DIM, 1u, 3u));
+        fb_rect(track_x, track_y, 3u, track_h,
+                pl_fade(ui_mix(UI_PANEL, UI_DIM, 1u, 3u)));
 
         uint32_t span = pl_count - PL_UI_ROWS;          /* max value of _top */
         uint32_t th   = track_h * PL_UI_ROWS / pl_count;
         if (th < 8u) th = 8u;                           /* stays grabbable   */
         uint32_t ty   = track_y + (track_h - th) * pl_ui_top / span;
-        fb_rect(track_x, ty, 3u, th, ui_accent);
+        fb_rect(track_x, ty, 3u, th, pl_fade(ui_accent));
     }
 
     for (uint32_t i = 0; i < PL_UI_ROWS; i++) pl_ui_row(i);
@@ -7293,8 +7337,15 @@ static void poll_input(void)
          * row you can always name, and hunting for it defeats the point. */
         if (edge & KEY_Y) { pl_ui_sel = pl_pos; pl_ui_follow(); pl_ui_dirty = 1u; }
 
-        if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u; pl_ui_restore = 1u; }
-        if (edge & KEY_B) { pl_ui_open = 0u; pl_ui_restore = 1u; }
+        /* A commits, so it closes INSTANTLY rather than fading. Two reasons,
+         * and the second is the real one: what you want to look at now is the
+         * player, and a track load is the most interleaved moment in this
+         * core -- load_track() repaints the card, and an overlay still open
+         * on top of that would be drawing over a load in progress for 100 ms
+         * to no purpose. Dismissing (B, SELECT) has nothing to race. */
+        if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u;
+                            pl_ui_closing = 0u; pl_ui_restore = 1u; }
+        if (edge & KEY_B) pl_ui_dismiss();
         edge &= KEY_SELECT;
         fall &= KEY_SELECT;
         keys &= KEY_SELECT;
@@ -7688,9 +7739,12 @@ static void poll_input(void)
      * Opening lands the cursor on what is playing, which is the row a user
      * wants nine times in ten. */
     if ((fall & KEY_SELECT) && !sel_used && !sel_held) {
-        if (pl_ui_open) { pl_ui_open = 0u; pl_ui_restore = 1u; }
+        if (pl_ui_open) pl_ui_dismiss();
         else if (pl_count) {
-            pl_ui_open = 1u;
+            pl_ui_open    = 1u;
+            pl_ui_fade    = 0;          /* bare panel; contents fade up */
+            pl_ui_closing = 0;
+            pl_ui_fade_at = cycles() + PL_FADE_STEP;
             pl_ui_sel  = pl_pos;
             pl_ui_follow();
             pl_ui_dirty = 1u;
@@ -11701,6 +11755,17 @@ int main(void)
          * overlay is up draws straight through it -- and the '>' marker has
          * moved anyway. Comparing against what was last drawn catches both,
          * and any other route that changes the position. */
+        /* Advance the open/close fade. One place, so every route that opens or
+         * dismisses the overlay animates without knowing it does. */
+        if (pl_ui_open && (int32_t)(cycles() - pl_ui_fade_at) >= 0) {
+            pl_ui_fade_at = cycles() + PL_FADE_STEP;
+            if (pl_ui_closing) {
+                if (pl_ui_fade) { pl_ui_fade--; pl_ui_dirty = 1u; }
+                else { pl_ui_open = 0u; pl_ui_closing = 0u; pl_ui_restore = 1u; }
+            } else if (pl_ui_fade < PL_FADE) {
+                pl_ui_fade++; pl_ui_dirty = 1u;
+            }
+        }
         if (pl_ui_open && pl_ui_drawn_pos != pl_pos) pl_ui_dirty = 1u;
         if (pl_ui_open && pl_ui_dirty) {
             pl_ui_dirty = 0;
