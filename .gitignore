@@ -111,3 +111,4 @@ fw/fw.sym
 tools/host/*_gen.c
 tools/host/*.elf
 tools/host/*.sym
+jpeg_bench.bin
