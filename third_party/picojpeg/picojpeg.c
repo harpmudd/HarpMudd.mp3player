@@ -226,6 +226,14 @@ static pjpeg_need_bytes_callback_t g_pNeedBytesCallback;
 static void *g_pCallback_data;
 static uint8 gCallbackStatus;
 static uint8 gReduce;
+/* HarpMudd: lookahead hit/miss counters, OFF unless the harness asks. Build
+ * with -DPJPG_STATS=1; tools/host/jpeg_bench.py --stats does. */
+#ifndef PJPG_STATS
+#define PJPG_STATS 0
+#endif
+#if PJPG_STATS
+unsigned long gStatFast, gStatSlow, gStatLen[18];
+#endif
 //------------------------------------------------------------------------------
 static void fillInBuf(void)
 {
@@ -413,6 +421,9 @@ static PJPG_INLINE uint8 huffDecode(const HuffTable* pHuffTable, const uint8* pH
       uint16 f = pHuffTable->mFast[(uint8)(gBitBuf >> 8)];
       if (f)
       {
+#if PJPG_STATS
+         gStatFast++; gStatLen[(uint8)(f >> 8)]++;
+#endif
          skipBits((uint8)(f >> 8));
          return (uint8)f;
       }
@@ -439,6 +450,9 @@ static PJPG_INLINE uint8 huffDecode(const HuffTable* pHuffTable, const uint8* pH
       code |= getBit();
    }
 
+#if PJPG_STATS
+   gStatSlow++; gStatLen[i + 1]++;
+#endif
    j = pHuffTable->mValPtr[i];
    j = (uint8)(j + (code - pHuffTable->mMinCode[i]));
 

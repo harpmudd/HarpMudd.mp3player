@@ -40,6 +40,7 @@ import struct
 import subprocess
 import sys
 
+STATS = [False]
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
 BASELINE = os.path.join(HERE, 'jpeg_bench_baseline.json')
@@ -151,6 +152,17 @@ int main(void)
     }
     uint32_t t1 = INSTR;
 
+#if PJPG_STATS
+    {
+        extern unsigned long gStatFast, gStatSlow, gStatLen[18];
+        unsigned int k;
+        hputs("STATS ");
+        hputu((unsigned)gStatFast); hputc(32);
+        hputu((unsigned)gStatSlow);
+        for (k = 1; k <= 16u; k++) { hputc(32); hputu((unsigned)gStatLen[k]); }
+        hnl();
+    }
+#endif
     hputu(t1 - t0);                  hputc(32);
     hputu(hsh);                      hputc(32);
     hputu((unsigned)info.m_width);   hputc(32);
@@ -174,8 +186,9 @@ def run(jpg, reduce_flag):
                        'xpack-riscv-none-elf-gcc-15.2.0-1', 'bin',
                        'riscv-none-elf-gcc.exe')
     elf = os.path.join(HERE, 'jpeg_bench.elf')
+    cflags = ['-DPJPG_STATS=1'] if STATS[0] else []
     r = subprocess.run([gcc, '-march=rv32im', '-mabi=ilp32', '-mno-relax',
-                        '-Os', '-ffreestanding', '-nostdlib', '-nostartfiles',
+                        '-Os', '-ffreestanding', '-nostdlib', '-nostartfiles'] + cflags + [
                         '-I', os.path.join(ROOT, 'third_party', 'picojpeg'),
                         '-I', HERE,
                         '-T', os.path.join(HERE, 'link.ld'), '-o', elf,
@@ -193,12 +206,20 @@ def run(jpg, reduce_flag):
     if out.returncode:
         print(out.stderr[:2000])
         raise SystemExit(2)
-    row = out.stdout.split()
+    stats = None
+    lines = [l for l in out.stdout.splitlines() if l.strip()]
+    if lines and lines[0].startswith('STATS'):
+        f = lines[0].split()
+        stats = dict(fast=int(f[1]), slow=int(f[2]),
+                     hist=[int(x) for x in f[3:19]])
+        lines = lines[1:]
+    out_stdout = lines[0] if lines else ''
+    row = out_stdout.split()
     if not row or row[0] == 'ERR':
         print('decode failed: %s' % ' '.join(row))
         raise SystemExit(1)
     return dict(instr=int(row[0]), hash=int(row[1]),
-                w=int(row[2]), h=int(row[3]), mcus=int(row[4]))
+                w=int(row[2]), h=int(row[3]), mcus=int(row[4]), stats=stats)
 
 
 def pillow_mae(jpg, r):
@@ -224,6 +245,7 @@ def main(argv):
     path = argv[0]
     save = '--save' in argv
     verify = '--verify' in argv
+    STATS[0] = '--stats' in argv
 
     jpg = load(path)
     if not jpg:
@@ -245,6 +267,18 @@ def main(argv):
              'reduce 1/8' if reduce_flag else 'FULL', res['mcus']))
     print('  instructions : %s' % format(res['instr'], ','))
     print('  output hash  : %08X' % res['hash'])
+    if res.get('stats'):
+        st = res['stats']
+        tot = st['fast'] + st['slow']
+        print('  lookahead    : %s hit, %s miss  (%.1f%% hit)'
+              % (format(st['fast'], ','), format(st['slow'], ','),
+                 100.0 * st['fast'] / tot if tot else 0))
+        print('  code lengths : ' + '  '.join(
+            '%d:%.1f%%' % (i + 1, 100.0 * n / tot)
+            for i, n in enumerate(st['hist']) if n and 100.0 * n / tot >= 0.5))
+        over = sum(st['hist'][8:])
+        print('  >8 bits      : %.1f%%   (what a wider table could reach)'
+              % (100.0 * over / tot if tot else 0))
 
     if verify:
         mae = pillow_mae(jpg, res)
