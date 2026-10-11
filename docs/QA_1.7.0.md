@@ -142,7 +142,7 @@ and right after a restart. If it ever returns, restarting is the test and
 
 The original plan follows.
 
-## 4. The font page clamp (RTL) — the four-round bug
+### What it was, and how to retest it
 
 The glyph corruption chased for four rounds ended at a font-load write burst
 crossing an SDRAM page edge. The fix is in the bitstream, not the firmware, so
