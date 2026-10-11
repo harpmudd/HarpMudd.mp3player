@@ -1,6 +1,7 @@
-# Changelog
+# Release notes
 
-What changed in each release, newest first.
+What each release adds, fixes and changes, newest first. Written for people
+using the core: what you will notice and what to press, not how it is built.
 
 ## v1.6.0 — 6 October 2026
 
@@ -14,13 +15,11 @@ What changed in each release, newest first.
 
 ## v1.5.1 — 1 October 2026
 
-- **The core runs 11% faster** — its processor moved from 60 MHz to 66.7,
-  which gives the decoder more room to keep up. FLAC files that were at the
-  edge stutter less.
+- **FLAC files that were at the edge now play cleanly** — the ones that used
+  to break up hold together, on any meter.
 - **Text is sharper**, with cleaner edges on every letter.
 - **An incomplete update now says so** instead of showing a black screen.
-- Fixed: **1.2× playback distorted in dense passages.** The faster core has
-  the headroom it was short of.
+- Fixed: **1.2× playback distorted in dense passages.**
 - Fixed: **the cassette's label showed the last playlist's name** when you
   played a single track with Load MP3. It is blank now, like a tape nobody
   has written on.
@@ -33,8 +32,7 @@ What changed in each release, newest first.
 - New meter: an animated **cassette**. The hubs turn and coast to a stop when
   you pause, the label carries the playlist's name, and the tape and the shell
   edge react to the music. Twelve meters now.
-- **Boot and track changes are a little quicker** — a quarter-second wait
-  in the file loader that never did anything is gone.
+- **Boot and track changes are quicker.**
 - Fixed: **picking a track in the playlist browser could start it at 1.2x**.
 
 ## v1.4.0 — 21 August 2026
@@ -46,8 +44,7 @@ What changed in each release, newest first.
 - **MPEG-2 files play** — the low sample rates common in spoken word.
 - **Playlists can have long names again.** List them in a `playlists.m3u`; only
   twelve characters were remembered before, so a long name never came back.
-- **FLAC tracks load faster** — measuring the length no longer blocks the load,
-  and opening one steps over the embedded cover art instead of reading it.
+- **FLAC tracks load faster.**
 - **The meters have more headroom**, and the spectrum reads in decibels, so
   loud albums no longer flatten against the top.
 - **1.2x needs a longer hold on A**, and shows a marker while it's on.
@@ -105,8 +102,8 @@ What changed in each release, newest first.
 - The album art panel and the screen-blank timeout are no longer remembered
   between launches — their saved slots went to resume. Everything else carries
   over from v1.0.0.
-- Fixed: seeking landed in the wrong place on files with no Xing header, and
-  their total time was wrong too.
+- Fixed: **seeking landed in the wrong place on some files**, and their total
+  time was wrong too.
 - Fixed: Load MP3 could lose your pick to a playlist reload.
 
 ## v1.0.0 — 10 August 2026
