@@ -67,7 +67,31 @@ _stack_size = 0x2400;    /* 9 KB -- see above; 8464 is the hard ceiling */
  * of MP3 demand -- an 18x margin. 24 KB is still ~0.6 s at 320 kbps, and
  * ~0.23 s at the 105 KB/s the CD-rip FLAC on the test card needs. Watch the
  * underrun flag if either ever looks marginal. */
-_ring_size  = 0x6000;    /* 24 KB -- ~0.6 s at 320 kbps */
+/* 16 KB, down from 24, which was itself down from 32 when the FLAC decoder
+ * needed the room. Same lever a third time, for the same reason: the ring
+ * sits above the image, so shrinking it hands the space straight to the
+ * firmware -- 8 KB here, taking headroom from 24,160 to 32,352.
+ *
+ * The ring exists ONLY to absorb SD stalls; nothing needs a whole frame
+ * resident. flac_pull() draws from it incrementally and max_framesize is
+ * never read anywhere, so there is no lower bound imposed by frame size, and
+ * every gate that reads RING_SIZE is a proportion of it (half for the idle
+ * slot and the cushion, three quarters for the resume check) rather than an
+ * absolute.
+ *
+ * What it costs is cover. Measured: the card does 736 KB/s against 105 KB/s
+ * for the CD-rip FLAC on the test card, a 7x margin.
+ *
+ *     320 kbps MP3   40 KB/s   0.41 s of cover
+ *     CD-rip FLAC   105 KB/s   0.16 s
+ *     1000 kbps     125 KB/s   0.13 s
+ *
+ * FALSIFIABLE, which is why it is worth trying rather than arguing about:
+ * und_edges counts underruns and is already on screen in a UI_SHOW_DIAG
+ * build. A soak that records zero has settled it; anything above zero puts
+ * this straight back to 0x6000. Watch a dense 24-bit FLAC, which has the
+ * least decode headroom and the highest byte rate at once. */
+_ring_size  = 0x4000;    /* 16 KB -- ~0.41 s at 320 kbps */
 /* 2 KB, down from 4. The only 4 KB consumer was io_bench(), which is behind
  * `#if IO_BENCH` and that is 0 -- so it is compiled out and was reserving
  * space for nothing. Every live read into this buffer is 512 bytes or less
