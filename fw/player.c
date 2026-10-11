@@ -1634,7 +1634,18 @@ static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
 /* Accent palette, cycled with the L/R shoulder triggers. Deriving the accent
  * from the cover art was tried and dropped -- it changed on every track and
  * read as inconsistency. A colour the USER picks is stable, which is the
- * difference. Chosen to sit well on the graphite background: nothing so dark
+ * difference.
+ *
+ * Revisited 2026-10-11 as a per-ALBUM accent, which answers that objection:
+ * an album's tracks share a cover, so it would not change within one. It
+ * fails for a SECOND reason the first attempt never reached.
+ * tools/album_accent_preview.py renders every cover on the card through the
+ * same ui_grad_set() maths, and about a third land outside the 88..209 luma
+ * band these twelve occupy: a monochrome disco-ball cover extracts to 0x2945,
+ * which IS UI_PANEL -- headings and the selected row would vanish into the
+ * card -- and a pale sleeve gives luma 241, competing with the white type.
+ * Clamping luma and forcing saturation would fix it, but then the cover is
+ * only supplying a hue, and greyscale art has none to supply. Chosen to sit well on the graphite background: nothing so dark
  * it disappears, nothing so pale it competes with the white type. RGB565. */
 static const uint16_t ui_palette[] = {
     0xFC65u,   /* amber   */
