@@ -1,3 +1,16 @@
+// LOCAL EDIT, 2026-10-05: ramstyle on the SMALL arrays set to MLAB.
+// NOTE the spelling: Quartus honours `ramstyle`, while the generator
+// emits `ram_style`, which is the Xilinx form and is silently IGNORED.
+// So the generator's "block" was never forcing anything -- Quartus was
+// simply choosing M10K on its own. Measured: with `ram_style` these four
+// arrays stayed in M10K; only the correct spelling moves them.
+// (original note) ram_style on the SMALL arrays changed
+// "block" -> "MLAB". The generator marks every memory as block RAM, which
+// forces a 10 Kbit M10K to hold a 1 Kbit register file (10% used) and a
+// 2.8 Kbit tag array (28%). Four blocks for 7.7 Kbit of state. The cache
+// DATA arrays are left alone -- 8192 bits each, genuinely block-sized.
+// Re-apply this if the netlist is ever regenerated.
+
 // Generator : SpinalHDL v1.9.4    git head : 270018552577f3bb8e5339ee2583c9c22d324215
 // Component : VexRiscv
 // Git hash  : 8542a5786b26857f3ef830ae9e72eec031df42d3
@@ -1372,7 +1385,7 @@ module VexRiscv (
   reg [39:0] memory_to_writeBack_ENV_CTRL_string;
   `endif
 
-  (* no_rw_check , ram_style = "block" *) reg [31:0] RegFilePlugin_regFile [0:31] /* verilator public */ ;
+  (* no_rw_check , ramstyle = "MLAB" *) reg [31:0] RegFilePlugin_regFile [0:31] /* verilator public */ ;
 
   assign _zz_when = ({decodeExceptionPort_valid,IBusCachedPlugin_decodeExceptionPort_valid} != 2'b00);
   assign _zz_memory_MUL_LOW = ($signed(_zz_memory_MUL_LOW_1) + $signed(_zz_memory_MUL_LOW_4));
@@ -5718,7 +5731,7 @@ module DataCache (
   reg                 loader_valid_regNext;
   wire                when_DataCache_l1129;
   wire                when_DataCache_l1132;
-  (* no_rw_check , ram_style = "block" *) reg [21:0] ways_0_tags [0:127];
+  (* no_rw_check , ramstyle = "MLAB" *) reg [21:0] ways_0_tags [0:127];
   (* no_rw_check , ram_style = "block" *) reg [7:0] ways_0_data_symbol0 [0:1023];
   (* no_rw_check , ram_style = "block" *) reg [7:0] ways_0_data_symbol1 [0:1023];
   (* no_rw_check , ram_style = "block" *) reg [7:0] ways_0_data_symbol2 [0:1023];
@@ -6465,7 +6478,7 @@ module InstructionCache (
   wire                when_InstructionCache_l459_2;
   reg                 decodeStage_hit_error;
   (* no_rw_check , ram_style = "block" *) reg [31:0] banks_0 [0:1023];
-  (* no_rw_check , ram_style = "block" *) reg [21:0] ways_0_tags [0:127];
+  (* no_rw_check , ramstyle = "MLAB" *) reg [21:0] ways_0_tags [0:127];
 
   assign _zz_ways_0_tags_port = {lineLoader_write_tag_0_payload_data_address,{lineLoader_write_tag_0_payload_data_error,lineLoader_write_tag_0_payload_data_valid}};
   always @(posedge clk) begin

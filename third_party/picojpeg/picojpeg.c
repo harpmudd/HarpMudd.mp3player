@@ -158,6 +158,12 @@ typedef struct HuffTableT
    uint16 mMinCode[16];
    uint16 mMaxCode[16];
    uint8 mValPtr[16];
+   /* HarpMudd: 8-bit lookahead. Index by the next 8 bits of the stream, get
+    * (length << 8) | symbol for any code of 8 bits or fewer, or 0 meaning
+    * "longer than 8 -- use the bit-at-a-time walk below". A valid entry is
+    * always >= 0x100 because length >= 1, so symbol 0 (AC EOB) is not
+    * confused with "no entry". 512 bytes a table, 2 KB over the four. */
+   uint16 mFast[256];
 } HuffTable;
 
 // DC - 192
@@ -220,6 +226,14 @@ static pjpeg_need_bytes_callback_t g_pNeedBytesCallback;
 static void *g_pCallback_data;
 static uint8 gCallbackStatus;
 static uint8 gReduce;
+/* HarpMudd: lookahead hit/miss counters, OFF unless the harness asks. Build
+ * with -DPJPG_STATS=1; tools/host/jpeg_bench.py --stats does. */
+#ifndef PJPG_STATS
+#define PJPG_STATS 0
+#endif
+#if PJPG_STATS
+unsigned long gStatFast, gStatSlow, gStatLen[18];
+#endif
 //------------------------------------------------------------------------------
 static void fillInBuf(void)
 {
@@ -345,52 +359,47 @@ static PJPG_INLINE uint8 getBit(void)
    return ret;
 }
 //------------------------------------------------------------------------------
-static uint16 getExtendTest(uint8 i)
+/* HarpMudd: consume n bits (n <= 8) with the SAME refill rule getBit uses.
+ *
+ * gBitBuf is MSB-aligned at bit 15 and holds 8 + gBitsLeft valid bits, so a
+ * peek of 8 never needs a refill. Consuming can cross the boundary, and the
+ * refill ORs an octet into bits 7..0 -- which is only safe when those bits are
+ * empty, i.e. exactly when gBitsLeft reaches 0. So the crossing case is split
+ * in two rather than shifted in one go. Two shifts instead of n iterations,
+ * and bit-for-bit the behaviour of calling getBit() n times. */
+static PJPG_INLINE void skipBits(uint8 n)
 {
-   switch (i)
+   if (n > gBitsLeft)
    {
-      case 0: return 0;
-      case 1: return 0x0001;
-      case 2: return 0x0002;
-      case 3: return 0x0004;
-      case 4: return 0x0008;
-      case 5: return 0x0010; 
-      case 6: return 0x0020;
-      case 7: return 0x0040;
-      case 8:  return 0x0080;
-      case 9:  return 0x0100;
-      case 10: return 0x0200;
-      case 11: return 0x0400;
-      case 12: return 0x0800;
-      case 13: return 0x1000;
-      case 14: return 0x2000; 
-      case 15: return 0x4000;
-      default: return 0;
-   }      
+      uint8 first = gBitsLeft;
+      gBitBuf <<= first;
+      n = (uint8)(n - first);
+      gBitBuf |= getOctet(1);
+      gBitsLeft = 8;
+   }
+   gBitsLeft = (uint8)(gBitsLeft - n);
+   gBitBuf <<= n;
 }
 //------------------------------------------------------------------------------
-static int16 getExtendOffset(uint8 i)
-{ 
-   switch (i)
-   {
-      case 0: return 0;
-      case 1: return ((-1)<<1) + 1; 
-      case 2: return ((-1)<<2) + 1; 
-      case 3: return ((-1)<<3) + 1; 
-      case 4: return ((-1)<<4) + 1; 
-      case 5: return ((-1)<<5) + 1; 
-      case 6: return ((-1)<<6) + 1; 
-      case 7: return ((-1)<<7) + 1; 
-      case 8: return ((-1)<<8) + 1; 
-      case 9: return ((-1)<<9) + 1;
-      case 10: return ((-1)<<10) + 1; 
-      case 11: return ((-1)<<11) + 1; 
-      case 12: return ((-1)<<12) + 1; 
-      case 13: return ((-1)<<13) + 1; 
-      case 14: return ((-1)<<14) + 1; 
-      case 15: return ((-1)<<15) + 1;
-      default: return 0;
-   }
+/* HarpMudd: was a 16-case switch, called once per non-zero coefficient.
+ * The values are just 1 << (i-1), so a table costs one load where the switch
+ * cost a jump table and an indirect branch. Same values, same out-of-range
+ * behaviour (0). */
+static const uint16 gExtendTest[16] = {
+   0x0000, 0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040,
+   0x0080, 0x0100, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000, 0x4000 };
+static PJPG_INLINE uint16 getExtendTest(uint8 i)
+{
+   return (i < 16) ? gExtendTest[i] : 0;
+}
+//------------------------------------------------------------------------------
+/* HarpMudd: as above. ((-1) << i) + 1, tabulated. */
+static const int16 gExtendOffset[16] = {
+   0, -1, -3, -7, -15, -31, -63, -127,
+   -255, -511, -1023, -2047, -4095, -8191, -16383, -32767 };
+static PJPG_INLINE int16 getExtendOffset(uint8 i)
+{
+   return (i < 16) ? gExtendOffset[i] : 0;
 };
 //------------------------------------------------------------------------------
 static PJPG_INLINE int16 huffExtend(uint16 x, uint8 s)
@@ -402,7 +411,25 @@ static PJPG_INLINE uint8 huffDecode(const HuffTable* pHuffTable, const uint8* pH
 {
    uint8 i = 0;
    uint8 j;
-   uint16 code = getBit();
+   uint16 code;
+
+   /* HarpMudd: resolve codes of 8 bits or fewer in one lookup. Measured at
+    * 422 instructions per entropy byte before this, against 20-40 for a
+    * table-driven decoder; the comment below explains why the original is
+    * written the slow way, and its reasoning does not hold on RV32IM. */
+   {
+      uint16 f = pHuffTable->mFast[(uint8)(gBitBuf >> 8)];
+      if (f)
+      {
+#if PJPG_STATS
+         gStatFast++; gStatLen[(uint8)(f >> 8)]++;
+#endif
+         skipBits((uint8)(f >> 8));
+         return (uint8)f;
+      }
+   }
+
+   code = getBit();
 
    // This func only reads a bit at a time, which on modern CPU's is not terribly efficient.
    // But on microcontrollers without strong integer shifting support this seems like a 
@@ -423,6 +450,9 @@ static PJPG_INLINE uint8 huffDecode(const HuffTable* pHuffTable, const uint8* pH
       code |= getBit();
    }
 
+#if PJPG_STATS
+   gStatSlow++; gStatLen[i + 1]++;
+#endif
    j = pHuffTable->mValPtr[i];
    j = (uint8)(j + (code - pHuffTable->mMinCode[i]));
 
@@ -462,6 +492,35 @@ static void huffCreate(const uint8* pBits, HuffTable* pHuffTable)
       i++;
       if (i > 15)
          break;
+   }
+}
+//------------------------------------------------------------------------------
+/* HarpMudd: fill mFast from the canonical tables huffCreate just built. */
+static void huffFast(HuffTable* pHuffTable, const uint8* pHuffVal)
+{
+   uint16 i;
+   for (i = 0; i < 256; i++)
+      pHuffTable->mFast[i] = 0;
+
+   for (i = 0; i < 8; i++)            /* code lengths 1..8 only */
+   {
+      uint16 mn = pHuffTable->mMinCode[i];
+      uint16 mx = pHuffTable->mMaxCode[i];
+      uint16 k;
+      if (mx == 0xFFFF)               /* no codes of this length */
+         continue;
+      for (k = mn; k <= mx; k++)
+      {
+         uint8  len = (uint8)(i + 1);
+         uint8  sym = pHuffVal[pHuffTable->mValPtr[i] + (k - mn)];
+         uint16 pre = (uint16)(k << (8 - len));
+         uint16 n   = (uint16)(1u << (8 - len));
+         uint16 t;
+         /* Every 8-bit prefix beginning with this code maps to it. */
+         for (t = 0; t < n; t++)
+            pHuffTable->mFast[(uint8)(pre + t)] = (uint16)((len << 8) | sym);
+         if (mx == 0xFFFF) break;
+      }
    }
 }
 //------------------------------------------------------------------------------
@@ -549,6 +608,7 @@ static uint8 readDHTMarker(void)
       left = (uint16)(left - totalRead);
 
       huffCreate(bits, pHuffTable);
+      huffFast(pHuffTable, pHuffVal);   /* HarpMudd */
    }
       
    return 0;

@@ -16,6 +16,7 @@ TC="$ROOT/toolchain/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
 GCC="$TC/riscv-none-elf-gcc.exe"
 OBJCOPY="$TC/riscv-none-elf-objcopy.exe"
 SIZE="$TC/riscv-none-elf-size.exe"
+NM="$TC/riscv-none-elf-nm.exe"
 FW="$ROOT/fw"
 HELIX="$ROOT/third_party/libhelix-mp3"
 OUT="$ROOT/dist/Assets/mp3player/common"
@@ -26,7 +27,24 @@ mkdir -p "$OUT"
 # relaxation would emit stores through an uninitialised gp.
 # EXTRA_CFLAGS lets a build turn on things that are off by default without
 # editing source, e.g.:  EXTRA_CFLAGS=-DDEBUG_DIAG=1 bash fw/build.sh
-CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax -O2 -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Wl,--gc-sections ${EXTRA_CFLAGS:-}"
+# -Os, not -O2. This is not a preference, it is the only level that LINKS:
+# 1.7.0's native 24/32 px font cells and the lyrics engine pushed the image
+# 1488 bytes past the DMA-buffer ceiling at -O2, so link.ld's ASSERT fires and
+# no .rom is written. -Os comes in at 142240 B with 4184 B of heap slack.
+#
+# Written down here because it cost a session to re-derive: every 1.7.0
+# firmware tested on hardware was built with -Os passed by hand through
+# EXTRA_CFLAGS, while the DEFAULT build in this script could not link at all.
+# The recipe lived nowhere. A default that does not build is worse than a
+# slow one.
+#
+# The per-file -Os overrides for flac.c and picojpeg.c below are redundant
+# now, and are kept so this line can go back to -O2 without re-deriving them:
+#
+#   OPT=-O2 bash fw/build.sh     # expect the collision ASSERT until the
+#                                # image sheds ~1.5 KB
+OPT="${OPT:--Os}"
+CFLAGS="-march=rv32im -mabi=ilp32 -mno-relax $OPT -ffreestanding -nostartfiles -ffunction-sections -fdata-sections -Wl,--gc-sections ${EXTRA_CFLAGS:-}"
 ROM="mp3player.rom"
 
 case "$TARGET" in
@@ -84,6 +102,7 @@ if ! "$GCC" $CFLAGS $INC -T "$FW/link.ld" -o "$FW/fw.elf" $SRCS -lm \
         > "$FW/build.log" 2>&1; then
     grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
     echo "*** COMPILE FAILED -- no .rom written ***" >&2
+    echo "    dist/ still holds the PREVIOUS $ROM -- do not ship it" >&2
     exit 1
 fi
 grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
@@ -91,12 +110,43 @@ grep -v "LOAD segment with RWX" "$FW/build.log" >&2 || true
 "$SIZE" "$FW/fw.elf"
 "$OBJCOPY" -O binary "$FW/fw.elf" "$OUT/$ROM"
 
+# Report the memory map from the LINKER's own symbols rather than a
+# hardcoded ceiling. The old check compared the ROM image against
+# 192K-16K: both numbers were stale (RAM is 256 KB and the stack is 9 KB,
+# not 16), and it ignored .bss entirely -- so it measured something that
+# was not the constraint, as a percentage of a size that does not exist.
+#
+# The real constraint is the HEAP: Helix mallocs a ~23.8 KB decoder
+# instance out of it, so heap-minus-Helix is the slack that actually runs
+# out. The hard gate stays where it belongs, in player.ld's ASSERT.
+"$NM" "$FW/fw.elf" > "$FW/fw.sym"
 python -c "
 import os
-n = os.path.getsize(r'$OUT/$ROM')
-lim = 192*1024 - 16*1024        # RAM minus stack reserve
-print('$ROM: %d bytes (%.1f%% of usable RAM)' % (n, 100.0*n/lim))
-assert n < lim, 'firmware image exceeds usable RAM'
+sym = {}
+for line in open(r'$FW/fw.sym'):
+    f = line.split()
+    if len(f) == 3: sym[f[2]] = int(f[0], 16)
+n     = os.path.getsize(r'$OUT/$ROM')
+img   = sym['__bss_end']
+heap  = sym['_heap_end'] - sym['_heap_start']
+ram   = sym['_stack_top']
+tail  = ram - sym['_tag_start']
+# The old line subtracted Helix's 23816 bytes from the heap. That was right
+# when Helix malloc'd from the linker heap; it has not been since fw/alloc.c
+# took malloc over and started serving it from a STATIC arena -- which lives
+# in .bss, and is therefore already counted in `img` and already deducted from
+# the heap by the linker. Subtracting it again double-counts, and the report
+# cried WARNING with 27 KB actually free.
+#
+# What the ASSERT in link.ld tests is _heap_start < _tag_start, so the gap
+# between them IS the headroom, in full. The guard that matters for the
+# decoder is ARENA_BYTES in alloc.c, which is exact and enforced there.
+print('$ROM: %d B image, %d B resident (%.1f%% of %d KB)'
+      % (n, img, 100.0*img/ram, ram//1024))
+print('  headroom %d B before the link fails (arena is inside .bss)' % heap)
+print('  reserved tail %d B (tag + ring + stack)' % tail)
+if heap < 4096:
+    print('  WARNING: under 4 KB of headroom left')
 "
 # The splash version and the version the Pocket shows in its core list live in
 # two different files, and they drifted: v1.3.0 was built, tested and pushed to
@@ -141,4 +191,4 @@ fi
 
 echo "version $APP_VER (core.json date_release $JSON_DATE)"
 
-echo "built [$TARGET] -> $OUT/$ROM"
+echo "built [$TARGET] $OPT ${EXTRA_CFLAGS:-} -> $OUT/$ROM"

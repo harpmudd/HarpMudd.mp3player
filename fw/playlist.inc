@@ -60,6 +60,18 @@ static inline void dt_write(uint32_t word, uint32_t val)
  * skip loop in pl_play_dir() needs to tell them apart -- retrying 128 entries
  * that each take 3 s to not answer is six minutes of frozen core. */
 static uint8_t pl_cmd_timedout;
+/* The response code pl_cmd() ACTUALLY SAW, captured at the moment it
+ * decided. pl_open_try() used to re-read R_TGT_GO afterwards, which is a
+ * second read of a register that has already moved on -- so the code it
+ * reported was not the one that caused the failure.
+ *
+ * That was not only cosmetic. PLF_DEAD is gated on errcode == 4, so a
+ * genuinely missing file never got condemned: it came back as a stale 0,
+ * classified PLF_SKIP, and the walk retried it on every pick instead of
+ * marking it dead once. Caught because a deleted file reported
+ * "UNREADABLE, 0192 ERR 0" -- zero being the code for SUCCESS, which a
+ * failure path can never legitimately report. */
+static uint8_t pl_cmd_code;
 
 /* Run one target command and wait for the sequence counter to move. Same
  * discipline as target_read_poll(): never trust the `done` LEVEL, which stays
@@ -67,7 +79,7 @@ static uint8_t pl_cmd_timedout;
 static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
 {
     refill_drain();                       /* one command in flight, ever */
-    pl_cmd_timedout = 0;
+    pl_cmd_timedout = 0; pl_cmd_code = 0;
     uint32_t seq0 = (REG(R_TGT_GO) >> 8) & 0xFFu;
     REG(R_TGT_ID) = slot;
     REG(R_TGT_GO) = sel;
@@ -75,7 +87,10 @@ static int pl_cmd(uint32_t sel, uint32_t slot, uint32_t timeout_cycles)
     uint32_t deadline = cycles() + timeout_cycles;
     for (;;) {
         uint32_t st = REG(R_TGT_GO);
-        if (((st >> 8) & 0xFFu) != seq0) return (((st >> 2) & 7u) == 0u);
+        if (((st >> 8) & 0xFFu) != seq0) {
+            pl_cmd_code = (uint8_t)((st >> 2) & 7u);
+            return (pl_cmd_code == 0u);
+        }
         if ((int32_t)(cycles() - deadline) >= 0) { pl_cmd_timedout = 1; return 0; }
     }
 }
@@ -207,7 +222,7 @@ static int pl_open_try(uint32_t slot, const char *name, uint32_t tmpl_slot)
     if (!pl_cmd(TGT_OPENFILE, slot, CLK_HZ * 3u)) {
         pl_open_err     = PLO_OPEN;
         pl_open_timeout = pl_cmd_timedout;
-        pl_open_errcode = (uint8_t)((REG(R_TGT_GO) >> 2) & 7u);
+        pl_open_errcode = pl_cmd_code;   /* what pl_cmd saw, not a re-read */
         return 0;
     }
     return 1;
@@ -472,6 +487,37 @@ static uint32_t pl_read_raw(void)
     return got;
 }
 
+/* The duration out of an extended-m3u "#EXTINF:<seconds>,<title>" line, or 0
+ * when the line is not one or does not carry a usable number.
+ *
+ * Seconds may be fractional ("367.5") and the format also allows -1 for
+ * "unknown". Taking digits up to the first non-digit handles the first and
+ * rejects the second for free: "-1" has no leading digit, so n stays 0.
+ *
+ * Worth having because of what it costs the files that need it. A headerless
+ * MP3 has no declared duration, so size_probe_pump() goes looking for the file
+ * size with far reads on the slot the decoder is streaming from -- 8.2 s into
+ * a 256 kbps track, and heard as a stutter when the fragment cache drops. One
+ * number in the playlist retires that whole search. */
+static uint16_t pl_extinf(uint32_t a, uint32_t b)
+{
+    static const char K[] = "#EXTINF:";
+    uint32_t i = 0;
+    while (K[i]) {
+        if (a + i >= b || plt_get(a + i) != K[i]) return 0u;
+        i++;
+    }
+    uint32_t p = a + i, v = 0, n = 0;
+    while (p < b) {
+        char c = plt_get(p);
+        if (c < '0' || c > '9') break;
+        v = v * 10u + (uint32_t)(c - '0');
+        if (v > 65000u) return 0u;          /* nonsense; treat as absent */
+        n++; p++;
+    }
+    return n ? (uint16_t)v : 0u;
+}
+
 /* Split the .m3u into names. Blank lines and #-comments are skipped, which
  * covers the extended format's #EXTM3U / #EXTINF lines, so both plain and
  * extended .m3u work with no separate parser. */
@@ -479,6 +525,7 @@ static void pl_parse(uint32_t len)
 {
     pl_count = 0;
     uint32_t i = 0;
+    uint16_t pend = 0;           /* EXTINF seen, awaiting its entry */
     /* A UTF-8 byte order mark, which Windows editors put at the front of a
      * saved .m3u. Left in place it rides on the FIRST entry's name -- drawn as
      * a stray glyph, and handed to APF as a filename that does not exist. */
@@ -508,8 +555,18 @@ static void pl_parse(uint32_t len)
             end--;
         plt_set(end, 0);
 
-        if (end > start && plt_get(start) != '#')
+        /* An EXTINF line describes the entry that FOLLOWS it, so the figure is
+         * held until that entry arrives rather than attached to the comment.
+         * Still skipped as a comment for every other purpose, so a plain .m3u
+         * and one with a stray comment between the two lines both behave. */
+        if (end > start && plt_get(start) != '#') {
+            pl_secs[pl_count] = pend;
             pl_off[pl_count++] = (uint16_t)start;
+            pend = 0;
+        } else if (end > start) {
+            uint16_t v = pl_extinf(start, end);
+            if (v) pend = v;
+        }
     }
 
     /* Ran out of index before running out of file. */
@@ -655,6 +712,7 @@ static int pl_play_span(uint16_t pos, int dir, uint16_t span)
         } else {
             pl_pos = at;
             track_from_pl = 1u;      /* the playlist started this track */
+            pl_hint_secs  = pl_secs[file_idx];
             if (pl_open_name(plt_name_at(pl_off[file_idx]))) {
                 pl_arm_load(leaving_id);
                 /* ONE line about the whole walk, not one per bad entry: a list
@@ -662,8 +720,15 @@ static int pl_play_span(uint16_t pos, int dir, uint16_t span)
                  * can be read. (A "2 of 14" figure would need every entry
                  * probed at load time, and probing costs a cluster walk each --
                  * so this counts what this attempt actually walked past.) */
+                /* "UNREADABLE" on its own says nothing actionable, and
+                 * it cost a diagnosis: a Japanese-named track reported it
+                 * and the code was the only thing that could have
+                 * distinguished a name APF cannot match from a transient
+                 * busy answer. PLF_SKIP means APF ANSWERED and the code
+                 * was not 4, so there is always a code worth showing. */
                 if (nmiss)      ui_toast_set("SKIPPED", nmiss, " MISSING");
-                else if (nfail) ui_toast_set("SKIPPED", nfail, " UNREADABLE");
+                else if (nfail) ui_toast_set("UNREADABLE, 0192 ERR",
+                                             pl_open_errcode, 0);
                 return 1;
             }
 

@@ -227,12 +227,12 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503317u   /* rev 23: PSRAM window               */
+#define EXPECT_VERSION 0x4D503318u   /* rev 24: native 24/32px font cells  */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.6.0"
+#define APP_VER "1.7.0"
 /* Dev builds say so ON SCREEN. The default is DEV, and a release has to
  * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
  * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
@@ -275,8 +275,19 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Type scale. The engine scales fractionally (Bresenham), so there is a real
  * step between 16 and 32 px -- integer-only scaling forced a doubling, which
  * is far too coarse for setting a title against an artist line. */
-enum { TS_1X = 0, TS_15X = 1, TS_2X = 2, TS_3X = 3 };
-static const unsigned char ts_half[4] = { 2, 3, 4, 6 };   /* size = 16*n/2 */
+/* TS_24 and TS_32 are NATIVE cells: the glyph is rendered at that size in
+ * the font file rather than enlarged from the 16px one, so the engine draws
+ * them at 1:1 and no scaler touches them. Their ts_half deliberately matches
+ * the scale they replace -- TS_24 measures exactly like TS_15X and TS_32
+ * exactly like TS_2X -- so every FB_CELL, cell-width and layout calculation
+ * keeps working unchanged and a caller can simply switch size.
+ *
+ * They are NOT part of the fb_text_fit ladder: that walks scales downward
+ * assuming bigger index means bigger text, which stops being true here. */
+enum { TS_1X = 0, TS_15X = 1, TS_2X = 2, TS_3X = 3, TS_24 = 4, TS_32 = 5 };
+static const unsigned char ts_half[6] = { 2, 3, 4, 6, 3, 4 }; /* size = 16*n/2 */
+#define TS_IS_NATIVE(s)  ((s) >= TS_24)
+#define TS_FALLBACK(s)   ((s) == TS_32 ? TS_2X : TS_15X)
 
 #define FB_CELL(s)  ((FONT_CELL_H * ts_half[s]) / 2u)   /* 16 / 24 / 32 / 48 */
 
@@ -319,6 +330,59 @@ static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
     return '?';
 }
 
+/* As fb_resolve, for a NATIVE cell. Returns 0 if this code point has no glyph
+ * at that size -- 163 of them have no Inter outline and fall back to Unifont
+ * at 16px, which there is no larger version of. The caller then draws the
+ * WHOLE string a size down: mixing two cell sizes on one line looks worse
+ * than the scaling these cells exist to remove. */
+static uint32_t fb_resolve_native(uint32_t cp, uint32_t sx, uint32_t *adv)
+{
+    if (!fext_ok) return 0;
+    uint32_t nr = (sx == TS_32) ? FEXT32_NRANGES : FEXT24_NRANGES;
+    for (uint32_t r = 0; r < nr; r++) {
+        uint32_t first = (sx == TS_32) ? fext32_ranges[r].first
+                                       : fext24_ranges[r].first;
+        uint32_t cnt   = (sx == TS_32) ? fext32_ranges[r].count
+                                       : fext24_ranges[r].count;
+        uint32_t d = cp - first;
+        if (d >= cnt) continue;
+        uint32_t base = (sx == TS_32) ? fext32_ranges[r].base
+                                      : fext24_ranges[r].base;
+        uint32_t n = base + d;
+        uint32_t g = n & 0x3FFu;            /* glyph number within the region */
+        uint32_t a = (sx == TS_32) ? fext32_adv[g] : fext24_adv[g];
+        if (!a) return 0;
+        *adv = a;
+        return n | FB_EXT;
+    }
+    return 0;
+}
+
+/* The one resolve every draw and measure path goes through, so a native cell
+ * and its fallback can never disagree about which glyph or how wide. */
+static uint32_t fb_resolve_s(uint32_t cp, uint32_t sx, uint32_t *adv)
+{
+    if (TS_IS_NATIVE(sx)) {
+        uint32_t g = fb_resolve_native(cp, sx, adv);
+        if (g) return g;                    /* advance is already final */
+        sx = TS_FALLBACK(sx);               /* same cell size, scaled glyph */
+    }
+    uint32_t g = fb_resolve(cp, adv);
+    *adv = (*adv * ts_half[sx]) / 2u;
+    return g;
+}
+
+/* TS_24 / TS_32 only if EVERY code point has a glyph at that size, else the
+ * scale it replaces. Checked over the whole string up front, because the
+ * fallback has to apply to all of it or not at all. */
+static uint32_t fb_native_scale(const char *s, uint32_t sx)
+{
+    uint32_t a;
+    while (*s)
+        if (!fb_resolve_native(u8_next(&s), sx, &a)) return TS_FALLBACK(sx);
+    return sx;
+}
+
 /* Proportional advance. The engine paints the full 16-px cell, and glyphs are
  * left-aligned within it, so stepping by the ink width overwrites only the
  * previous glyph's blank padding -- proportional spacing without needing a
@@ -326,8 +390,8 @@ static uint32_t fb_resolve(uint32_t cp, uint32_t *adv)
 static uint32_t fb_adv(uint32_t cp, uint32_t sx)
 {
     uint32_t a;
-    fb_resolve(cp, &a);
-    return (a * ts_half[sx]) / 2u;
+    fb_resolve_s(cp, sx, &a);
+    return a;
 }
 
 /* Shadow of the engine's colour register. The parameter registers persist
@@ -442,6 +506,11 @@ static void fb_glyph_draw(uint32_t x, uint32_t y, uint32_t g, uint32_t sx, uint3
     fb_wait();
     REG(R_FB_ADDR) = y * FB_STRIDE + x;
     if (g & FB_EXT) {
+        /* A native glyph is already the size it will be drawn at, so it goes
+         * to the engine at 1:1. Sending a scale would put the scaler back in
+         * the path the native cell exists to remove -- and the engine ignores
+         * the fields in that case anyway, so this keeps the two in step. */
+        if (g & FEXT_NATIVE) sx = sy = TS_1X;
         REG(R_FB_SIZE) = ((g & 0x1FFu) << 9) | ((g >> 9) & 0x1FFu);
         g = FEXT_GLYPH;
     }
@@ -511,8 +580,7 @@ static uint32_t fb_text_boxed(uint32_t x, uint32_t y, const char *s,
     uint32_t limit = x + max_w;
     if (paint_r > FB_W) paint_r = FB_W;
     while (*s) {
-        uint32_t a, g = fb_resolve(u8_next(&s), &a);
-        a = (a * ts_half[sx]) / 2u;
+        uint32_t a, g = fb_resolve_s(u8_next(&s), sx, &a);
         if (x + a > limit)   break;        /* out of layout budget */
         if (x + cell > paint_r) break;     /* would paint past the box */
         fb_glyph_draw(x, y, g, sx, sy);
@@ -533,8 +601,7 @@ static uint32_t fb_text_clipped(uint32_t x, uint32_t y, const char *s,
     uint32_t cell  = (FONT_CELL_W * ts_half[sx]) / 2u;
     uint32_t limit = x + max_w;
     while (*s) {
-        uint32_t a, g = fb_resolve(u8_next(&s), &a);
-        a = (a * ts_half[sx]) / 2u;
+        uint32_t a, g = fb_resolve_s(u8_next(&s), sx, &a);
         if (x + a > limit) break;          /* out of layout budget */
         if (x + cell > FB_W) break;        /* would paint off-screen */
         fb_glyph_draw(x, y, g, sx, sy);
@@ -549,6 +616,31 @@ static uint32_t fb_text_fit(const char *s, uint32_t max_w, uint32_t max_scale)
 {
     for (uint32_t k = max_scale; k > 0u; k--)
         if (fb_text_width(s, k) <= max_w) return k;
+    return TS_1X;
+}
+
+/* The same ladder in NATIVE cells.
+ *
+ * fb_text_fit above walks the scale enum downward, which is only valid while a
+ * bigger index means bigger text -- and TS_24/TS_32 break that, which is why
+ * the comment on the enum keeps them out of it. But the native sizes are not a
+ * continuum, they are a SET of three, so walking the set explicitly costs
+ * nothing and keeps the ladder honest.
+ *
+ * Layout is unaffected by design: ts_half makes TS_32 measure exactly as TS_2X
+ * did and TS_24 exactly as TS_15X, so this picks the same step the scaled
+ * ladder would have -- the glyphs are simply rendered at that size instead of
+ * being enlarged to it. Measured on the one caller: "MP3 PLAYER" is 218 px
+ * scaled against 209 px native, both inside UI_INNER_W (360).
+ *
+ * Safe on a repertoire gap too: fb_resolve_s() falls back PER CHARACTER to the
+ * scaled glyph when a native one is missing, so the worst case is the old
+ * appearance for that character rather than a hole. */
+static uint32_t fb_text_fit_native(const char *s, uint32_t max_w)
+{
+    static const unsigned char ladder[3] = { TS_32, TS_24, TS_1X };
+    for (uint32_t k = 0; k < 3u; k++)
+        if (fb_text_width(s, ladder[k]) <= max_w) return ladder[k];
     return TS_1X;
 }
 
@@ -616,6 +708,17 @@ static void pcm_rate_apply(uint32_t hz)
     REG(R_PCM_RATE) = (uint32_t)inc;
 }
 static uint32_t track_bytes;      /* audio length the FILE declares (Xing/VBRI) */
+/* Xing seek table: 100 entries, entry k being the byte offset at k% of the
+ * DURATION, as a fraction of track_bytes scaled to 0..255. It is what makes
+ * seeking a VBR file accurate, and the core used to SKIP it -- the parser
+ * stepped over the 100 bytes purely to reach the LAME extension behind it.
+ *
+ * Measured on the test card against the linear estimate it replaces:
+ * Feel Good Inc. is out by +3.5 s a quarter of the way in, Bad Religion by
+ * +0.5 s. The first of those matches the -3.4 s that was measured BY EAR
+ * and sat in the roadmap for months -- the same defect, found twice. */
+static uint8_t  xing_toc[100];
+static uint8_t  xing_toc_ok;
 static uint32_t fl_first_frame;   /* absolute offset of the first audio frame */
 enum { FMT_MP3 = 0, FMT_FLAC };
 static uint8_t  track_fmt;
@@ -626,6 +729,7 @@ static uint8_t  ui_size_warned;
  * dominates it is the hiccup. Measured rather than reasoned about: four
  * attempts at this were aimed by theory and three of them made it worse. */
 static uint16_t ld_head, ld_size, ld_art, ld_pre, ld_total;
+static uint16_t ld_lrc;   /* lyrics phase, split out of ld_art */
 static uint8_t  ui_ld_shown;
 #define LD_MS(c) ((uint16_t)((c) / (CLK_HZ / 1000u)))
 /* Total frames declared by a Xing/Info/VBRI header, 0 when the file has none.
@@ -1084,6 +1188,14 @@ static const char *plt_name_at(uint32_t off)
  * indistinguishable from a short one: the screen just shows a smaller number. */
 static uint8_t  pl_truncated;
 static uint16_t pl_off[PL_MAX];          /* byte offset of each name in pl_text */
+/* The duration an extended .m3u declares for each entry, 0 when it does not.
+ * Two bytes an entry, 512 in all, which buys the headerless file everything a
+ * Xing header would have given it. */
+static uint16_t pl_secs[PL_MAX];
+/* The figure for the load the playlist has just armed. Consumed by load_track
+ * and zeroed there, so it can never be applied to a track the user goes on to
+ * pick from the menu. */
+static uint32_t pl_hint_secs;
 static uint16_t pl_order[PL_MAX];        /* play order -> file index            */
 static uint16_t pl_count;                /* 0 = no playlist loaded              */
 static uint16_t pl_pos;                  /* index INTO pl_order                 */
@@ -1094,12 +1206,76 @@ static uint16_t pl_pos;                  /* index INTO pl_order                 
 static uint8_t  pl_ui_open;        /* overlay is up                          */
 static uint8_t  pl_ui_play_req;    /* main loop: start pl_ui_sel             */
 static uint8_t  pl_ui_dirty;       /* repaint wanted                         */
+/* Contents fade up from the bare panel when the overlay opens, and back down
+ * when it is dismissed. 4 steps at 25 ms is 100 ms -- about one step per UI
+ * pass at the ~38 fps both decoders drive (see FL_UI_PERIOD).
+ *
+ * The PANEL itself snaps; only what is inside it fades. That is not a
+ * shortcut, it is the only thing the engine can express: its three ops are
+ * RUN, RECT and CHAR with no alpha, so there is no way to composite the panel
+ * against the player underneath. Everything INSIDE the panel is drawn over
+ * UI_PANEL, which IS a known colour, so mixing each of those toward UI_PANEL
+ * is a true fade rather than a trick -- the same reason the toast fade works.
+ *
+ * Affordable because a rect is one engine command: the cost of a repaint is
+ * the ~400 glyph commands for the rows, and holding a direction to scroll
+ * already pays that 16 times a second. */
+#define PL_FADE      4u
+#define PL_FADE_STEP (CLK_HZ / 40u)
+static uint8_t  pl_ui_fade;        /* 0 = bare panel, PL_FADE = fully drawn   */
+static uint8_t  pl_ui_closing;     /* fading out, then restore the player     */
+static uint32_t pl_ui_fade_t0;     /* when the current ramp started            */
+static uint8_t  pl_ui_fade_from;   /* value it started from, for a mid-ramp turn */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
 static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
 static uint32_t pl_ui_mq_next;     /* when it steps again                     */
 static uint16_t pl_ui_mq_sel = 0xFFFFu;  /* row the scroll belongs to         */
+
+/* The play marker's pulse. A triangle wave stepped on a deadline, rather than
+ * a phase derived from cycles() modulo a period: an absolute-time phase has a
+ * discontinuity every 64 s when the counter wraps, and a visible hiccup once a
+ * minute is worse than a pulse that lags one step after a late frame.
+ *
+ * Stepped and repainted from pl_ui_tick(), which is where every other overlay
+ * animation lives and for a known reason -- the main loop runs once per
+ * decoded frame, 38/s on MP3 against 9.6/s on FLAC, and the open/close fade
+ * was shipped into that exact trap once already.
+ *
+ * It deliberately does NOT set pl_ui_dirty. That repaints the whole panel,
+ * ~400 glyph commands, and doing it 12 times a second for the sake of nine
+ * rects is what both the main loop's note and pl_ui_tick's own note warn
+ * against: an idle overlay has to cost nothing, because the decoder is
+ * running underneath it. The pulse repaints the marker and nothing else.
+ *
+ * DEPTH and RATE are separate knobs, which took a correction to get right:
+ * the first version derived the period from the step time, so opening the
+ * depth up ALSO slowed the breath down -- the two changes cancelled and the
+ * marker looked much the same. The step time is derived from the period
+ * instead, so PL_MK_FLOOR changes how far it swings and nothing else.
+ *
+ * FLOOR 8 is half amplitude: the marker swings luma 201..255 against the 149
+ * the other rows' text is drawn in. Both ends were tried on hardware --
+ * FLOOR 4 doubles the visible swing to 173..255 and was judged too much, so
+ * half amplitude is a settled answer rather than a cautious first guess.
+ *
+ * Opening the depth up again is not just a number: at FLOOR 4 the marker on
+ * the SELECTED row -- panel-dark on the accent bar, so softening there means
+ * dissolving INTO the bar -- fell to 26 luma of contrast against it and very
+ * nearly vanished. At FLOOR 8 it holds 60, which is why pl_mk_color() can
+ * treat both rows the same. Anything below ~6 needs that row handled
+ * separately.
+ *
+ * CLK_HZ * 32 is 2.13e9, so the period expression has about one doubling of
+ * headroom left before it overflows a uint32. */
+#define PL_MK_STEPS  16u                    /* brightness levels: full = STEPS */
+#define PL_MK_FLOOR  8u                     /* dimmest level -- DEPTH knob     */
+#define PL_MK_PERIOD (CLK_HZ * 32u / 25u)   /* 1.28 s a full breath -- RATE knob */
+#define PL_MK_TICK   (PL_MK_PERIOD / (2u * (PL_MK_STEPS - PL_MK_FLOOR)))
+static uint8_t  pl_mk_lvl;         /* PL_MK_FLOOR..PL_MK_STEPS                */
+static uint8_t  pl_mk_up;          /* 1 = brightening                         */
+static uint32_t pl_mk_next;        /* when it steps again                     */
 
 enum { REP_OFF = 0, REP_ALL, REP_ONE };
 static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
@@ -1228,6 +1404,11 @@ static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
 static uint16_t pl_live_count(void);
 static uint16_t pl_live_ordinal(uint16_t pos);
+static int pl_skip(int delta);
+/* skip_req lives up here, away from the other request flags, because the two
+ * refusal screens are defined ABOVE the input handler that sets it and now
+ * have to read it. See ui_failed_msg(). */
+static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
 /* The loaded playlist's own filename, last component, uppercased. Filled by
  * pl_name_read() in playlist.inc, which is included below -- declared here
  * because the splash summary above it draws the name. Empty when APF will not
@@ -1502,7 +1683,18 @@ static uint32_t tag_corrections;   /* periodic probe found a wrong tag */
 /* Accent palette, cycled with the L/R shoulder triggers. Deriving the accent
  * from the cover art was tried and dropped -- it changed on every track and
  * read as inconsistency. A colour the USER picks is stable, which is the
- * difference. Chosen to sit well on the graphite background: nothing so dark
+ * difference.
+ *
+ * Revisited 2026-10-11 as a per-ALBUM accent, which answers that objection:
+ * an album's tracks share a cover, so it would not change within one. It
+ * fails for a SECOND reason the first attempt never reached.
+ * tools/album_accent_preview.py renders every cover on the card through the
+ * same ui_grad_set() maths, and about a third land outside the 88..209 luma
+ * band these twelve occupy: a monochrome disco-ball cover extracts to 0x2945,
+ * which IS UI_PANEL -- headings and the selected row would vanish into the
+ * card -- and a pale sleeve gives luma 241, competing with the white type.
+ * Clamping luma and forcing saturation would fix it, but then the cover is
+ * only supplying a hue, and greyscale art has none to supply. Chosen to sit well on the graphite background: nothing so dark
  * it disappears, nothing so pale it competes with the white type. RGB565. */
 static const uint16_t ui_palette[] = {
     0xFC65u,   /* amber   */
@@ -1868,6 +2060,49 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * for and it is doubled; the tail merely rests longer than it needs to, which
  * costs nothing but a little patience. Revisit when there is image space. */
 #define MQ_HOLD  (CLK_HZ * 4u)
+/* Lyrics state, hoisted above ui_draw_dynamic() for the reason given in
+ * lyrics.inc: that function is defined before any include in this file, so the
+ * meter cannot see anything declared later. The logic stays in lyrics.inc,
+ * which must follow playlist.inc for pl_open_try(). */
+#define LRC_SLOT_ID   4u        /* data.json slot 4, deferload, no filename */
+/* 4 KB, was 3072. A real sheet overran it by TEN bytes -- Feel Good Inc.'s
+ * is 3,082 -- and the overflow landed mid-word, so the last line read
+ * "feel goo". Sized to clear a typical sheet rather than to sit on the
+ * boundary of one. Costs .bss, which comes straight out of heap slack --
+ * 3584 rather than a round 4096 because the sheet that exposed this is
+ * 3,082 bytes, so 500 spare covers it while leaving the heap above the
+ * build's warning line. Overrunning is no longer silent anyway: a full
+ * buffer drops its incomplete last line rather than showing it cut. */
+#define LRC_TEXT_MAX  3584u
+/* 80, not 64. Measured on the card: the longest sheet there is 66 lines, so 64
+ * silently dropped the end of it -- and a lyric that stops two lines early
+ * reads as a bug, not as a limit.
+ *
+ * 80 rather than 96 because 96 put the image 64 bytes over the link guard, and
+ * 16 lines of headroom over the longest real file is enough. Each line costs 4
+ * bytes of index, so this is the cheapest dial in the feature. */
+#define LRC_LINES     80u
+/* Rows one lyric line may wrap to. Three, because 15 lines on this card
+ * exceed what two rows hold at the art-panel width however they are
+ * broken. The meter shows five rows total, so a three-row line eats its
+ * neighbours' context rather than being cut. */
+#define LRC_WRAP_MAX  3u
+#define LRC_NOTIME    0xFFFFu
+
+static char     lrc_text[LRC_TEXT_MAX];
+static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
+static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
+static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
+static uint16_t lrc_drawn_w;            /* width it was laid out for          */
+static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
+static uint16_t lrc_n;                  /* lines parsed                       */
+static uint8_t  lrc_synced;             /* at least one real timestamp        */
+static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
+static void     lrc_load(void);
+static void     lrc_clear(void);
+static uint32_t lrc_now10(void);
+
+
 /* Visualisations, cycled with X. The choice persists via interact.json.
  *
  * All three run off what the decoder already produces -- there are no frequency
@@ -1890,6 +2125,11 @@ enum { VIZ_BARS = 0, VIZ_WATER, VIZ_LEVELS, VIZ_SCOPE, VIZ_WAVE, VIZ_VU,
        /* Same rule again: APPENDED. Adding this required the Meter slider's
         * max in interact.json to go from 10 to 11. */
        VIZ_TAPE,
+       /* Same rule a third time: APPENDED. Adding this required the Meter
+        * slider's max in interact.json to go from 11 to 12, and that edit
+        * ships in the SAME build -- widening it first would offer an index
+        * equal to VIZ_COUNT, which nothing can select. */
+       VIZ_LYRICS,
        VIZ_COUNT };
 
 /* Stereo phase scope. Left against right, rotated 45 degrees so mono lands on
@@ -2711,6 +2951,36 @@ static uint32_t ui_byte_rate(void)
     return bytes_per_sec;
 }
 
+/* Byte offset of a point in the track, read out of the Xing TOC.
+ *
+ * The table is indexed in PERCENT of duration, so the remainder of that
+ * division is interpolated rather than thrown away -- at 100 entries one
+ * index is 2.2 s on a 3:41 track, which is most of the error being fixed.
+ *
+ * Returns 0 when there is no usable table, which the caller reads as
+ * "fall back to the linear estimate": a file with no Xing TOC keeps the
+ * behaviour it has always had. */
+static uint32_t xing_byte_at(uint32_t secs)
+{
+    if (!xing_toc_ok || !track_secs || !track_bytes) return 0;
+    if (secs >= track_secs) return 0;
+
+    uint32_t num = secs * 100u;
+    uint32_t idx = num / track_secs;          /* 0..99 */
+    uint32_t rem = num - idx * track_secs;    /* how far into that entry */
+    if (idx > 99u) return 0;
+
+    uint32_t a = xing_toc[idx];
+    uint32_t b = (idx < 99u) ? xing_toc[idx + 1u] : 256u;
+    uint32_t v = (b > a) ? a + ((b - a) * rem) / track_secs : a;
+
+    /* 64-bit because the product overflows 32: a 50 MB file times 256 is
+     * 12.8 G. Dividing first would throw away up to 255 bytes of offset,
+     * which is a frame and a half. */
+    uint32_t off = (uint32_t)(((uint64_t)track_bytes * v) >> 8);
+    return audio_start + off;
+}
+
 /* Byte rate for the SEEK LIMIT specifically. Deliberately not ui_byte_rate():
  * that falls back to meas_rate, which converges all through playback, so a limit
  * derived from it drifts a little on every repeat. The parked position then
@@ -3213,15 +3483,21 @@ static void ui_draw_chrome(void)
      * One size for every track, and ui_marq_init below turns the scroll on for
      * anything that overflows -- which is what the marquee was already for, and
      * why it almost never ran. */
-    uint32_t ts = TS_2X;
+    /* Native 32px where the whole title has glyphs for it, else the 2x path
+     * it replaces. Same cell size either way, so nothing in the layout below
+     * cares which one came back. */
+    uint32_t ts = fb_native_scale(title, TS_32);
     ui_marq_init(&ui_mq_title, title, UI_TITLE_Y, ts);
     fb_set_color(UI_WHITE, UI_PANEL);
     fb_text_boxed(UI_MARGIN, UI_TITLE_Y, ui_mq_title.text, ts, ts,
                   ui_text_w, UI_CARD_TEXT_R);
 
     /* Artist one step down from the title, never below 1.5x -- that step only
-     * exists because the engine can scale fractionally now. */
-    uint32_t as = (ts > TS_15X) ? (ts - 1u) : TS_15X;
+     * exists because the engine can scale fractionally now. Resolved against
+     * the ARTIST string, not derived from ts: the two can fall back
+     * independently, and an artist with a glyph the 24px cell lacks must not
+     * be decided by what the title happened to contain. */
+    uint32_t as = fb_native_scale(track_artist, TS_24);
     ui_mq_artist.on = 0;      /* no artist -> no leftover scroll from the last track */
     uint32_t y = UI_TITLE_Y + FB_CELL(ts) + 6u;
     if (track_artist[0]) {
@@ -3415,7 +3691,11 @@ static void ui_splash_bg(void)
 
 static void ui_splash_title(uint32_t f, uint32_t den)
 {
-    uint32_t sc = fb_text_fit("MP3 PLAYER", UI_INNER_W, TS_2X);
+    /* The last scaled text in the core; everything else is already a native
+     * cell. 16 px bodies were always native, and the 24/32 px headings moved
+     * over with the font work -- this one kept the scaled ladder because the
+     * native sizes were not in it. */
+    uint32_t sc = fb_text_fit_native("MP3 PLAYER", UI_INNER_W);
     fb_set_color(ui_mix(UI_PANEL, ui_accent, f, den), UI_PANEL);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
 }
@@ -4010,7 +4290,7 @@ static void ui_idle_screen(const char *reason)
      * as a separate alert. */
     if (reason) ui_gs_line(144u, reason, UI_RED, TS_1X);
 
-    ui_gs_line(170u, "Getting started",                     ui_accent, TS_15X);
+    ui_gs_line(170u, "Getting started",                     ui_accent, TS_24);
 
     /* 18 px within a step, 26 between them. An even pitch throughout made the
      * three steps read as one eight-line block -- the grouping has to be
@@ -4041,6 +4321,47 @@ static void ui_idle_screen(const char *reason)
  * read, and wrong for one this core simply cannot decode fast enough -- that
  * is not a broken file, and telling someone their music is corrupt when it is
  * not is worse than saying nothing. */
+/* The wait both refusal screens sit in once they have drawn themselves.
+ *
+ * It was written out twice, and the two copies had already drifted: only one
+ * of them cleared ui_warn_row. Clearing it unconditionally is right anyway --
+ * nothing but ui_rate_unsupported ever sets it, so on the other path it is a
+ * no-op -- and one copy cannot drift from itself.
+ *
+ * Nothing here returns into the main loop under its own steam. Every exit is
+ * reload_pending, because after a refusal the decoder has been re-inited to
+ * MP3 while the slot still holds the file that was rejected; the ordinary
+ * reload path is the only thing that puts that right. A skip reaches the same
+ * exit the long way round, by issuing its 0192 and letting APF answer. */
+static void ui_stuck_wait(void)
+{
+    tk_poll_at = cycles() + CLK_HZ;
+    for (;;) {
+        poll_input();
+        if (reload_pending) { ui_warn_row = 0u; return; }
+        /* Next/Previous work here. poll_input() had been setting skip_req on
+         * these screens all along and nothing read it, so a playlist with one
+         * unplayable entry stopped dead and the core menu was the only way
+         * out. One bad file should cost one track -- the rule pl_play_span()
+         * already follows for entries that will not open.
+         *
+         * A failed skip falls through and stays put, still showing the
+         * reason: pl_play_span() has walked the whole list by then, so there
+         * is nothing else to try. */
+        if (skip_req) {
+            uint32_t d = skip_req; skip_req = 0;
+            if (pl_count) pl_skip(d == 1u ? 1 : -1);
+        }
+        /* poll_input() only sees the 008A NOTIFICATION, so a missed one left
+         * these screens with no way out and the next pick appeared to do
+         * nothing. Ask the slot directly as well; no audio is playing here. */
+        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
+            tk_poll_at = cycles() + CLK_HZ;
+            if (slot_changed()) reload_pending = 1u;
+        }
+    }
+}
+
 static void ui_failed_msg(const char *l1, const char *l2)
 {
     /* Wake first if the screen is dark. This draws straight to the framebuffer
@@ -4056,33 +4377,22 @@ static void ui_failed_msg(const char *l1, const char *l2)
     ui_blank_wake();
     fb_rect(0, 0, FB_W, FB_H, UI_BG);
     fb_set_color(UI_RED, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_2X, TS_2X, UI_INNER_W);
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "LOAD FAILED", TS_32, TS_32, UI_INNER_W);
 
     /* This line used to print the file's first four bytes as hex. That is a
      * debugging aid, and it was on the ONE screen a user is most likely to see
      * when something has gone wrong -- the moment they least need a hex dump.
      * Say what happened in words instead. */
     fb_set_color(UI_DIM, UI_BG);
-    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_2X) + 14u,
+    /* FB_CELL(TS_32), not FB_CELL(TS_2X): identical value -- ts_half is 4 for
+     * both -- but the heading above is drawn at TS_32, and an offset should
+     * name the cell it is clearing. */
+    fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(TS_32) + 14u,
                     l1, TS_1X, TS_1X, UI_INNER_W);
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
                     l2, TS_1X, TS_1X, UI_INNER_W);
 
-    /* Stay alive so a reload can rescue us.
-     *
-     * poll_input() only sees the 008A NOTIFICATION, so a missed one left this
-     * screen with no way out and the next pick appeared to do nothing -- pick
-     * again and it works. Ask the slot directly as well. No audio is playing
-     * here, so the query costs nothing that matters and can run often. */
-    tk_poll_at = cycles() + CLK_HZ;
-    for (;;) {
-        poll_input();
-        if (reload_pending) return;
-        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
-            tk_poll_at = cycles() + CLK_HZ;
-            if (slot_changed()) reload_pending = 1u;
-        }
-    }
+    ui_stuck_wait();
 }
 
 static void ui_load_failed(void)
@@ -4105,7 +4415,13 @@ static void ui_load_failed(void)
 /* 48000, from measurement: decode is 74% of realtime at 16/44.1 and 80% at
  * 24/44.1, rising almost exactly with sample rate to 150% at 88.2 kHz. 48 kHz
  * lands near 87% for 24-bit, which fits; nothing above it does. */
+/* Overridable so a test build can lift the gate from the command line
+ * rather than by editing this file:
+ *   EXTRA_CFLAGS="-DFLAC_MAX_RATE=96000u ..." bash fw/build.sh
+ * The default is unchanged and the shipping .rom stays byte-identical. */
+#ifndef FLAC_MAX_RATE
 #define FLAC_MAX_RATE 48000u
+#endif
 static uint8_t rate_unsupported;   /* set at load, consumed by the main loop */
 
 /* Shown ON THE TRACK CARD rather than as a takeover screen. The card is
@@ -4127,28 +4443,51 @@ static void ui_rate_unsupported(void)
         char *q = track_album;
         uint32_t v = fl_reject_val;
 
+        /* Every line is "CAN'T PLAY <what the file is> - <what works>".
+         * The old wording led with the property ("HI-RES 96.0kHz", "BLOCK
+         * 8192") and left the verdict implicit, and "BLOCK 8192" in
+         * particular named an internal quantity no listener has a word for.
+         *
+         * The limits are DERIVED, not typed in. "PLAYS 48kHz MAX" was a
+         * literal sitting next to a FLAC_MAX_RATE it had to agree with, and
+         * "6144" was a literal for ARENA_LIMIT/4 -- which has since changed,
+         * so that one would now be telling the user a number that is wrong.
+         *
+         * Widths checked against font_adv at the worst-case value each field
+         * can hold, against ui_text_w (352 px): 316, 288, 346, 347. The row
+         * marquees above that, and a scrolling error message is worse than a
+         * static one. Measure before adding a word. */
+        const char *p1 = "CAN'T PLAY ";
+        while (*p1) *q++ = *p1++;
+
         if (fl_reject_kind == FLR_RATE) {
-            const char *p1 = "HI-RES ";
-            while (*p1) *q++ = *p1++;
             q = ui_dec(q, v / 1000u);
             uint32_t frac = (v % 1000u) / 100u;
             if (frac) { *q++ = '.'; *q++ = (char)('0' + frac); }
-            const char *p2 = "kHz - PLAYS 48kHz MAX";
+            const char *p2 = "kHz - ";
             while (*p2) *q++ = *p2++;
+            q = ui_dec(q, FLAC_MAX_RATE / 1000u);
+            const char *p3 = "kHz MAX";
+            while (*p3) *q++ = *p3++;
         } else if (fl_reject_kind == FLR_DEPTH) {
             q = ui_dec(q, v);
-            const char *p2 = "-BIT FLAC - PLAYS 24-BIT MAX";
+            const char *p2 = "-BIT - 24-BIT MAX";
             while (*p2) *q++ = *p2++;
         } else if (fl_reject_kind == FLR_CHANS) {
             q = ui_dec(q, v);
-            const char *p2 = " CHANNELS - PLAYS STEREO MAX";
+            /* A comma, where the others take " - ": with the widest digit
+             * this is the longest of the four, and the dash spelling came to
+             * 352 px against a 352 px budget. Six pixels of margin for one
+             * character is the better trade. */
+            const char *p2 = " CHANNELS, STEREO MAX";
             while (*p2) *q++ = *p2++;
         } else {
-            const char *p1 = "BLOCK ";
-            while (*p1) *q++ = *p1++;
             q = ui_dec(q, v);
-            const char *p2 = " - PLAYS 6144 MAX";
+            const char *p2 = " BLOCKS - ";
             while (*p2) *q++ = *p2++;
+            q = ui_dec(q, ARENA_LIMIT / sizeof(int32_t));
+            const char *p3 = " MAX";
+            while (*p3) *q++ = *p3++;
         }
         *q = 0;
     }
@@ -4172,19 +4511,7 @@ static void ui_rate_unsupported(void)
     ui_gradient();
     ui_draw_chrome();
 
-    /* Stay alive so a reload can rescue us, exactly as the failure screen
-     * does -- the difference is only what the user is looking at. */
-    /* Same fallback as the failure screen: this is exactly where it was seen
-     * -- refuse a hi-res file, pick a playable one, nothing happens. */
-    tk_poll_at = cycles() + CLK_HZ;
-    for (;;) {
-        poll_input();
-        if (reload_pending) { ui_warn_row = 0u; return; }
-        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
-            tk_poll_at = cycles() + CLK_HZ;
-            if (slot_changed()) reload_pending = 1u;
-        }
-    }
+    ui_stuck_wait();
 }
 
 /* Called from the main loop every frame. Under rev 6 this had to be throttled
@@ -4268,13 +4595,85 @@ static void pl_ui_follow(void)
     if (pl_count <= PL_UI_ROWS) pl_ui_top = 0;
 }
 
+/* A colour on its way up from the bare panel. Returns it unchanged once the
+ * fade is done, so the steady state costs one compare. */
+static uint16_t pl_fade(uint16_t c)
+{
+    return (pl_ui_fade >= PL_FADE) ? c : ui_mix(UI_PANEL, c, pl_ui_fade, PL_FADE);
+}
+
 /* One row. Split out so the marquee can repaint just the selected line
  * without redrawing the whole list four times a second. */
+/* Start the fade OUT. The overlay stays open until it reaches 0, then the
+ * existing restore path repaints the player exactly as it always did -- the
+ * close is delayed, not reimplemented.
+ *
+ * Arm the deadline rather than leaving it at 0: a 0 here means "due 35.8 s
+ * ago or in a moment" depending on where the counter happens to be, and this
+ * project has already lost a day to four of those. */
+static void pl_ui_dismiss(void)
+{
+    pl_ui_closing   = 1u;
+    pl_ui_fade_from = pl_ui_fade;   /* run down from wherever it got to */
+    pl_ui_fade_t0   = cycles();
+    pl_ui_dirty     = 1u;
+}
+
+/* The play marker. '>' was always a stand-in, and the note on it said why: the
+ * font is ASCII 0x20..0x7E and has no triangle in it. But a triangle does not
+ * need a glyph. RECT fills an arbitrary rectangle in one engine command, and
+ * nine unit-height rows of widths 1,2,3,4,5,4,3,2,1 ARE a 45-degree isoceles
+ * triangle pointing right -- nine RECT commands against the one CHAR they
+ * replace, in a row that already issues about forty of them.
+ *
+ * Nine rows, odd so the apex is a single row rather than a blunt pair. At
+ * PL_MK_DY it spans y+3..y+11 of the 16 px TS_1X cell, centred on where the
+ * '>' crossbar used to sit, and 5 px wide inside the 12 px the '>' was
+ * clipped to -- so nothing else on the row moves. */
+#define PL_MK_H  9u
+#define PL_MK_X  (PL_UI_X + 8u)
+#define PL_MK_DY 3u
+
+static void pl_marker(uint32_t y, uint16_t c)
+{
+    for (uint32_t i = 0; i < PL_MK_H; i++) {
+        uint32_t w = (i < PL_MK_H / 2u ? i : PL_MK_H - 1u - i) + 1u;
+        fb_rect(PL_MK_X, y + PL_MK_DY + i, w, 1u, c);
+    }
+}
+
+/* Marker colour at the current pulse level. The two cases run in opposite
+ * directions, because the SELECTED row is a filled accent bar: there the
+ * marker is panel-dark on a light fill and softens by moving TOWARD the bar,
+ * while on an unselected row it is white on panel and softens toward the
+ * panel. Same level, opposite ends, so scrolling onto the playing track does
+ * not invert the breath.
+ *
+ * On a normal row the dim end is UI_DIM -- what the other rows' text is drawn
+ * in -- so the marker is never dimmer than the list around it.
+ *
+ * Both rows take the same swing, which is only safe at the depth PL_MK_FLOOR
+ * currently sits at -- see the note there. A deeper setting needs the selected
+ * row damped, because softening there means dissolving into its own bar.
+ *
+ * Through pl_fade() like every other colour in the panel, so the pulse comes
+ * up with the overlay instead of arriving at full strength on a half-drawn
+ * one, and so a dismissal takes it down with everything else. */
+static uint16_t pl_mk_color(int selected)
+{
+    uint16_t lo = selected ? ui_accent : UI_DIM;
+    uint16_t hi = selected ? UI_PANEL  : UI_WHITE;
+    return pl_fade(ui_mix(lo, hi, pl_mk_lvl, PL_MK_STEPS));
+}
+
 static void pl_ui_row(uint32_t i)
 {
     uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
     uint16_t pos = (uint16_t)(pl_ui_top + i);
 
+    /* Every colour inside the panel goes through pl_fade(), so one value
+     * controls the whole overlay and no element can be left behind at full
+     * strength while the rest comes up. */
     if (pos >= pl_count) {                       /* short list: clear the row */
         fb_rect(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H, UI_PANEL);
         return;
@@ -4289,7 +4688,7 @@ static void pl_ui_row(uint32_t i)
      * fb_round_rect_on() exists for. Unselected rows stay square -- they are
      * the panel colour, so there is no shape to see either way, and drawing
      * the corner cuts on every row would be work for nothing. */
-    uint16_t bg = (pos == pl_ui_sel) ? ui_accent : UI_PANEL;
+    uint16_t bg = (pos == pl_ui_sel) ? pl_fade(ui_accent) : UI_PANEL;
     if (pos == pl_ui_sel)
         fb_round_rect_on(PL_UI_X + 4u, y - 2u, PL_UI_W - 8u, PL_UI_ROW_H,
                          5u, bg, UI_PANEL);
@@ -4309,11 +4708,12 @@ static void pl_ui_row(uint32_t i)
         txt = nm + (pl_ui_mq_off < len ? pl_ui_mq_off : 0u);
     }
 
-    /* '>' rather than an arrow glyph: the font is ASCII 0x20..0x7E. */
-    fb_set_color(pos == pl_ui_sel ? UI_PANEL
-               : pos == pl_pos    ? UI_WHITE : UI_DIM, bg);
-    if (pos == pl_pos)
-        fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
+    /* Marker BEFORE the text's fb_set_color, not after: fb_rect clobbers the
+     * colour registers, so drawing it second would leave the glyphs painting
+     * in the triangle's fill. */
+    if (pos == pl_pos) pl_marker(y, pl_mk_color(pos == pl_ui_sel));
+    fb_set_color(pl_fade(pos == pl_ui_sel ? UI_PANEL
+                       : pos == pl_pos    ? UI_WHITE : UI_DIM), bg);
     fb_text_boxed(PL_UI_TEXT_X + 8u, y, txt, TS_1X, TS_1X,
                   PL_UI_W - 40u, PL_UI_X + PL_UI_W - 16u);
 }
@@ -4341,7 +4741,7 @@ static void pl_ui_draw(void)
         q = ui_dec(q, pl_count);
     }
     *q = 0;
-    fb_set_color(ui_accent, UI_PANEL);
+    fb_set_color(pl_fade(ui_accent), UI_PANEL);
     fb_text_clipped(PL_UI_TEXT_X, PL_UI_Y + 10u, hdr, TS_1X, TS_1X, PL_UI_W - 20u);
 
     /* Scroll position, for lists too long to hold in your head. The header
@@ -4352,18 +4752,229 @@ static void pl_ui_draw(void)
         uint32_t track_x = PL_UI_X + PL_UI_W - 11u;
         uint32_t track_y = PL_UI_LIST_Y - 2u;
         uint32_t track_h = PL_UI_ROWS * PL_UI_ROW_H;
-        fb_rect(track_x, track_y, 3u, track_h, ui_mix(UI_PANEL, UI_DIM, 1u, 3u));
+        fb_rect(track_x, track_y, 3u, track_h,
+                pl_fade(ui_mix(UI_PANEL, UI_DIM, 1u, 3u)));
 
         uint32_t span = pl_count - PL_UI_ROWS;          /* max value of _top */
         uint32_t th   = track_h * PL_UI_ROWS / pl_count;
         if (th < 8u) th = 8u;                           /* stays grabbable   */
         uint32_t ty   = track_y + (track_h - th) * pl_ui_top / span;
-        fb_rect(track_x, ty, 3u, th, ui_accent);
+        fb_rect(track_x, ty, 3u, th, pl_fade(ui_accent));
     }
 
     for (uint32_t i = 0; i < PL_UI_ROWS; i++) pl_ui_row(i);
 }
 
+
+/* Where a line must be split so its first row fits `maxw`, or 0 if it fits
+ * whole. Breaks at the last SPACE before the limit so words stay intact --
+ * breaking mid-word is worse than clipping, because it reads as corruption
+ * rather than as a wrap. */
+/* lrc_split() lived here. Replaced by lrc_wrap() below, which breaks
+ * EVERY row rather than only the first. */
+
+/* Wrap width. Reserves a whole CELL, not 8 px.
+ *
+ * fb_text_width sums ADVANCES, but the engine paints a 16 px cell per
+ * glyph, so a line's painted right edge sits (cell - last advance) past
+ * where its advances end -- up to 12 px for a narrow final letter. With
+ * only 8 px reserved, a centred line that just fits the wrap ends up with
+ * dx = 4 either side, the final cell crosses paint_r, and fb_text_boxed
+ * DROPS that glyph rather than painting over the art panel. Reserving the
+ * cell keeps the painted line inside the box by construction. */
+static uint32_t lrc_maxw(uint32_t ww)
+{
+    uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
+    return (ww > cell) ? ww - cell : ww;
+}
+
+/* Advance width PLUS the final cell's overhang -- what the line actually
+ * paints, which is what has to be centred if the result is to fit. */
+static uint32_t lrc_painted_w(const char *s)
+{
+    uint32_t w = 0, last = 0;
+    while (*s) { last = fb_adv(u8_next(&s), TS_1X); w += last; }
+    uint32_t cell = (FONT_CELL_W * ts_half[TS_1X]) / 2u;
+    return (cell > last) ? w + (cell - last) : w;
+}
+
+/* Where each row of a wrapped line STARTS. Returns the number of rows.
+ *
+ * Replaces lrc_split(), which returned ONE break point and guaranteed
+ * only that the text BEFORE it fitted -- the remainder was drawn at
+ * whatever length it happened to be. At full width the tails fitted by
+ * luck, which is why it went unnoticed; with the art panel shown the box
+ * is 252 px instead of 360 and 21 rows across six sheets ran past the
+ * edge, EVERY ONE of them a tail.
+ *
+ * Two rows are not enough either: 15 lines here exceed what two rows can
+ * hold at 252 px however they are broken -- Sultans of Swing has one at
+ * 561 px against a 472 px ceiling -- so a line may take three.
+ *
+ * Breaking at lrc_maxw() is what makes each row FIT: a row whose
+ * advances total at most ww - cell paints at most ww, because the final
+ * cell overhangs the advances by (cell - last advance). */
+static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
+{
+    uint32_t mx = lrc_maxw(ww);
+    uint32_t n = 1u, i = 0, w = 0, sp = 0, start = 0;
+    st[0] = 0;
+    while (s[i]) {
+        /* CODE POINTS, not bytes. Measuring per byte made a 3-byte kana
+         * count as three Latin advances -- a Japanese sheet measured 270
+         * px where it paints 144 -- so 26 of 44 lines wrapped when 4
+         * needed to, and the break landed INSIDE a sequence 13 times,
+         * which draws as garbage. i is always a character boundary, so
+         * breaking there is safe. */
+        const char *p = s + i;
+        uint32_t cp  = u8_next(&p);
+        uint32_t nxt = (uint32_t)(p - s);
+        if (cp == ' ') sp = i;
+        w += fb_adv(cp, TS_1X);
+        if (w > mx && n < LRC_WRAP_MAX) {
+            uint32_t b = (sp > start) ? sp : i;
+            while (s[b] == ' ') b++;          /* next row starts after it */
+            /* A single glyph wider than the box would otherwise break at
+             * the same place forever. Step past THIS character, which
+             * keeps the offset on a boundary. */
+            if (b <= start) b = nxt;
+            st[n++] = (uint16_t)b;
+            start = b; i = b; w = 0; sp = 0;
+            continue;
+        }
+        i = nxt;
+    }
+    return n;
+}
+
+static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
+{
+    uint16_t st[LRC_WRAP_MAX];
+    return lrc_wrap(lrc_text + lrc_off[idx], ww, st);
+}
+
+/* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
+ * left-aligned, because a lyric line has no left edge to align to -- lengths
+ * vary wildly and a ragged right margin reads as a list rather than as verse.
+ *
+ * Background is sampled at this row, not shared: the box is a ramp and a glyph
+ * cell paints its own background, so one value for all five rows would band. */
+static void lrc_row(uint32_t y, uint32_t ww, const char *s,
+                    uint32_t from, uint32_t to, int is_cur)
+{
+    char t[80];
+    uint32_t n = 0;
+    while (from + n < to && n < sizeof(t) - 1u) { t[n] = s[from + n]; n++; }
+    while (n && t[n - 1u] == ' ') n--;          /* no dangling space on a wrap */
+    t[n] = 0;
+    if (!n) return;
+
+    uint16_t bg = ui_grad_at(y + 8u);
+    /* Centre on the PAINTED width. Centring on the advance width left the
+     * final cell hanging past the box on a line that nearly filled it. */
+    uint32_t w  = lrc_painted_w(t);
+    uint32_t dx = (ww > w) ? (ww - w) / 2u : 0u;
+    fb_set_color(is_cur ? ui_accent : ui_mix(bg, UI_DIM, 1u, 3u), bg);
+    fb_text_boxed(UI_MARGIN + dx, y, t, TS_1X, TS_1X,
+                  (ww > dx) ? ww - dx : 2u, UI_MARGIN + ww);
+}
+
+/* Emit one lyric line at `row`, wrapping to a second row if it does not fit.
+ * Rows outside the visible five are simply skipped, so clipping at either end
+ * needs no special case. Returns the rows the line occupies. */
+static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
+                         int32_t row, int is_cur)
+{
+    const char *s = lrc_text + lrc_off[idx];
+    uint32_t len = 0;
+    while (s[len]) len++;
+
+    uint16_t st[LRC_WRAP_MAX];
+    uint32_t n = lrc_wrap(s, ww, st);
+    for (uint32_t k = 0; k < n; k++) {
+        int32_t r = row + (int32_t)k;
+        if (r < 0 || r >= 5) continue;        /* outside the visible five */
+        uint32_t to = (k + 1u < n) ? st[k + 1u] : len;
+        lrc_row(top + 8u + (uint32_t)r * 16u, ww, s, st[k], to, is_cur);
+    }
+    return n;
+}
+
+/* Advance the overlay fade and service its repaints. Called from
+ * ui_draw_dynamic(). The fade is derived from
+ * ELAPSED TIME rather than counted one step per call. Both of those matter,
+ * and the first version got both wrong:
+ *
+ * It stepped once per MAIN LOOP pass. The main loop turns over once per
+ * decoded frame -- 1152 samples on MP3, about 38 a second, but 4608 on FLAC,
+ * about 9.6. So the same 4-step fade took 100 ms on an MP3 and 420 ms on a
+ * FLAC, which is exactly what it looked like. FL_UI_PERIOD a few thousand
+ * lines down exists for this identical reason and spells it out; I read it
+ * and put the stepping in the loop it warns about anyway.
+ *
+ * ui_draw_dynamic() is the right home because it ALREADY runs at ~38 fps on
+ * both paths: once per frame on MP3, and paced by fl_ui_next on FLAC. The
+ * cadence is uniform there by construction rather than by coincidence.
+ *
+ * Time-based on top of that, so the DURATION is right even where the cadence
+ * is not -- paused draws at 30 fps, and a blanked screen does not draw at
+ * all, which would otherwise leave a dismissed overlay open until the screen
+ * woke. Elapsed time closes it on the first draw after waking instead.
+ *
+ * Ramping from pl_ui_fade_from means a dismiss PART WAY through the fade-in
+ * runs down from where it had got to, rather than snapping to full and
+ * falling from there. */
+static void pl_ui_tick(void)
+{
+    if (!pl_ui_open) return;
+    uint32_t p = (cycles() - pl_ui_fade_t0) / PL_FADE_STEP;
+    uint8_t  want;
+    if (pl_ui_closing)
+        want = (pl_ui_fade_from > p) ? (uint8_t)(pl_ui_fade_from - p) : 0u;
+    else
+        want = (p >= PL_FADE) ? (uint8_t)PL_FADE : (uint8_t)p;
+
+    if (want != pl_ui_fade) { pl_ui_fade = want; pl_ui_dirty = 1u; }
+
+    /* Consume the repaint HERE rather than in the main loop -- same reasoning
+     * as the fade, and the same fault underneath it. A selection move was
+     * REGISTERED promptly on FLAC, because poll_input runs from flac_emit's
+     * FIFO-full wait, but the redraw waited for a main-loop pass. So held
+     * scrolling repainted at 9.6 fps against 38 on an MP3, and the list
+     * appeared to jump two rows at a time.
+     *
+     * Still GATED on pl_ui_dirty, so the NUMBER of redraws is unchanged and an
+     * idle overlay still costs nothing per frame -- which the main loop's own
+     * note says matters, because the decoder is running underneath. They just
+     * happen on the faster clock now. */
+    if (pl_ui_dirty) { pl_ui_dirty = 0; pl_ui_draw(); }
+    /* Step the pulse and repaint the marker alone. `else`, because a full
+     * repaint this frame has already drawn it at the current level; and above
+     * the close check, so a closed overlay never draws into the player that
+     * pl_ui_restore is about to repaint.
+     *
+     * Only when the playing row is on screen -- scrolled away there is nothing
+     * to animate, and the level simply holds until it comes back.
+     *
+     * The geometry never changes, only the fill, so there is nothing to erase
+     * between frames. */
+    else if (pl_pos >= pl_ui_top && pl_pos < pl_ui_top + PL_UI_ROWS &&
+             (int32_t)(cycles() - pl_mk_next) >= 0) {
+        if (pl_mk_up) { if (++pl_mk_lvl >= PL_MK_STEPS) pl_mk_up = 0u; }
+        else          { if (--pl_mk_lvl <= PL_MK_FLOOR) pl_mk_up = 1u; }
+        /* Re-armed from now rather than from the old deadline: a blanked
+         * screen or a stalled frame then costs phase, never a burst of
+         * catch-up steps on the frame it wakes. */
+        pl_mk_next = cycles() + PL_MK_TICK;
+        pl_marker(PL_UI_LIST_Y + (uint32_t)(pl_pos - pl_ui_top) * PL_UI_ROW_H,
+                  pl_mk_color(pl_pos == pl_ui_sel));
+    }
+    if (pl_ui_closing && !pl_ui_fade) {
+        pl_ui_open    = 0u;
+        pl_ui_closing = 0u;
+        pl_ui_restore = 1u;
+    }
+}
 
 static void ui_draw_dynamic(void)
 {
@@ -4383,6 +4994,9 @@ static void ui_draw_dynamic(void)
      * region is several hundred lines and every declaration in it is scoped
      * inside the sections being skipped. `viz_done` already sets the
      * precedent. */
+    /* Before the jump, so a fade that COMPLETES a dismissal this frame falls
+     * through to the normal path instead of skipping it for one more. */
+    pl_ui_tick();
     if (pl_ui_open) goto ui_tail;
 
     /* Publish the peaks once per display frame, so every meter below reads a
@@ -4560,6 +5174,70 @@ static void ui_draw_dynamic(void)
          * about a centre line instead of colour-coded from the bottom -- a
          * DAW-style envelope building up left to right. ~5 commands a frame,
          * because COPY moves the whole strip for the price of one. */
+        if (viz_mode == VIZ_LYRICS) {
+            /* Five rows. The CURRENT line is anchored at row 2 and stays there
+             * whatever the neighbours do -- a line that moves as its context
+             * changes length is much harder to read than one that holds still.
+             * Earlier lines are laid out backwards from it and later ones
+             * forwards, so a wrapped neighbour eats a row of context rather
+             * than displacing the line being sung.
+             *
+             * Redrawn only when the LINE changes, a few times a minute. */
+            const uint32_t top  = UI_WAVE_Y - UI_WAVE_TOP;
+            const uint32_t boxh = UI_WAVE_H + UI_WAVE_TOP;
+
+            uint32_t t10 = lrc_now10();
+            uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(t10) : 0u;
+            if (wf) lrc_drawn = 0xFFFFu;
+
+            /* The line index alone is NOT enough to gate the redraw, and
+             * assuming it was produced both reported bugs.
+             *
+             * WIDTH: the art panel gives the meter box its right-hand end
+             * back, so ww changes the moment the panel is toggled. The
+             * lyrics are laid out and centred for a width, so the old
+             * layout is wrong immediately -- but the line has not changed,
+             * so nothing repainted until the next lyric came round.
+             *
+             * BACKWARDS TIME: B restarts the track. Checking the position
+             * rather than listing the restart sites is deliberate -- this
+             * cache was already missing from all six places that reset
+             * ui_sec, and a seventh would have missed it again. Any
+             * backward jump, restart or seek, invalidates here. */
+            if (ww != lrc_drawn_w || t10 < lrc_last_t10) lrc_drawn = 0xFFFFu;
+            lrc_drawn_w = (uint16_t)ww;
+            lrc_last_t10 = t10;
+
+            if (cur != lrc_drawn) {
+                lrc_drawn = (uint16_t)cur;
+                ui_bg_restore(UI_MARGIN, top, ww, boxh);
+
+                if (!lrc_n) {
+                    /* Most tracks have no sidecar. Say so -- an empty box reads
+                     * as a broken meter rather than as an absent file. */
+                    uint32_t y = top + boxh / 2u - 8u;
+                    uint32_t w = fb_text_width("NO LYRICS", TS_1X);
+                    fb_set_color(UI_FAINT, ui_grad_at(y + 8u));
+                    fb_text_boxed(UI_MARGIN + ((ww > w) ? (ww - w) / 2u : 0u),
+                                  y, "NO LYRICS", TS_1X, TS_1X, ww,
+                                  UI_MARGIN + ww);
+                } else {
+                    uint32_t used = lrc_emit(top, ww, cur, 2, 1);
+
+                    int32_t r = 2 + (int32_t)used;
+                    for (uint32_t k = 1u; cur + k < lrc_n && r < 5; k++)
+                        r += (int32_t)lrc_emit(top, ww, cur + k, r, 0);
+
+                    r = 2;
+                    for (uint32_t k = 1u; k <= cur && r > 0; k++) {
+                        r -= (int32_t)lrc_rows(cur - k, ww);
+                        lrc_emit(top, ww, cur - k, r, 0);
+                    }
+                }
+            }
+            goto viz_done;
+        }
+
         if (viz_mode == VIZ_SCROLL) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
@@ -5736,9 +6414,9 @@ ui_tail:
         /* Clear FIRST, then set the colour. fb_rect() writes the colour
          * registers (fg = bg = its fill), so setting the text colour before a
          * clear leaves fg == bg and the glyphs paint invisibly. */
-        fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_15X), cbg);
+        fb_rect(UI_MARGIN, UI_TIME_Y, UI_INNER_W, FB_CELL(TS_24), cbg);
         fb_set_color(UI_WHITE, cbg);
-        fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_15X, TS_15X, UI_INNER_W);
+        fb_text_clipped(UI_MARGIN, UI_TIME_Y, buf, TS_24, TS_24, UI_INNER_W);
 
         /* 1.2x, while it is on. Right-aligned on this row, which puts it
          * directly under the track counter -- that is drawn right-aligned on
@@ -5757,8 +6435,8 @@ ui_tail:
             const char *sp = "1.2x";
             uint32_t sw = fb_text_width(sp, TS_1X);
             uint32_t sx = FB_W - UI_MARGIN - sw;
-            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_15X) > FB_CELL(TS_1X)
-                                     ? (FB_CELL(TS_15X) - FB_CELL(TS_1X)) / 2u : 0u);
+            uint32_t sy = UI_TIME_Y + (FB_CELL(TS_24) > FB_CELL(TS_1X)
+                                     ? (FB_CELL(TS_24) - FB_CELL(TS_1X)) / 2u : 0u);
             fb_set_color(ui_accent, cbg);
             fb_text_clipped(sx, sy, sp, TS_1X, TS_1X, sw + 2u);
         }
@@ -5788,6 +6466,7 @@ ui_tail:
             uint32_t dirty = 0;
             if (art_x > prev) { ui_art_bg_range(prev, art_x - prev); dirty = 1; }
             if (right < FB_W) { ui_art_bg_range(right, FB_W - right); dirty = 1; }
+            if (dirty) lrc_drawn = 0xFFFFu;   /* slide repaints over the box */
             if (dirty)
                 for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                     wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
@@ -6647,7 +7326,6 @@ static void meters_feed(const short *pcm, int n, int stereo)
  * followed by the hold action for the same press. A tap is tens of
  * milliseconds, so deferring it that long is not perceptible.
  */
-static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
 static uint32_t pl_reload_pending;       /* user picked a different .m3u       */
 static uint32_t pl_dump_req;             /* Select+B: show the 0190 struct     */
 static uint32_t dt_dump_req;             /* Select+A: show the boot datatable  */
@@ -6891,8 +7569,15 @@ static void poll_input(void)
          * row you can always name, and hunting for it defeats the point. */
         if (edge & KEY_Y) { pl_ui_sel = pl_pos; pl_ui_follow(); pl_ui_dirty = 1u; }
 
-        if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u; pl_ui_restore = 1u; }
-        if (edge & KEY_B) { pl_ui_open = 0u; pl_ui_restore = 1u; }
+        /* A commits, so it closes INSTANTLY rather than fading. Two reasons,
+         * and the second is the real one: what you want to look at now is the
+         * player, and a track load is the most interleaved moment in this
+         * core -- load_track() repaints the card, and an overlay still open
+         * on top of that would be drawing over a load in progress for 100 ms
+         * to no purpose. Dismissing (B, SELECT) has nothing to race. */
+        if (edge & KEY_A) { pl_ui_play_req = 1u; pl_ui_open = 0u;
+                            pl_ui_closing = 0u; pl_ui_restore = 1u; }
+        if (edge & KEY_B) pl_ui_dismiss();
         edge &= KEY_SELECT;
         fall &= KEY_SELECT;
         keys &= KEY_SELECT;
@@ -6988,6 +7673,12 @@ static void poll_input(void)
          * modes wrap in a handful of taps, and every Select combo the user has to
          * remember costs more than it saves. */
         viz_mode = (uint8_t)((viz_mode + 1u) % VIZ_COUNT);
+        /* Lyrics are not loaded unless this meter is showing, so arriving
+         * at it mid-track has to fetch them. That is a far read on a slot
+         * that is not the stream -- the fragment-cache stutter -- but it
+         * happens ONCE, on a button the user just pressed, instead of on
+         * every track load whether they want lyrics or not. */
+        if (viz_mode == VIZ_LYRICS && !lrc_n) lrc_load();
         /* The cascade skips the split for stages the OUTGOING meter did not
          * read, so their splitter state and accumulators are stale by however
          * long that meter was up. Clear them, or the first window after a
@@ -7013,7 +7704,8 @@ static void poll_input(void)
                    : viz_mode == VIZ_DOTS   ? "METER: PEAK DOTS"
                    : viz_mode == VIZ_EYE    ? "METER: MAGIC EYE"
                    : viz_mode == VIZ_LED    ? "METER: SPECTRUM"
-                                            : "METER: CASSETTE");
+                   : viz_mode == VIZ_TAPE   ? "METER: CASSETTE"
+                                            : "METER: LYRICS");
         settings_mark_dirty();
         }
     }
@@ -7279,9 +7971,21 @@ static void poll_input(void)
      * Opening lands the cursor on what is playing, which is the row a user
      * wants nine times in ten. */
     if ((fall & KEY_SELECT) && !sel_used && !sel_held) {
-        if (pl_ui_open) { pl_ui_open = 0u; pl_ui_restore = 1u; }
+        if (pl_ui_open) pl_ui_dismiss();
         else if (pl_count) {
-            pl_ui_open = 1u;
+            pl_ui_open    = 1u;
+            pl_ui_fade      = 0;        /* bare panel; contents fade up */
+            pl_ui_closing   = 0;
+            pl_ui_fade_from = 0;
+            pl_ui_fade_t0   = cycles();
+            /* Open at full and breathe down, so the marker is at its most
+             * legible exactly when you are looking for it. Deadline ARMED
+             * from cycles(): a 0 here reads as "due 35 s ago" or "due in a
+             * moment" depending on where the counter happens to be, which has
+             * cost this project a day before. */
+            pl_mk_lvl  = PL_MK_STEPS;
+            pl_mk_up   = 0u;
+            pl_mk_next = cycles() + PL_MK_TICK;
             pl_ui_sel  = pl_pos;
             pl_ui_follow();
             pl_ui_dirty = 1u;
@@ -7550,7 +8254,22 @@ static void size_probe_arm(void)
  * been READ is direct evidence the slot is streaming properly, and it is a
  * better gate than a timer because it is the same thing the probe depends on.
  * A file smaller than this reaches eof_hit instead, and refill_pump() records
- * the true end there for free. */
+ * the true end there for free.
+ *
+ * REVERTED to 256 KB after trying 64 KB with a 1 s floor.
+ *
+ * The shorter gate did make the duration appear in 2 s instead of 8, and
+ * it introduced an audible STUTTER a few seconds into every
+ * playlist-opened track -- reported immediately, and absent from earlier
+ * versions. The reasoning above says why: the slot has NOT settled that
+ * early, so the far read fails or answers short. A short answer is worse
+ * than a slow one, because playback later runs past it and RE-ARMS the
+ * probe, so the far read -- and the fragment-cache drop that sounds like
+ * a stutter -- happens more than once.
+ *
+ * The wall-clock cost is real (13 s at 160 kbps) but the fix is not to
+ * probe sooner. It is not to probe at all: see whether APF's own 0190
+ * response carries the file size. */
 #define SZP_START_AFTER (256u * 1024u)
 
 /* One step. Returns 1 when a size has just been established. */
@@ -7818,6 +8537,7 @@ static int32_t *fl_buf;            /* one blocksize of int32, from the arena */
 
 #include "art.inc"
 #include "playlist.inc"
+#include "lyrics.inc"        /* AFTER playlist.inc -- uses pl_open_try() */
 #include "settings.inc"
 
 /* Slide unconsumed bytes down and pull in ONE chunk. Compaction keeps Helix's
@@ -8953,6 +9673,13 @@ static uint32_t vbr_frame_count(void)
             uint32_t e = i + 8u;
             if (flags & 1u) e += 4u;            /* FRAMES  */
             if (flags & 2u) e += 4u;            /* BYTES   */
+            /* Keep the TOC on the way past rather than only stepping
+             * over it. Requires the whole table to be in the buffer:
+             * a half-read one would aim seeks into nowhere. */
+            if ((flags & 4u) && e + 100u <= lim) {
+                for (uint32_t k = 0; k < 100u; k++) xing_toc[k] = ring[e + k];
+                xing_toc_ok = 1u;
+            }
             if (flags & 4u) e += 100u;          /* TOC     */
             if (flags & 8u) e += 4u;            /* QUALITY */
 
@@ -8981,6 +9708,38 @@ static uint32_t vbr_frame_count(void)
             return ((uint32_t)ring[i+14] << 24) | ((uint32_t)ring[i+15] << 16) |
                    ((uint32_t)ring[i+16] << 8)  |  (uint32_t)ring[i+17];
         }
+    }
+    return 0;
+}
+
+/* The BYTES field again, from a SECOND read, with NO side effects.
+ *
+ * Deliberately not a re-run of vbr_frame_count(): that one also populates
+ * track_frames, track_encoder and the Xing TOC, and a second read exists
+ * precisely because the first one might be bad -- so it must not be able to
+ * overwrite what the load has already taken from the first.
+ *
+ * Lands in tagbuf, never the ring, for the reason given at the FLAC seektable:
+ * a buffer the decoder is not streaming from disturbs nothing. Same 2048-byte
+ * window and the same field offsets as vbr_frame_count, so the two are looking
+ * at the same bytes and a difference means a READ differed, not a parse. */
+static uint32_t vbr_bytes_again(uint32_t at)
+{
+    uint32_t lim = TAG_SIZE < 2048u ? TAG_SIZE : 2048u;
+    if (!target_read(at, TAG_OFF, lim)) return 0;
+    for (uint32_t i = 0; i + 20u < lim; i++) {
+        uint8_t a = tagbuf[i], b = tagbuf[i+1], c = tagbuf[i+2], d = tagbuf[i+3];
+        if ((a == 'X' && b == 'i' && c == 'n' && d == 'g') ||
+            (a == 'I' && b == 'n' && c == 'f' && d == 'o')) {
+            uint32_t flags = ((uint32_t)tagbuf[i+4] << 24) | ((uint32_t)tagbuf[i+5] << 16) |
+                             ((uint32_t)tagbuf[i+6] << 8)  |  (uint32_t)tagbuf[i+7];
+            if (!(flags & 1u) || !(flags & 2u)) return 0;   /* no FRAMES, or no BYTES */
+            return ((uint32_t)tagbuf[i+12] << 24) | ((uint32_t)tagbuf[i+13] << 16) |
+                   ((uint32_t)tagbuf[i+14] << 8)  |  (uint32_t)tagbuf[i+15];
+        }
+        if (a == 'V' && b == 'B' && c == 'R' && d == 'I')
+            return ((uint32_t)tagbuf[i+10] << 24) | ((uint32_t)tagbuf[i+11] << 16) |
+                   ((uint32_t)tagbuf[i+12] << 8)  |  (uint32_t)tagbuf[i+13];
     }
     return 0;
 }
@@ -9284,8 +10043,38 @@ static int read_track_head(void)
     if (track_bytes && slot_size) {
         uint32_t real = audio_start + track_bytes;
         if (slot_size > real + real / 4u) {
-            size_suspect = 1;
-            slot_size    = real;      /* trust the audio, not the directory */
+            /* CORROBORATE before accusing the card -- the two sides of that
+             * comparison are not equally trustworthy. slot_size is a register
+             * read. track_bytes was parsed from ONE unvalidated read of the
+             * frame header, taken just after a slot switch, which is exactly
+             * where this core has a documented history of stale fragment-cache
+             * bytes. The ID3 block a few lines up already converges on two
+             * agreeing reads for that reason; this field had no such guard.
+             *
+             * And a bad read does not merely print a message: the line below
+             * also REPLACES slot_size, so a garbage BYTES field would take the
+             * total time, the progress bar, the seek bracket and end-of-track
+             * with it for the whole track.
+             *
+             * Paid only when the check is about to fire, so a healthy file
+             * costs nothing and the rare accusation costs one 2 KB read -- at
+             * load, with nothing streaming yet, near the sequential head.
+             *
+             * Disagreement means one of the two reads was wrong and there is
+             * no way to tell which, so neither is acted on: keep the
+             * directory figure and stay quiet. That degrades safely, because
+             * an inflated slot_size self-corrects at EOF (refill_pump records
+             * the true end when a read past it fails) whereas a wrongly
+             * trusted BYTES field never does.
+             *
+             * Seen once on hardware and never reproduced; the card measured
+             * clean afterwards on all 37 files carrying a BYTES field. No
+             * instrumentation added for one sighting -- if it recurs, that is
+             * the point to measure rather than guess again. */
+            if (vbr_bytes_again(skip) == track_bytes) {
+                size_suspect = 1;
+                slot_size    = real;  /* trust the audio, not the directory */
+            }
         }
     }
     /* Nothing to check on a file with no Xing/VBRI header -- it never states
@@ -9435,9 +10224,22 @@ static int load_track(void)
         fl.skip = flac_skip_bytes;  /* set BEFORE open: it survives the zeroing */
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
         if (fe == FLAC_ERR_UNSUPPORTED) {
-            /* Mirrors the order of the checks inside flac_open, so the reason
-             * reported is the one that actually fired. */
-            if (fl.channels < 1u || fl.channels > 2u) {
+            /* Report the BINDING reason, not the first check to fire.
+             *
+             * A file can trip two gates at once, and the two 96 kHz covers on
+             * the test card did exactly that: 8192-sample blocks AND 96 kHz.
+             * flac_open checks the block size and returns, so the core said
+             * "BLOCK 8192" -- true, but not why the file is unplayable. The
+             * block cap is an implementation limit that has since been
+             * raised; the rate is a hardware speed limit that is not going to
+             * move. Naming the one that cannot be worked around is the honest
+             * answer, and it is free: flac_open fills STREAMINFO before it
+             * rejects, so fl.rate is already in hand here.
+             *
+             * Below this, the order still mirrors flac_open's own. */
+            if (fl.rate > FLAC_MAX_RATE) {
+                fl_reject_kind = FLR_RATE;  fl_reject_val = fl.rate;
+            } else if (fl.channels < 1u || fl.channels > 2u) {
                 fl_reject_kind = FLR_CHANS; fl_reject_val = fl.channels;
             } else if (fl.bps != 8u && fl.bps != 16u &&
                        fl.bps != 20u && fl.bps != 24u) {
@@ -9537,6 +10339,28 @@ static int load_track(void)
      * end-of-track check, none of which matter in the first second.
      *
      * A file that declares its own length still skips all of this. */
+    /* A PLAYLIST can declare the duration the file does not. Extended .m3u
+     * carries "#EXTINF:<seconds>" ahead of each entry and pl_parse keeps it,
+     * so a headerless track arrives already knowing how long it is.
+     *
+     * This is the whole point of it: size_probe_pump() opens with
+     * `if (track_secs) return 0;`, so a declared duration retires the far-read
+     * search outright -- and with it the fragment-cache drop that was heard as
+     * a stutter 8.2 s into a 256 kbps headerless track. ui_total_secs(), the
+     * progress bar and the meas_rate branch all consult track_secs first, so
+     * they come good at the first painted clock rather than eight seconds in.
+     *
+     * Only when the FILE does not say. A Xing/VBRI header is exact and lands a
+     * frame or two later, during decode, and is deliberately left to overwrite
+     * this; FLAC has already set track_secs from STREAMINFO by here. So the
+     * playlist is the LAST resort, never a second opinion.
+     *
+     * Consumed, not read: zeroing it here means a figure armed by the playlist
+     * cannot leak onto a track the user then picks from the menu, which needs
+     * no hint anyway -- an 008A pick carries the real size with it. */
+    if (!track_secs && pl_hint_secs) track_secs = pl_hint_secs;
+    pl_hint_secs = 0;
+
     if (slot_size <= audio_start && track_bytes)
         slot_size = audio_start + track_bytes;
     if (slot_size <= audio_start)
@@ -9632,7 +10456,33 @@ static int load_track(void)
         art_file_id = cur_file_id;
     }
     art_ready = 1;
+
+    /* Lyrics ride the artwork's gap deliberately. Both are far reads on a slot
+     * that is not the stream, both are wanted before the first note, and doing
+     * them here means neither ever happens during playback -- which is the one
+     * thing that would reintroduce the fragment-cache stutter. Costs one open
+     * and one read beside artwork's 43 to 207. */
+    /* ONLY when the meter that uses them is showing.
+     *
+     * The comment above says this costs one open and one read. That was
+     * written assuming a missing sidecar fails fast. It does not: a file
+     * with no .lrc pays pl_template's 1 s GETFILE timeout and then
+     * pl_open_try's 3 s OPENFILE timeout, FOUR SECONDS of blocking in
+     * load_track, on every track, for a feature not in use.
+     *
+     * It showed up as the duration appearing eight or nine seconds late,
+     * with a stutter, on exactly the files that have to MEASURE their
+     * length -- no usable frame count, so the size probe runs, and the
+     * probe only gets going once this has finished blocking. Reported on
+     * Stockholm Syndrome and Widespread Panic, both of which have no
+     * .lrc and no frame count.
+     *
+     * Gated rather than made faster because the user's call was that
+     * lyrics must not cost anything when unused. Switching TO the meter
+     * loads them then; see the meter cycle. */
     ld_art = LD_MS(cycles() - tphase); tphase = cycles();
+    if (viz_mode == VIZ_LYRICS) lrc_load(); else lrc_clear();
+    ld_lrc = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
      * rather than animated -- a track change should not look like a slide. */
@@ -9754,12 +10604,12 @@ static int load_track(void)
          * only ever cost this row the width that clipped T -- "T3731" showed
          * as "T373", a total smaller than one of its own parts. */
         char b[40], *q = b;
-        const char *lbl = "HSAT";
-        const uint16_t v[4] = { ld_head, ld_size, ld_art, ld_total };
-        for (uint32_t k = 0; k < 4u; k++) {
+        const char *lbl = "HSALT";
+        const uint16_t v[5] = { ld_head, ld_size, ld_art, ld_lrc, ld_total };
+        for (uint32_t k = 0; k < 5u; k++) {
             *q++ = lbl[k];
             q = ui_dec(q, v[k]);
-            if (k < 3u) *q++ = ' ';
+            if (k < 4u) *q++ = ' ';
         }
         *q = 0;
         ui_toast_set(b, 0xFFFFFFFFu, 0);
@@ -9795,7 +10645,7 @@ static void ui_mid_line(uint32_t y, const char *s, uint16_t fg, uint32_t ts)
 static void ui_mismatch_screen(uint32_t got, uint32_t want)
 {
     char b[48], *q = b;
-    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_15X);
+    ui_mid_line(120u, "UPDATE INCOMPLETE",              UI_RED,   TS_24);
     ui_mid_line(168u, "Some core files are from a",     UI_WHITE, TS_1X);
     ui_mid_line(186u, "different version.",             UI_WHITE, TS_1X);
     ui_mid_line(220u, "Reinstall MP3 Player.",          UI_WHITE, TS_1X);
@@ -10886,6 +11736,11 @@ int main(void)
 
             uint32_t step = ui_byte_rate() * (seek_secs ? seek_secs : 5u);
             uint32_t want;
+            /* Set when the TOC supplied the target, so the clock can be
+             * assigned the second asked for instead of being re-derived
+             * from the landed byte through the same flat average that
+             * put the seek in the wrong place. 0 = no TOC, linear path. */
+            uint32_t seek_exact = 0u;
 
             /* FLAC with a seek table works in TIME, not bytes: the target
              * second is exact, and flac_seek_locate() MEASURES the offset
@@ -11016,7 +11871,34 @@ int main(void)
                 goto seek_done;
             }
 
-            if (seek_req == 1u) {
+            /* MP3 with a Xing TOC seeks in TIME, the way FLAC with a seek
+             * table already does. The byte path below computes a target
+             * from a flat average, which on a variable file is wrong by
+             * seconds -- and then derives the CLOCK from that same
+             * average, so the two agree with each other and disagree with
+             * the audio. That is why the lyrics drifted after a seek while
+             * the seek itself felt fine: nothing was out of step except
+             * the number being displayed.
+             *
+             * A file with no TOC falls through to the byte path unchanged. */
+            if (track_fmt == FMT_MP3 && xing_toc_ok && track_secs) {
+                uint32_t secs = seek_secs ? seek_secs : 5u;
+                uint32_t tgt;
+                if (seek_req == 1u) {
+                    tgt = ui_sec + secs;
+                    /* Three seconds of tail, the same rule both other
+                     * paths use, so the end stays audible. */
+                    uint32_t last = (track_secs > 3u) ? track_secs - 3u : 0u;
+                    if (tgt > last) tgt = last;
+                } else {
+                    tgt = (ui_sec > secs) ? ui_sec - secs : 0u;
+                }
+                uint32_t at = xing_byte_at(tgt);
+                if (at) { want = at; seek_exact = tgt + 1u; }
+                else if (seek_req == 1u) want = file_pos + step;
+                else want = (file_pos > audio_start + step)
+                          ? file_pos - step : audio_start;
+            } else if (seek_req == 1u) {
                 /* Forward stops short of the end. Backward has always clamped
                  * to audio_start; forward never did, so holding it walked
                  * file_pos past the end of the file, the refill came back empty
@@ -11067,7 +11949,12 @@ int main(void)
                 stopped  = 0;                 /* no longer at 0:00 */
 
                 uint32_t rate = ui_byte_rate();
-                ui_sec      = rate ? (file_pos - audio_start) / rate : 0u;
+                /* The TOC path asked for a SECOND and got the byte for
+                 * it, so the second is the answer. Re-deriving it from
+                 * the byte would reintroduce the very error the table
+                 * was read to avoid. */
+                ui_sec      = seek_exact ? seek_exact - 1u
+                            : (rate ? (file_pos - audio_start) / rate : 0u);
                 ui_sec_acc  = 0;
                 ui_last_sec = 0xFFFFFFFFu;
                 ui_prog_sec = 0xFFFFFFFFu;

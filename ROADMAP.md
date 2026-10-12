@@ -12,6 +12,106 @@ note — leaving it in place makes the rule above unreadable, since "the list ab
 is empty" stops meaning anything. The write-ups go with them; they are kept for
 the reasoning, not the status.
 
+# Backlog
+
+Candidates that are not scheduled. Everything here sits behind v1.7.0
+shipping and behind the Defects list, per the rule at the top.
+
+The live feature candidates from the v1.6.0 planning section further down are
+still live and are NOT repeated here -- **N1 scrobbler** (session-only, QR
+export, no card write) and **N3 AAC/.m4a** (~1.5x MP3's cost; the one item
+with a real user behind it, since the .m4a files are kept off the card
+specifically because the core cannot play them). N3's old "needs Phase 1"
+dependency is void: Phase 1 was dropped and PSRAM took its place.
+
+## Tracker and MIDI playback -- considered 2026-10-12
+
+Asked for as one question; they are three different problems, and which
+resource each one needs is what separates them. From the rev 24 fit:
+
+    ALMs    6,521 / 18,480   35%    12,000 free
+    DSP        11 / 66       17%    55 free
+    M10K      294 / 308      95%    14 free  <- the scarce one
+
+Logic and DSP are abundant, block RAM is effectively gone, and PSRAM (32 MB,
+~15 clk_sys cycles an access) holds only pl_text's 12 KB.
+
+**What makes trackers EASIER than what the core already does.** A module is
+loaded once and played from memory, so there is no streaming: no ring, no
+refill, no far-read-corrupts-the-slot, no I/O underrun. After the load it is
+pure compute. That deletes the problem class most of this file is about.
+
+### MOD -- the tractable one
+
+Samples live in PSRAM; 50-300 KB against 32 MB is nothing. Four channels at
+44.1 kHz is 176,400 PSRAM reads a second, 15 cycles each: **4% of the clock**.
+The mixing arithmetic is trivial next to 55 idle DSPs.
+
+The work is the EFFECTS, not the mixer -- arpeggio, portamento, vibrato,
+sample offset, pattern loop and the rest. That is where every tracker
+player's compatibility complaints come from and it is most of the firmware.
+Roughly 8-12 KB of code, firmware only, no RTL.
+
+**3-5 sessions.** The most self-contained item on this list.
+
+### XM -- the same architecture, more of everything
+
+Instruments holding several samples, volume and panning envelopes, 16-bit
+samples, linear AND Amiga frequency tables, a wider effect set plus the
+volume column.
+
+Channel count is the constraint. At 32 channels the PSRAM traffic alone is
+**32% of the clock**, and linear interpolation doubles it to 64%, which will
+not fit beside the UI and the meters. Most modules are 8-16 channels, so the
+common case is fine and the worst case needs a decision: drop interpolation
+above a threshold, or cache hot sample windows in firmware RAM.
+
+Build it on MOD's mixer. **6-10 sessions on top of MOD.**
+
+### MIDI -- a different project, and much bigger
+
+A MIDI file contains no audio. The synthesiser IS the work.
+
+*Wavetable.* CPU cost is about XM's, so that part is fine. The blocker is the
+bank: it would ship as a core asset loaded into PSRAM at boot, like
+mp3font.bin, so drag-and-drop survives and the user supplies nothing -- but a
+General MIDI set that is small, acceptable-sounding AND freely
+redistributable is a sourcing problem, and publish.py already runs licence
+gates for exactly this class of thing. The blocker is not engineering.
+
+*FM in fabric.* Software OPL3 emulation comes out near 60 M instr/s against a
+40.4 M budget, so it is out; an OPL3 in RTL fits easily in the free ALMs and
+DSPs, and the patch bank is a few KB. This workspace has shipped FM before
+(the OPN build for Legend of Kage). Risks: the 14 remaining M10K for waveform
+tables, and that it is hardware compile cycles rather than firmware. Be
+honest about the result too -- OPL3 MIDI sounds like a 1992 DOS game, which
+is not what most people expect from "MIDI support".
+
+**10+ sessions either way**, and the wavetable route is gated on an asset
+that does not exist yet.
+
+### Two things that do not fit the current UI
+
+- **Duration is unknowable.** Module length depends on pattern jumps and
+  loops; you cannot know it without simulating playback, and some modules
+  never end. This is the headerless-MP3 problem with no #EXTINF to rescue it,
+  so the progress bar needs a different mode.
+- **No album art and no tags.** A song title and sample names is all there
+  is. The card layout assumes art plus artist/album.
+
+### The recommendation
+
+**MOD alone, as a self-contained experiment**, and only after 1.7.0 ships. It
+is the only one of the three that fits the hardware's strengths instead of
+fighting its one scarce resource: no RTL, no new assets, no licence question,
+and it uses PSRAM that is sitting idle. If the mixer and effect engine land
+cleanly, XM is an extension of the same code rather than a new project.
+
+MIDI should not be started unless the FM sound is specifically what is
+wanted, in which case it is an RTL project and wants scoping as one.
+
+---
+
 # v1.6.0 -- RELEASED 2026-10-06
 
 Merged `ff89864`, tagged `v1.6.0`, published with the zip attached and
@@ -146,6 +246,66 @@ cheap software wins are spent, and the SDRAM migration is what affords the
 block buffer. That is a coherent 1.7.0 worth 437 files, and a far better
 justification than either had before.
 
+### M10K diet -- DONE on `feature/m10k-diet`, held for 1.6.1 or 1.7.0
+
+**It is in 1.7.0 and has been running on hardware since 2026-10-07.** `b8678f6`
+and `36b7a95` both precede the rev 24 bitstream (`2e413a8`), with no later
+change to `VexRiscv_Full.v` or `sync_fifo.v` -- so every hardware session since
+has exercised it: the font work, lyrics, Japanese, VBR seek, EXTINF and the
+size guard. No fault observed. "Untested on hardware" below was true when
+written and is not now; what it has NOT had is a test aimed at it, which is
+why it leads docs/QA_1.7.0.md.
+
+**301 -> 294 blocks; free headroom doubled, 7 -> 14.** Held out of 1.6.0
+deliberately: the release gains nothing from it (no 1.6.0 feature spends the
+blocks), it was untested on hardware at the time, and it touches the CPU
+register file and
+cache tags -- where a subtle fault means intermittent wrong results rather
+than a clean crash. Including it would also have made the 1.6.0 regression
+pass ambiguous.
+
+Five arrays moved out of block RAM, no behavioural change:
+
+| array | was | now |
+|---|---|---|
+| `fw_mem` | 4096 bits, 40% of a block | 8 MLABs |
+| `glyphbuf` | 2048 bits, 20% | 4 MLABs |
+| `sync_fifo` | 128 bits, **1%** | logic, `use_eab = "OFF"` |
+| VexRiscv regfile x2 | 1024 bits each, 10% | MLAB |
+| VexRiscv cache tags x2 | 2816 bits each, 28% | MLAB |
+
+**The finding worth keeping: Quartus honours `ramstyle`, and the VexRiscv
+generator emits `ram_style` -- the Xilinx spelling, silently ignored.** So the
+netlist's `ram_style = "block"` was never forcing anything; Quartus simply
+defaulted to M10K. Measured both ways: 298 with the wrong spelling, 294 with
+the right one. An attribute that does not apply produces no warning, so audit
+any other vendor-crossed attribute in third-party RTL.
+
+Cost: ALMs 33% -> 35% (12 MLABs of ~460). Setup slack +1.538 -> +1.699 ns on
+clk_sys -- better, because MLABs sit in the fabric beside the logic that reads
+them. No MMIO change, so CORE_VERSION stays rev 23.
+
+**Rejected on inspection:** the APF datatable's 2 blocks for 8192 bits. Both
+ports are genuinely driven -- bridge writes, SoC reads -- so 32-bit True Dual
+Port needs two.
+
+**Still available, roughly in order of value per risk:**
+
+| item | blocks | note |
+|---|---|---|
+| `font_rom` reshape | 4 | 3040x32 needs 12 blocks; depth is padded to 4096 |
+| CPU RAM 256 -> 248 KB | 8 | needs the power-of-two banking first |
+| `font_rom` -> SDRAM | ~14 | the extended-glyph path already works; needs a small fallback ROM or a missing font file means NO text |
+| cold code -> SDRAM via I-cache | 20-30+ | research spike. The 4 KB I-cache currently fronts single-cycle BRAM and does almost nothing |
+
+**The rule for what can move anywhere** (SDRAM, PSRAM): access FREQUENCY, not
+what it holds. `pl_text` moved because it is read ~12,000 times sequentially,
+once per load. Anything touched per pixel, per sample or per cycle stays:
+`linebuf`, `cmd_mem`, `pcm_fifo`, the cache data arrays, the Helix arena,
+`art_acc`. And "move it to SD" is never literal -- the card is not addressable;
+it means shipping an asset file that is loaded into SDRAM at boot, which is
+what `mp3font.bin` already is.
+
 ### Still open
 
 - **24-bit bit-exactness is NOT verified.** 16-bit is (`bit-exact: yes` over
@@ -256,7 +416,12 @@ either needs this or is independent of it; nothing is blocked BY it. Estimate
   2026-10-02**, three causes; see the write-up below. The open defect
   carried out of v1.5.1. Not reproducible; `SEEK_TRACE` is already in the
   firmware at default 0. Highest priority -- write-up further down this file.
-- **F2. Seeking a VBR MP3 lands the clock wrong.** Deferred from v1.5.0,
+- ~~**F2. Seeking a VBR MP3 lands the clock wrong.**~~ **FIXED in 1.7.0**
+  (`cae777a`), by seeking through the Xing TOC instead of a flat average:
+  45 of 45 lookups match an independent calculation, and the convex-TOC
+  fixture in `tools/host/toc_check.py` shows the old linear estimate was
+  out by up to 21 s. Verified on hardware on the file that exposed it.
+  Original entry: deferred from v1.5.0,
   measured at -3.4 / -3.1 / -1.3 s on Xing files. Held until lyrics, because
   lyrics are what make a few seconds of clock error matter.
 - **F3. Headerless VBR estimates the total time.** Already dropped from the
@@ -273,7 +438,12 @@ either needs this or is independent of it; nothing is blocked BY it. Estimate
 - **E3. Raise the 48 kHz gate** to what the combination actually supports,
   measured rather than hoped. Today's README frames a METER cost as a hardware
   ceiling and tells users to re-encode files that play fine on bars.
-- **E4. Font: the 1.5x title scale resamples**, which is why title stems are
+- ~~**E4. Font: the 1.5x title scale resamples**~~ **DONE in 1.7.0.** Native
+  24 px and 32 px cells in the font file and the draw engine, so no scaler
+  touches them. Took four rounds of glyph corruption to land -- the last
+  cause was a font-load write burst crossing an SDRAM page edge, which is
+  why `sim/tb_fontload.v` exists. The splash was the last scaled text and
+  moved over in `c1a265c`. Original entry: which is why title stems are
   uneven. Needs a second cell size through the command, the SDRAM font path and
   glyphbuf -- RTL work, not generator work. Depends on Phase 1.
 

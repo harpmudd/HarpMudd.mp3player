@@ -41,7 +41,27 @@
  *
  * It was 26624; the 2048 came back because the FLAC decoder's CODE has to be
  * resident alongside Helix's, and total RAM is image + heap, not just data. */
-#define ARENA_BYTES 24576u
+/* Sized by FLAC, not by Helix, since 2026-10-12.
+ *
+ * Helix needs 23,816 bytes and for a long time that set this number, with
+ * 24,576 being the next round figure above it. But the FLAC channel-0 buffer
+ * is this same arena -- the two decoders never run together -- so
+ * ARENA_BYTES/4 silently became "the largest FLAC block the core accepts",
+ * and at 24,576 that was 6144. Nothing about 6144 had anything to do with
+ * FLAC; it was the MP3 decoder's working set, divided by four.
+ *
+ * 32,768 makes the cap 8192, which is the block size hi-res encoders
+ * actually use. Measured on hardware before changing it: a real 8192-block
+ * file ran at L0/E330/X1ms/T63ms against two known-good 4608-block files at
+ * L0/E211/X2ms/T80ms and L0/E577/X2ms/T39ms -- inside the baseline band on
+ * every field, with the SHORTEST worst-case gap of the three. The big block
+ * costs nothing.
+ *
+ * Still overridable, e.g. -DARENA_BYTES=65536u for a 16384 cap, which does
+ * not currently fit in the headroom. */
+#ifndef ARENA_BYTES
+#define ARENA_BYTES 32768u
+#endif
 
 static uint8_t  arena[ARENA_BYTES] __attribute__((aligned(8)));
 static uint32_t arena_next;
