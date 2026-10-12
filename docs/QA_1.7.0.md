@@ -233,9 +233,17 @@ hardware can be read against them.
 ## 10. Before release — not part of testing
 
 - `core.json` still says `date_release: 2026-10-06`, which is v1.6.0's date.
-- CHANGELOG.md has no 1.7.0 entry yet.
-- README's "Current version" line is checked by `fw/build.sh`, so it is
-  already consistent — but the body text describing features is not checked by
-  anything.
+  Set it to the actual release date at tag time, not before.
+- ~~CHANGELOG.md has no 1.7.0 entry yet.~~ **DONE 2026-10-12**, dated
+  "unreleased" — the date goes in with the tag.
+- ~~README body text describing features is not checked by anything.~~
+  **REVIEWED 2026-10-12.** It had no mention of lyrics at all, said twelve
+  meters when there are thirteen, and told readers that 8192-sample FLAC
+  blocks need more buffer than the decoder has — which stopped being true in
+  this release. All three corrected. The "Current version" line is checked by
+  `fw/build.sh` and was already right.
 - `diag.m3u` points at the pre-rename `The Blue Hearts - 12 - Linda Linda.flac`.
-- The `(Dev)` marker comes off at release.
+  Card-side only; it is not in the repo.
+- The `(Dev)` marker comes off at release. Nothing to edit: the default is
+  DEV and a release build asks for `-DAPP_RELEASE=1`, deliberately that way
+  round.

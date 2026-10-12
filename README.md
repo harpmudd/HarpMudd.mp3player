@@ -105,10 +105,10 @@ characters come from `mp3font.bin`, which the core loads at startup.
 - **Album art** from the tag's embedded image — baseline JPEG. Tracks without a
   cover show no panel; a cover that can't be decoded shows the panel with the
   reason in it.
-- **Twelve meters**, cycled with **X**: bars, waterfall, L/R levels, phase
+- **Thirteen meters**, cycled with **X**: bars, waterfall, L/R levels, phase
   scope, oscilloscope, twin analogue VU needles, scrolling waveform, mirrored
-  bars, peak dots, a magic eye, a 16-band spectrum analyser and an animated
-  cassette whose reels wind as the track plays.
+  bars, peak dots, a magic eye, a 16-band spectrum analyser, an animated
+  cassette whose reels wind as the track plays, and [lyrics](#lyrics).
 - **Elapsed and total time**, with a progress bar.
 - **Repeat and shuffle indicators**, dimmed rather than hidden when off, the
   **EQ preset name**, and the position in the playlist.
@@ -121,6 +121,24 @@ Tapping **Select** replaces this screen with the
 CBR and VBR **MPEG-1 and MPEG-2** Layer III at every standard bitrate and sample
 rate, mono or stereo, plus FLAC — see [below](#flac). MPEG-2 covers the lower
 sample rates common in spoken-word recordings.<br clear="right">
+
+## Lyrics
+
+Cycle to the lyrics view with **X** and the words scroll in time with the
+song, the line being sung picked out from the ones around it.
+
+They come from either of two places, and the first one found wins:
+
+- **A `.lrc` file beside the track** — same name, same folder, album
+  subfolders included. `Blur - 13.mp3` takes `Blur - 13.lrc`.
+- **Lyrics already inside the file's own tag.** Many tracks carry them
+  already and need no extra file at all.
+
+Timed `.lrc` lines scroll with the song; a plain unsynced lyric sheet is
+shown as text rather than refused.
+
+Nothing to turn on, and nothing changes for tracks without lyrics — the view
+simply says so.
 
 ## Playlists
 
@@ -278,10 +296,15 @@ That covers CD rips and most libraries. Hi-res — 88.2, 96, 176.4 and 192 kHz �
 is out, along with 32-bit and multichannel. Anything the core can't play says
 so on screen and names the file's own format, so you aren't left guessing.
 
-Two things stop hi-res, not a setting. The decoder needs about 10% more CPU
-than the chip has to keep up with 96 kHz, measured on a real album; and those
-files are usually written in 8192-sample blocks, which need a 32 KB buffer
-where the decoder has 24 KB to work in. 192 kHz is twice as far away again.
+What stops hi-res is CPU, not a setting, and it is not close. Measured on
+real albums: 96 kHz / 24-bit needs about 15% more decoding than the chip can
+do, and on hardware that means the audio queue sits empty a fifth of the
+time. Even 88.2 kHz at 16-bit — the easiest hi-res case there is — spends
+most of a track starved. 176.4 and 192 kHz are twice as far again.
+
+The 8192-sample blocks those files are usually written in used to be a second
+obstacle. That one is gone as of v1.7.0: the buffer was sized by the MP3
+decoder's needs rather than by anything about FLAC, and it now holds them.
 
 Converting a hi-res album to 44.1 kHz is still lossless, and on headphones
 from a handheld it isn't a difference you're going to hear.
