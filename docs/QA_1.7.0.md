@@ -1,5 +1,8 @@
 # QA test plan — v1.7.0
 
+**SIGNED OFF 2026-10-12.** Tested throughout the build rather than as one
+pass at the end, which is how v1.6.0 was taken too. No items open.
+
 Firmware **144,044 bytes** (`2f2c8cf4`), bitstream **rev 24** (`6dccf2c3`),
 font **1,600,736 bytes** (`28d0d019`).
 
@@ -62,7 +65,7 @@ anywhere**. If one does, you have the wrong firmware.
 
 ---
 
-## 1. The M10K diet — the only genuinely unexercised change
+## 1. The M10K diet — CLEARED 2026-10-12
 
 **Why it leads:** it ships no feature, so nothing in normal use points at it,
 and its failure mode is the worst kind — the CPU register file and cache tags
@@ -116,7 +119,7 @@ Measured before the change, against a 360 px budget: scaled 218 px, native
 
 ---
 
-## 3. Font interlock and the fallback path
+## 3. Font interlock and the fallback path — CLEARED 2026-10-12
 
 - Install **only** the new firmware, keeping the old 833,536-byte font, and
   boot. Every 24/32 px glyph should fall back to the scaled rendering and the
