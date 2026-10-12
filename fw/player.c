@@ -1233,6 +1233,50 @@ static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
 static uint32_t pl_ui_mq_next;     /* when it steps again                     */
 static uint16_t pl_ui_mq_sel = 0xFFFFu;  /* row the scroll belongs to         */
 
+/* The play marker's pulse. A triangle wave stepped on a deadline, rather than
+ * a phase derived from cycles() modulo a period: an absolute-time phase has a
+ * discontinuity every 64 s when the counter wraps, and a visible hiccup once a
+ * minute is worse than a pulse that lags one step after a late frame.
+ *
+ * Stepped and repainted from pl_ui_tick(), which is where every other overlay
+ * animation lives and for a known reason -- the main loop runs once per
+ * decoded frame, 38/s on MP3 against 9.6/s on FLAC, and the open/close fade
+ * was shipped into that exact trap once already.
+ *
+ * It deliberately does NOT set pl_ui_dirty. That repaints the whole panel,
+ * ~400 glyph commands, and doing it 12 times a second for the sake of nine
+ * rects is what both the main loop's note and pl_ui_tick's own note warn
+ * against: an idle overlay has to cost nothing, because the decoder is
+ * running underneath it. The pulse repaints the marker and nothing else.
+ *
+ * DEPTH and RATE are separate knobs, which took a correction to get right:
+ * the first version derived the period from the step time, so opening the
+ * depth up ALSO slowed the breath down -- the two changes cancelled and the
+ * marker looked much the same. The step time is derived from the period
+ * instead, so PL_MK_FLOOR changes how far it swings and nothing else.
+ *
+ * FLOOR 8 is half amplitude: the marker swings luma 201..255 against the 149
+ * the other rows' text is drawn in. Both ends were tried on hardware --
+ * FLOOR 4 doubles the visible swing to 173..255 and was judged too much, so
+ * half amplitude is a settled answer rather than a cautious first guess.
+ *
+ * Opening the depth up again is not just a number: at FLOOR 4 the marker on
+ * the SELECTED row -- panel-dark on the accent bar, so softening there means
+ * dissolving INTO the bar -- fell to 26 luma of contrast against it and very
+ * nearly vanished. At FLOOR 8 it holds 60, which is why pl_mk_color() can
+ * treat both rows the same. Anything below ~6 needs that row handled
+ * separately.
+ *
+ * CLK_HZ * 32 is 2.13e9, so the period expression has about one doubling of
+ * headroom left before it overflows a uint32. */
+#define PL_MK_STEPS  16u                    /* brightness levels: full = STEPS */
+#define PL_MK_FLOOR  8u                     /* dimmest level -- DEPTH knob     */
+#define PL_MK_PERIOD (CLK_HZ * 32u / 25u)   /* 1.28 s a full breath -- RATE knob */
+#define PL_MK_TICK   (PL_MK_PERIOD / (2u * (PL_MK_STEPS - PL_MK_FLOOR)))
+static uint8_t  pl_mk_lvl;         /* PL_MK_FLOOR..PL_MK_STEPS                */
+static uint8_t  pl_mk_up;          /* 1 = brightening                         */
+static uint32_t pl_mk_next;        /* when it steps again                     */
+
 enum { REP_OFF = 0, REP_ALL, REP_ONE };
 static uint8_t  rep_mode;                /* cycles off -> all -> one -> off */
 static uint8_t  shuffle_on;
@@ -4526,6 +4570,53 @@ static void pl_ui_dismiss(void)
     pl_ui_dirty     = 1u;
 }
 
+/* The play marker. '>' was always a stand-in, and the note on it said why: the
+ * font is ASCII 0x20..0x7E and has no triangle in it. But a triangle does not
+ * need a glyph. RECT fills an arbitrary rectangle in one engine command, and
+ * nine unit-height rows of widths 1,2,3,4,5,4,3,2,1 ARE a 45-degree isoceles
+ * triangle pointing right -- nine RECT commands against the one CHAR they
+ * replace, in a row that already issues about forty of them.
+ *
+ * Nine rows, odd so the apex is a single row rather than a blunt pair. At
+ * PL_MK_DY it spans y+3..y+11 of the 16 px TS_1X cell, centred on where the
+ * '>' crossbar used to sit, and 5 px wide inside the 12 px the '>' was
+ * clipped to -- so nothing else on the row moves. */
+#define PL_MK_H  9u
+#define PL_MK_X  (PL_UI_X + 8u)
+#define PL_MK_DY 3u
+
+static void pl_marker(uint32_t y, uint16_t c)
+{
+    for (uint32_t i = 0; i < PL_MK_H; i++) {
+        uint32_t w = (i < PL_MK_H / 2u ? i : PL_MK_H - 1u - i) + 1u;
+        fb_rect(PL_MK_X, y + PL_MK_DY + i, w, 1u, c);
+    }
+}
+
+/* Marker colour at the current pulse level. The two cases run in opposite
+ * directions, because the SELECTED row is a filled accent bar: there the
+ * marker is panel-dark on a light fill and softens by moving TOWARD the bar,
+ * while on an unselected row it is white on panel and softens toward the
+ * panel. Same level, opposite ends, so scrolling onto the playing track does
+ * not invert the breath.
+ *
+ * On a normal row the dim end is UI_DIM -- what the other rows' text is drawn
+ * in -- so the marker is never dimmer than the list around it.
+ *
+ * Both rows take the same swing, which is only safe at the depth PL_MK_FLOOR
+ * currently sits at -- see the note there. A deeper setting needs the selected
+ * row damped, because softening there means dissolving into its own bar.
+ *
+ * Through pl_fade() like every other colour in the panel, so the pulse comes
+ * up with the overlay instead of arriving at full strength on a half-drawn
+ * one, and so a dismissal takes it down with everything else. */
+static uint16_t pl_mk_color(int selected)
+{
+    uint16_t lo = selected ? ui_accent : UI_DIM;
+    uint16_t hi = selected ? UI_PANEL  : UI_WHITE;
+    return pl_fade(ui_mix(lo, hi, pl_mk_lvl, PL_MK_STEPS));
+}
+
 static void pl_ui_row(uint32_t i)
 {
     uint32_t y   = PL_UI_LIST_Y + i * PL_UI_ROW_H;
@@ -4568,11 +4659,12 @@ static void pl_ui_row(uint32_t i)
         txt = nm + (pl_ui_mq_off < len ? pl_ui_mq_off : 0u);
     }
 
-    /* '>' rather than an arrow glyph: the font is ASCII 0x20..0x7E. */
+    /* Marker BEFORE the text's fb_set_color, not after: fb_rect clobbers the
+     * colour registers, so drawing it second would leave the glyphs painting
+     * in the triangle's fill. */
+    if (pos == pl_pos) pl_marker(y, pl_mk_color(pos == pl_ui_sel));
     fb_set_color(pl_fade(pos == pl_ui_sel ? UI_PANEL
                        : pos == pl_pos    ? UI_WHITE : UI_DIM), bg);
-    if (pos == pl_pos)
-        fb_text_clipped(PL_UI_X + 8u, y, ">", TS_1X, TS_1X, 12u);
     fb_text_boxed(PL_UI_TEXT_X + 8u, y, txt, TS_1X, TS_1X,
                   PL_UI_W - 40u, PL_UI_X + PL_UI_W - 16u);
 }
@@ -4807,6 +4899,27 @@ static void pl_ui_tick(void)
      * note says matters, because the decoder is running underneath. They just
      * happen on the faster clock now. */
     if (pl_ui_dirty) { pl_ui_dirty = 0; pl_ui_draw(); }
+    /* Step the pulse and repaint the marker alone. `else`, because a full
+     * repaint this frame has already drawn it at the current level; and above
+     * the close check, so a closed overlay never draws into the player that
+     * pl_ui_restore is about to repaint.
+     *
+     * Only when the playing row is on screen -- scrolled away there is nothing
+     * to animate, and the level simply holds until it comes back.
+     *
+     * The geometry never changes, only the fill, so there is nothing to erase
+     * between frames. */
+    else if (pl_pos >= pl_ui_top && pl_pos < pl_ui_top + PL_UI_ROWS &&
+             (int32_t)(cycles() - pl_mk_next) >= 0) {
+        if (pl_mk_up) { if (++pl_mk_lvl >= PL_MK_STEPS) pl_mk_up = 0u; }
+        else          { if (--pl_mk_lvl <= PL_MK_FLOOR) pl_mk_up = 1u; }
+        /* Re-armed from now rather than from the old deadline: a blanked
+         * screen or a stalled frame then costs phase, never a burst of
+         * catch-up steps on the frame it wakes. */
+        pl_mk_next = cycles() + PL_MK_TICK;
+        pl_marker(PL_UI_LIST_Y + (uint32_t)(pl_pos - pl_ui_top) * PL_UI_ROW_H,
+                  pl_mk_color(pl_pos == pl_ui_sel));
+    }
     if (pl_ui_closing && !pl_ui_fade) {
         pl_ui_open    = 0u;
         pl_ui_closing = 0u;
@@ -7817,6 +7930,14 @@ static void poll_input(void)
             pl_ui_closing   = 0;
             pl_ui_fade_from = 0;
             pl_ui_fade_t0   = cycles();
+            /* Open at full and breathe down, so the marker is at its most
+             * legible exactly when you are looking for it. Deadline ARMED
+             * from cycles(): a 0 here reads as "due 35 s ago" or "due in a
+             * moment" depending on where the counter happens to be, which has
+             * cost this project a day before. */
+            pl_mk_lvl  = PL_MK_STEPS;
+            pl_mk_up   = 0u;
+            pl_mk_next = cycles() + PL_MK_TICK;
             pl_ui_sel  = pl_pos;
             pl_ui_follow();
             pl_ui_dirty = 1u;
