@@ -17,12 +17,9 @@ using the core: what you will notice and what to press, not how it is built.
   says what it is — any playlist with `#EXTINF` lines, which is what most
   playlist editors write. The total used to appear several seconds late.
 - **Album art loads faster**, up to about 1.6× on large covers.
-- **The playlist browser fades in and out**, at the same speed whichever
-  format is playing.
+- **The playlist browser fades in and out.**
 - **A pulsing play triangle** marks the playing track, in place of the `>`.
 - **FLAC files written in 8192-sample blocks now play.**
-- **Lyrics are only looked for while the lyrics view is showing**, so tracks
-  played on any other meter load no slower than before.
 - Fixed: **"FILE SIZE WRONG - CHECK SD CARD" on a healthy card.** The check
   reads a second time before accusing anything, and acts on neither reading
   when the two disagree.
@@ -31,8 +28,6 @@ using the core: what you will notice and what to press, not how it is built.
   that actually stops it.
 - Fixed: **Next and Previous did nothing on that screen**, so a playlist
   stopped dead on a file it could not play. One bad file now costs one track.
-- Fixed: **lyrics cut the last line short**, broke a word across rows, or
-  split a character in two.
 
 ## v1.6.0 — 6 October 2026
 
