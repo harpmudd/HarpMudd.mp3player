@@ -7,27 +7,23 @@ using the core: what you will notice and what to press, not how it is built.
 
 - **Lyrics** — cycle to them with **X**. The words scroll in time with the
   song, the line being sung picked out. They come from a `.lrc` file beside
-  the track, same name and same folder, or from lyrics already inside the
-  file's own tag, so many tracks need no extra file.
-- **Sharper titles and headings**, drawn at their real size instead of being
-  scaled up from a smaller one. The startup screen too.
-- **Seeking a VBR MP3 lands where the clock says.** It used to read the
-  file's own seek table as a flat average and finish a few seconds out.
-- **Files with no header show their length straight away** when the playlist
-  says what it is — any playlist with `#EXTINF` lines, which is what most
-  playlist editors write. The total used to appear several seconds late.
+  the track, or from lyrics already inside the file's own tag.
+- **Sharper titles and headings**, drawn at their real size instead of scaled
+  up from a smaller one. The startup screen too.
+- **Seeking a VBR MP3 lands where the clock says** — it used to finish a few
+  seconds out.
+- **Files with no header show their length straight away**, from any playlist
+  with `#EXTINF` lines. It used to appear several seconds late.
 - **Album art loads faster**, up to about 1.6× on large covers.
-- **The playlist browser fades in and out.**
-- **A pulsing play triangle** marks the playing track, in place of the `>`.
+- **Playlist browser polish** — it fades in and out, and a pulsing play
+  triangle marks the playing track in place of the `>`.
 - **FLAC files written in 8192-sample blocks now play.**
 - Fixed: **"FILE SIZE WRONG - CHECK SD CARD" on a healthy card.** The check
-  reads a second time before accusing anything, and acts on neither reading
-  when the two disagree.
-- Fixed: **a file the core won't play now says why in plain words** —
-  **CAN'T PLAY 96kHz - 48kHz MAX**. Where two limits apply it names the one
-  that actually stops it.
+  reads twice now, and acts on neither reading when they disagree.
+- Fixed: **a file the core won't play says why in plain words** —
+  **CAN'T PLAY 96kHz - 48kHz MAX**.
 - Fixed: **Next and Previous did nothing on that screen**, so a playlist
-  stopped dead on a file it could not play. One bad file now costs one track.
+  stopped dead on a file it could not play.
 
 ## v1.6.0 — 6 October 2026
 
