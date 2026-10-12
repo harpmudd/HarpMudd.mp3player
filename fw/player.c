@@ -1404,6 +1404,11 @@ static void pl_reorder(void);
 static void pl_resync(uint16_t file_idx);
 static uint16_t pl_live_count(void);
 static uint16_t pl_live_ordinal(uint16_t pos);
+static int pl_skip(int delta);
+/* skip_req lives up here, away from the other request flags, because the two
+ * refusal screens are defined ABOVE the input handler that sets it and now
+ * have to read it. See ui_failed_msg(). */
+static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
 /* The loaded playlist's own filename, last component, uppercased. Filled by
  * pl_name_read() in playlist.inc, which is included below -- declared here
  * because the splash summary above it draws the name. Empty when APF will not
@@ -4316,6 +4321,47 @@ static void ui_idle_screen(const char *reason)
  * read, and wrong for one this core simply cannot decode fast enough -- that
  * is not a broken file, and telling someone their music is corrupt when it is
  * not is worse than saying nothing. */
+/* The wait both refusal screens sit in once they have drawn themselves.
+ *
+ * It was written out twice, and the two copies had already drifted: only one
+ * of them cleared ui_warn_row. Clearing it unconditionally is right anyway --
+ * nothing but ui_rate_unsupported ever sets it, so on the other path it is a
+ * no-op -- and one copy cannot drift from itself.
+ *
+ * Nothing here returns into the main loop under its own steam. Every exit is
+ * reload_pending, because after a refusal the decoder has been re-inited to
+ * MP3 while the slot still holds the file that was rejected; the ordinary
+ * reload path is the only thing that puts that right. A skip reaches the same
+ * exit the long way round, by issuing its 0192 and letting APF answer. */
+static void ui_stuck_wait(void)
+{
+    tk_poll_at = cycles() + CLK_HZ;
+    for (;;) {
+        poll_input();
+        if (reload_pending) { ui_warn_row = 0u; return; }
+        /* Next/Previous work here. poll_input() had been setting skip_req on
+         * these screens all along and nothing read it, so a playlist with one
+         * unplayable entry stopped dead and the core menu was the only way
+         * out. One bad file should cost one track -- the rule pl_play_span()
+         * already follows for entries that will not open.
+         *
+         * A failed skip falls through and stays put, still showing the
+         * reason: pl_play_span() has walked the whole list by then, so there
+         * is nothing else to try. */
+        if (skip_req) {
+            uint32_t d = skip_req; skip_req = 0;
+            if (pl_count) pl_skip(d == 1u ? 1 : -1);
+        }
+        /* poll_input() only sees the 008A NOTIFICATION, so a missed one left
+         * these screens with no way out and the next pick appeared to do
+         * nothing. Ask the slot directly as well; no audio is playing here. */
+        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
+            tk_poll_at = cycles() + CLK_HZ;
+            if (slot_changed()) reload_pending = 1u;
+        }
+    }
+}
+
 static void ui_failed_msg(const char *l1, const char *l2)
 {
     /* Wake first if the screen is dark. This draws straight to the framebuffer
@@ -4346,21 +4392,7 @@ static void ui_failed_msg(const char *l1, const char *l2)
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y + FB_CELL(2u) + 40u,
                     l2, TS_1X, TS_1X, UI_INNER_W);
 
-    /* Stay alive so a reload can rescue us.
-     *
-     * poll_input() only sees the 008A NOTIFICATION, so a missed one left this
-     * screen with no way out and the next pick appeared to do nothing -- pick
-     * again and it works. Ask the slot directly as well. No audio is playing
-     * here, so the query costs nothing that matters and can run often. */
-    tk_poll_at = cycles() + CLK_HZ;
-    for (;;) {
-        poll_input();
-        if (reload_pending) return;
-        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
-            tk_poll_at = cycles() + CLK_HZ;
-            if (slot_changed()) reload_pending = 1u;
-        }
-    }
+    ui_stuck_wait();
 }
 
 static void ui_load_failed(void)
@@ -4479,19 +4511,7 @@ static void ui_rate_unsupported(void)
     ui_gradient();
     ui_draw_chrome();
 
-    /* Stay alive so a reload can rescue us, exactly as the failure screen
-     * does -- the difference is only what the user is looking at. */
-    /* Same fallback as the failure screen: this is exactly where it was seen
-     * -- refuse a hi-res file, pick a playable one, nothing happens. */
-    tk_poll_at = cycles() + CLK_HZ;
-    for (;;) {
-        poll_input();
-        if (reload_pending) { ui_warn_row = 0u; return; }
-        if ((int32_t)(cycles() - tk_poll_at) >= 0) {
-            tk_poll_at = cycles() + CLK_HZ;
-            if (slot_changed()) reload_pending = 1u;
-        }
-    }
+    ui_stuck_wait();
 }
 
 /* Called from the main loop every frame. Under rev 6 this had to be throttled
@@ -7306,7 +7326,6 @@ static void meters_feed(const short *pcm, int n, int stereo)
  * followed by the hold action for the same press. A tap is tens of
  * milliseconds, so deferring it that long is not perceptible.
  */
-static uint32_t skip_req;                /* +1 next, -1 previous (as unsigned) */
 static uint32_t pl_reload_pending;       /* user picked a different .m3u       */
 static uint32_t pl_dump_req;             /* Select+B: show the 0190 struct     */
 static uint32_t dt_dump_req;             /* Select+A: show the boot datatable  */
