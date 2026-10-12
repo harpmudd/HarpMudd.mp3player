@@ -4383,7 +4383,13 @@ static void ui_load_failed(void)
 /* 48000, from measurement: decode is 74% of realtime at 16/44.1 and 80% at
  * 24/44.1, rising almost exactly with sample rate to 150% at 88.2 kHz. 48 kHz
  * lands near 87% for 24-bit, which fits; nothing above it does. */
+/* Overridable so a test build can lift the gate from the command line
+ * rather than by editing this file:
+ *   EXTRA_CFLAGS="-DFLAC_MAX_RATE=96000u ..." bash fw/build.sh
+ * The default is unchanged and the shipping .rom stays byte-identical. */
+#ifndef FLAC_MAX_RATE
 #define FLAC_MAX_RATE 48000u
+#endif
 static uint8_t rate_unsupported;   /* set at load, consumed by the main loop */
 
 /* Shown ON THE TRACK CARD rather than as a takeover screen. The card is
