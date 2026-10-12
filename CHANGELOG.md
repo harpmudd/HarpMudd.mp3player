@@ -5,45 +5,34 @@ using the core: what you will notice and what to press, not how it is built.
 
 ## v1.7.0 — 12 October 2026
 
-- **Lyrics.** A thirteenth meter on **X**: the words scroll in time with the
-  song, with the line being sung picked out. They come from a `.lrc` file
-  sitting next to the track — same name, same folder, album subfolders
-  included — or from lyrics already stored inside the file's own tag, so many
-  tracks need no extra file at all.
-- **Sharper text.** Titles and headings are drawn at their real size instead
-  of being scaled up from a smaller one, so stems are even and edges are
-  clean. The startup screen too.
-- **Seeking a VBR MP3 lands where the clock says.** It used to read the file's
-  own seek table as a flat average and finish a few seconds out; on some files
-  far more than that.
+- **Lyrics** — cycle to them with **X**. The words scroll in time with the
+  song, the line being sung picked out. They come from a `.lrc` file beside
+  the track, same name and same folder, or from lyrics already inside the
+  file's own tag, so many tracks need no extra file.
+- **Sharper titles and headings**, drawn at their real size instead of being
+  scaled up from a smaller one. The startup screen too.
+- **Seeking a VBR MP3 lands where the clock says.** It used to read the
+  file's own seek table as a flat average and finish a few seconds out.
 - **Files with no header show their length straight away** when the playlist
-  says what it is. Previously the core had to go looking and the total only
-  appeared after several seconds. Any playlist with `#EXTINF` lines — what
-  most playlist editors write — supplies it.
-- **Album art loads faster**, up to about 1.6x on large covers.
+  says what it is — any playlist with `#EXTINF` lines, which is what most
+  playlist editors write. The total used to appear several seconds late.
+- **Album art loads faster**, up to about 1.6× on large covers.
 - **The playlist browser fades in and out**, at the same speed whichever
   format is playing.
-- **The playing track is marked with a play triangle** that pulses gently,
-  in place of the `>` that read as a bullet.
-- **FLAC files written in 8192-sample blocks now play.** The old limit came
-  from the MP3 decoder's working space rather than from anything about FLAC.
+- **A pulsing play triangle** marks the playing track, in place of the `>`.
+- **FLAC files written in 8192-sample blocks now play.**
 - **Lyrics are only looked for while the lyrics view is showing**, so tracks
-  you play on any other meter load no slower than before.
-
-### Fixed
-
-- **"FILE SIZE WRONG - CHECK SD CARD" no longer appears for a healthy card.**
-  The check now reads a second time before accusing anything, and acts on
-  neither reading when the two disagree.
-- **A file the core can't play says why, in plain words** — "CAN'T PLAY 96kHz
-  - 48kHz MAX" rather than naming an internal quantity. When a file falls foul
-  of two limits at once it names the one that actually stops it.
-- **Next and Previous work on that screen.** A playlist no longer stops dead
-  on a file it cannot play; one bad file costs one track.
-- **Lyrics no longer cut the last line short**, break a word across rows, or
+  played on any other meter load no slower than before.
+- Fixed: **"FILE SIZE WRONG - CHECK SD CARD" on a healthy card.** The check
+  reads a second time before accusing anything, and acts on neither reading
+  when the two disagree.
+- Fixed: **a file the core won't play now says why in plain words** —
+  **CAN'T PLAY 96kHz - 48kHz MAX**. Where two limits apply it names the one
+  that actually stops it.
+- Fixed: **Next and Previous did nothing on that screen**, so a playlist
+  stopped dead on a file it could not play. One bad file now costs one track.
+- Fixed: **lyrics cut the last line short**, broke a word across rows, or
   split a character in two.
-
----
 
 ## v1.6.0 — 6 October 2026
 
