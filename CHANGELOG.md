@@ -18,12 +18,9 @@ using the core: what you will notice and what to press, not how it is built.
 - **Playlist browser polish** — it fades in and out, and a pulsing play
   triangle marks the playing track in place of the `>`.
 - **FLAC files written in 8192-sample blocks now play.**
-- Fixed: **"FILE SIZE WRONG - CHECK SD CARD" on a healthy card.** The check
-  reads twice now, and acts on neither reading when they disagree.
-- Fixed: **a file the core won't play says why in plain words** —
-  **CAN'T PLAY 96kHz - 48kHz MAX**.
-- Fixed: **Next and Previous did nothing on that screen**, so a playlist
-  stopped dead on a file it could not play.
+- Fixed: **"FILE SIZE WRONG - CHECK SD CARD" on a healthy card.**
+- Fixed: **a file the core won't play now says why in plain words, and Next
+  and Previous still work** — a playlist no longer stops dead on one.
 
 ## v1.6.0 — 6 October 2026
 
