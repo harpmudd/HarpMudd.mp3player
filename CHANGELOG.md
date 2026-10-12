@@ -3,7 +3,7 @@
 What each release adds, fixes and changes, newest first. Written for people
 using the core: what you will notice and what to press, not how it is built.
 
-## v1.7.0 — unreleased
+## v1.7.0 — 12 October 2026
 
 - **Lyrics.** A thirteenth meter on **X**: the words scroll in time with the
   song, with the line being sung picked out. They come from a `.lrc` file
