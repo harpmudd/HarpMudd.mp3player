@@ -27,6 +27,8 @@ using the core: what you will notice and what to press, not how it is built.
   in place of the `>` that read as a bullet.
 - **FLAC files written in 8192-sample blocks now play.** The old limit came
   from the MP3 decoder's working space rather than from anything about FLAC.
+- **Lyrics are only looked for while the lyrics view is showing**, so tracks
+  you play on any other meter load no slower than before.
 
 ### Fixed
 
