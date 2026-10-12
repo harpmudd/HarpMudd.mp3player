@@ -1,7 +1,13 @@
 # QA test plan — v1.7.0
 
-Firmware **142,876 bytes** (`ec7d0bbb`), bitstream **rev 24** (`6dccf2c3`),
-font **1,600,736 bytes** (`f8be37e5`). Splash reads **v1.7.0 (Dev)**.
+Firmware **144,044 bytes** (`2f2c8cf4`), bitstream **rev 24** (`6dccf2c3`),
+font **1,600,736 bytes** (`28d0d019`).
+
+Splash reads **v1.7.0**, with NO "(Dev)" -- the card now carries a RELEASE
+build (`-DAPP_RELEASE=1`), so that the artifact being tested is the artifact
+that would ship. A build reading "v1.7.0 (Dev)" is the development firmware
+and is 8 bytes larger; if the splash says (Dev), you are not testing the
+release.
 
 **All three files must be installed together.** The interlock is at rev 24
 (`EXPECT_VERSION 0x4D503318`) and the v1.6.0 firmware will not run on this
