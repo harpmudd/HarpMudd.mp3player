@@ -4411,28 +4411,51 @@ static void ui_rate_unsupported(void)
         char *q = track_album;
         uint32_t v = fl_reject_val;
 
+        /* Every line is "CAN'T PLAY <what the file is> - <what works>".
+         * The old wording led with the property ("HI-RES 96.0kHz", "BLOCK
+         * 8192") and left the verdict implicit, and "BLOCK 8192" in
+         * particular named an internal quantity no listener has a word for.
+         *
+         * The limits are DERIVED, not typed in. "PLAYS 48kHz MAX" was a
+         * literal sitting next to a FLAC_MAX_RATE it had to agree with, and
+         * "6144" was a literal for ARENA_LIMIT/4 -- which has since changed,
+         * so that one would now be telling the user a number that is wrong.
+         *
+         * Widths checked against font_adv at the worst-case value each field
+         * can hold, against ui_text_w (352 px): 316, 288, 346, 347. The row
+         * marquees above that, and a scrolling error message is worse than a
+         * static one. Measure before adding a word. */
+        const char *p1 = "CAN'T PLAY ";
+        while (*p1) *q++ = *p1++;
+
         if (fl_reject_kind == FLR_RATE) {
-            const char *p1 = "HI-RES ";
-            while (*p1) *q++ = *p1++;
             q = ui_dec(q, v / 1000u);
             uint32_t frac = (v % 1000u) / 100u;
             if (frac) { *q++ = '.'; *q++ = (char)('0' + frac); }
-            const char *p2 = "kHz - PLAYS 48kHz MAX";
+            const char *p2 = "kHz - ";
             while (*p2) *q++ = *p2++;
+            q = ui_dec(q, FLAC_MAX_RATE / 1000u);
+            const char *p3 = "kHz MAX";
+            while (*p3) *q++ = *p3++;
         } else if (fl_reject_kind == FLR_DEPTH) {
             q = ui_dec(q, v);
-            const char *p2 = "-BIT FLAC - PLAYS 24-BIT MAX";
+            const char *p2 = "-BIT - 24-BIT MAX";
             while (*p2) *q++ = *p2++;
         } else if (fl_reject_kind == FLR_CHANS) {
             q = ui_dec(q, v);
-            const char *p2 = " CHANNELS - PLAYS STEREO MAX";
+            /* A comma, where the others take " - ": with the widest digit
+             * this is the longest of the four, and the dash spelling came to
+             * 352 px against a 352 px budget. Six pixels of margin for one
+             * character is the better trade. */
+            const char *p2 = " CHANNELS, STEREO MAX";
             while (*p2) *q++ = *p2++;
         } else {
-            const char *p1 = "BLOCK ";
-            while (*p1) *q++ = *p1++;
             q = ui_dec(q, v);
-            const char *p2 = " - PLAYS 6144 MAX";
+            const char *p2 = " BLOCKS - ";
             while (*p2) *q++ = *p2++;
+            q = ui_dec(q, ARENA_LIMIT / sizeof(int32_t));
+            const char *p3 = " MAX";
+            while (*p3) *q++ = *p3++;
         }
         *q = 0;
     }
@@ -10182,9 +10205,22 @@ static int load_track(void)
         fl.skip = flac_skip_bytes;  /* set BEFORE open: it survives the zeroing */
         flac_err fe = flac_open(&fl, flac_pull, 0, 0, (uint32_t)probe_cap);
         if (fe == FLAC_ERR_UNSUPPORTED) {
-            /* Mirrors the order of the checks inside flac_open, so the reason
-             * reported is the one that actually fired. */
-            if (fl.channels < 1u || fl.channels > 2u) {
+            /* Report the BINDING reason, not the first check to fire.
+             *
+             * A file can trip two gates at once, and the two 96 kHz covers on
+             * the test card did exactly that: 8192-sample blocks AND 96 kHz.
+             * flac_open checks the block size and returns, so the core said
+             * "BLOCK 8192" -- true, but not why the file is unplayable. The
+             * block cap is an implementation limit that has since been
+             * raised; the rate is a hardware speed limit that is not going to
+             * move. Naming the one that cannot be worked around is the honest
+             * answer, and it is free: flac_open fills STREAMINFO before it
+             * rejects, so fl.rate is already in hand here.
+             *
+             * Below this, the order still mirrors flac_open's own. */
+            if (fl.rate > FLAC_MAX_RATE) {
+                fl_reject_kind = FLR_RATE;  fl_reject_val = fl.rate;
+            } else if (fl.channels < 1u || fl.channels > 2u) {
                 fl_reject_kind = FLR_CHANS; fl_reject_val = fl.channels;
             } else if (fl.bps != 8u && fl.bps != 16u &&
                        fl.bps != 20u && fl.bps != 24u) {
