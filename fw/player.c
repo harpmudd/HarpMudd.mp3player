@@ -1936,6 +1936,17 @@ static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
  *     EXTRA_CFLAGS=-DUI_SHOW_LOAD_TIMES=1 bash fw/build.sh
  * which is the whole point of a measurement flag -- an investigation should
  * not need a source edit that then has to be remembered and reverted. */
+/* Microseconds the last lyrics repaint took, end to end. Added to settle
+ * whether moving lrc_text into PSRAM is perceptible: the staging is modelled
+ * at ~0.3 ms, which should be invisible, and a model is not a measurement.
+ *     EXTRA_CFLAGS="-DLRC_TRACE=1 -Os" bash fw/build.sh */
+#ifndef LRC_TRACE
+#define LRC_TRACE 0
+#endif
+#if LRC_TRACE
+static uint32_t lrc_us, lrc_us_max;
+#endif
+
 #ifndef UI_SHOW_LOAD_TIMES
 #define UI_SHOW_LOAD_TIMES 0
 #endif
@@ -2022,6 +2033,9 @@ static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
 static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
+#if LRC_TRACE
+static uint32_t ui_last_lrc = 0xFFFFFFFFu;
+#endif
 #if FIFO_DEFICIT
 static uint32_t ui_last_def = 0xFFFFFFFFu;   /* FIFO deficit row, 1 Hz */
 #endif
@@ -2089,13 +2103,68 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
 #define LRC_WRAP_MAX  3u
 #define LRC_NOTIME    0xFFFFu
 
-static char     lrc_text[LRC_TEXT_MAX];
+/* lrc_text LIVES IN PSRAM, like pl_text and for the same reason: it is 3,584
+ * bytes of a 256 KB RAM that can never grow. 87% of this device's block RAM is
+ * already that one array, and the next size up needs 64 more M10K against the
+ * 14 that are free.
+ *
+ * Safe because it is COLD, which is the only thing that makes a 21.7-cycle
+ * access affordable. lrc_drawn gates the lyrics repaint, so the text is read
+ * when the SUNG LINE changes -- a few times a minute, not at frame rate. The
+ * parse at load touches every byte a couple of times, about 3.5 ms against a
+ * load already north of a second.
+ *
+ * ONE BYTE PER 16-BIT WORD, as pl_text does. The parse NUL-terminates lines in
+ * place, so packing two to a word would put a read-modify-write under every
+ * one of those stores for no gain this part's size makes necessary.
+ *
+ * Based above pl_text's 12,288 words. */
+#define LRC_PSR_BASE 16384u
+static inline char lrc_get(uint32_t i)
+{
+    return (char)(uint8_t)psr_read16(LRC_PSR_BASE + i);
+}
+static inline void lrc_set(uint32_t i, char c)
+{
+    psr_write16(LRC_PSR_BASE + i, (uint16_t)(uint8_t)c);
+}
+
 static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
 static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
 static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
+
+/* A staging copy of the one line a caller needs RIGHT NOW: PSRAM cannot hand
+ * out a char *, and the wrap and row code both want one. 256 bytes to free
+ * 3,584 of them, and the same device plt_name uses.
+ *
+ * Sized against what can actually be shown: LRC_WRAP_MAX is 3 rows and a row
+ * holds 80 characters, so nothing beyond 240 reaches the screen however long
+ * the line is. The buffer is SHARED and overwritten per call -- both callers
+ * consume it immediately. */
+static char lrc_line[256];
+/* The index currently staged. lrc_rows() and lrc_emit() are called back to
+ * back on the SAME line by the backward layout loop, so without this every
+ * line above the sung one is fetched from PSRAM twice. 0xFFFF on any change
+ * that invalidates the text. */
+static uint16_t lrc_line_idx = 0xFFFFu;
+static const char *lrc_line_at(uint32_t idx)
+{
+    if (idx == lrc_line_idx) return lrc_line;
+    lrc_line_idx = (uint16_t)idx;
+    psr_seek(LRC_PSR_BASE + lrc_off[idx]);
+    uint32_t j = 0;
+    while (j + 1u < sizeof(lrc_line)) {
+        char c = (char)(uint8_t)psr_next();
+        lrc_line[j] = c;
+        if (!c) return lrc_line;
+        j++;
+    }
+    lrc_line[j] = 0;
+    return lrc_line;
+}
 static uint8_t  lrc_synced;             /* at least one real timestamp        */
 static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
 static void     lrc_load(void);
@@ -4850,7 +4919,7 @@ static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
 static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
 {
     uint16_t st[LRC_WRAP_MAX];
-    return lrc_wrap(lrc_text + lrc_off[idx], ww, st);
+    return lrc_wrap(lrc_line_at(idx), ww, st);
 }
 
 /* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
@@ -4885,7 +4954,7 @@ static void lrc_row(uint32_t y, uint32_t ww, const char *s,
 static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
                          int32_t row, int is_cur)
 {
-    const char *s = lrc_text + lrc_off[idx];
+    const char *s = lrc_line_at(idx);
     uint32_t len = 0;
     while (s[len]) len++;
 
@@ -5209,6 +5278,9 @@ static void ui_draw_dynamic(void)
             lrc_last_t10 = t10;
 
             if (cur != lrc_drawn) {
+#if LRC_TRACE
+                uint32_t lrc_t0 = cycles();
+#endif
                 lrc_drawn = (uint16_t)cur;
                 ui_bg_restore(UI_MARGIN, top, ww, boxh);
 
@@ -5234,6 +5306,10 @@ static void ui_draw_dynamic(void)
                         lrc_emit(top, ww, cur - k, r, 0);
                     }
                 }
+#if LRC_TRACE
+                lrc_us = (cycles() - lrc_t0) / (CLK_HZ / 1000000u);
+                if (lrc_us > lrc_us_max) lrc_us_max = lrc_us;
+#endif
             }
             goto viz_done;
         }
@@ -7002,6 +7078,23 @@ ui_tail:
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
         fb_set_color(UI_RED, sbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+#if LRC_TRACE
+    if (ui_sec != ui_last_lrc) {
+        ui_last_lrc = ui_sec;
+        char b[48], *q = b;
+        const char *p0 = "LRC ";
+        while (*p0) *q++ = *p0++;
+        q = ui_dec(q, lrc_us);
+        *q++ = 'u'; *q++ = 's'; *q++ = ' '; *q++ = 'M'; *q++ = 'A'; *q++ = 'X';
+        q = ui_dec(q, lrc_us_max);
+        *q = 0;
+        uint16_t lbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), lbg);
+        fb_set_color(UI_RED, lbg);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
     }
 #endif
