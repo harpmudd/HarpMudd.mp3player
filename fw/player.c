@@ -5154,8 +5154,35 @@ static void pl_ui_tick(void)
     }
 }
 
+/* Elapsed time by running accumulator rather than (frames*1152)/samprate.
+ * That is a 64-bit divide -- __udivdi3, hundreds of cycles in software on
+ * RV32 -- and it ran EVERY frame inside the same budget that keeps the PCM
+ * FIFO fed. Adds and compares give the identical answer.
+ *
+ * Called BEFORE the screen_blank return, which is the whole point of it being
+ * a function. It used to sit at ui_tail, past that return, so with the screen
+ * blanked the clock simply stopped: frames kept decoding, ui_last_frames was
+ * never caught up, and on wake the accumulator took ONE frame's worth however
+ * long the screen had been off. Every blanked minute was lost from the
+ * elapsed time -- and from scr_second(), so a track listened to with the
+ * screen off never reached the halfway mark and never scrobbled. Both
+ * symptoms, one cause, and only visible to someone who had turned the blank
+ * timeout on. */
+static void ui_advance_time(void)
+{
+    if (!samprate || frames == ui_last_frames) return;
+    ui_last_frames = frames;
+    ui_sec_acc += samp_per_frame;
+    while (ui_sec_acc >= samprate) {
+        ui_sec_acc -= samprate;
+        ui_sec++;
+        scr_second();          /* decoded, so it was heard -- unlike a seek */
+    }
+}
+
 static void ui_draw_dynamic(void)
 {
+    ui_advance_time();
     if (screen_blank) return;
     /* The overlay covers the meters, the card and the transport row. Letting
      * the player keep drawing underneath would punch holes straight through
@@ -6557,15 +6584,6 @@ ui_tail:
      * That is a 64-bit divide -- __udivdi3, hundreds of cycles in software on
      * RV32 -- and it ran EVERY frame inside the same budget that keeps the PCM
      * FIFO fed. Adds and compares give the identical answer. */
-    if (samprate && frames != ui_last_frames) {
-        ui_last_frames = frames;
-        ui_sec_acc += samp_per_frame;
-        while (ui_sec_acc >= samprate) {
-            ui_sec_acc -= samprate;
-            ui_sec++;
-            scr_second();      /* decoded, so it was heard -- unlike a seek */
-        }
-    }
     uint32_t sec = ui_sec;
 
     /* Measured average: bytes actually consumed divided by elapsed time. Only
