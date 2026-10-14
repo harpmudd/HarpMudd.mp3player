@@ -48,14 +48,41 @@ TRACKS = [
 ]
 
 
+URL = "https://harpmudd.github.io/HarpMudd.mp3player/scrobble/#"
+
+# Exactly qr_putenc() in fw/player.c. Kept character for character: if the two
+# ever drift, this harness measures a payload the Pocket does not build and
+# every capacity number it prints is a guess.
+SAFE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+           "0123456789-._~!(),")
+
+
+def enc(s):
+    out = []
+    for b in s.encode('utf-8'):
+        c = chr(b)
+        if c in SAFE:
+            out.append(c)
+        elif c == ' ':
+            out.append('+')
+        else:
+            out.append('%%%02X' % b)
+    return ''.join(out)
+
+
 def payload(n):
-    """One line per scrobble: unix-time, title, artist. Tab separated."""
+    """Header then one record per play, percent-encoded and ';' separated.
+
+    Whitespace cannot appear: a QR scanner hands the phone a string and the
+    phone has to find a URL in it, so a space or a tab would truncate the lot
+    at the first track whose title has one.
+    """
     t = 1792000000
-    out = ["https://harpmudd.github.io/s#"]
+    out = URL + "1*%d*1;" % n
     for i in range(n):
         ti, ar = TRACKS[i % len(TRACKS)]
-        out.append("%d\t%s\t%s" % (t + i * 240, ti, ar))
-    return ("\n".join(out)).encode('utf-8')
+        out += "%d*%s*%s;" % (t + i * 240, enc(ti), enc(ar))
+    return out.encode('ascii')
 
 
 def main(argv):

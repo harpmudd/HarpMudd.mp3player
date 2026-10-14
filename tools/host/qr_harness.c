@@ -53,8 +53,19 @@ int main(void)
     uint32_t t0 = INSTR;
     bool ok = qrcodegen_encodeBinary(tmp, (size_t)n, qr,
                                      qrcodegen_Ecc_LOW,
-                                     qrcodegen_VERSION_MIN, QR_MAXVER,
-                                     qrcodegen_Mask_AUTO, true);
+                                     /* PINNED at both ends, as player.c
+                                      * pins it: letting the version float
+                                      * down for a short session would make
+                                      * the sample a different size from the
+                                      * thing the Pocket actually draws. */
+                                     QR_MAXVER, QR_MAXVER,
+                                     /* The FIXED mask and no ECC boost, which
+                                      * is what player.c does -- AUTO costs
+                                      * 1282 ms on the target against 145, and
+                                      * a sample rendered through a different
+                                      * mask would not be the thing the Pocket
+                                      * actually draws. */
+                                     qrcodegen_Mask_0, false);
     uint32_t t1 = INSTR;
 
     if (!ok) { hputs("FAIL"); hnl(); return 0; }

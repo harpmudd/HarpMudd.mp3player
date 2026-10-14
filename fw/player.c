@@ -1465,6 +1465,7 @@ static uint8_t pl_restore_pending = 1u;
  * load_track() ends with paused = 0, so a successful switch clears it; the
  * completion branch clears it too, for the paths that never get that far. */
 #define PAUSE_LOAD 4u
+#define PAUSE_QR   8u     /* the scrobble code is being built or shown */
 static uint8_t  menu_was;         /* the OS menu was open on the last poll      */
 static uint32_t menu_at;          /* cycles() when the OS menu was last open    */
 
@@ -3214,6 +3215,258 @@ static char *ui_hex2(char *p, uint8_t v)
     static const char hx[] = "0123456789ABCDEF";
     *p++ = hx[v >> 4]; *p++ = hx[v & 15u];
     return p;
+}
+
+#include "qrcodegen.h"
+
+/* ===================================================== SCROBBLE EXPORT ====
+ *
+ * Hold BOTH triggers to put the session on screen as one QR code. A phone
+ * reads it and opens a page that submits the plays to Last.fm. The Pocket has
+ * no network, so a camera is the lightest thing that can carry the data to
+ * something that has one.
+ *
+ * VERSION 23 is the ceiling and the SCREEN sets it: 109 modules plus the
+ * mandatory four-module quiet zone each side is 117, and 117 x 3 px = 351,
+ * the largest that fits in 360. Three pixels a module is about 0.55 mm on the
+ * panel, which is what a phone camera needs -- proven by scanning the PNG
+ * that tools/host/qr_check.py renders at exactly this scale from exactly this
+ * encoder. Two px/module would buy a bigger payload and has never been shown
+ * to scan.
+ *
+ * That holds 1,091 bytes. Measured against real tag lengths by
+ * tools/host/qr_check.py, that is 23 plays at ~45 bytes each -- 1,046 of
+ * the 1,091 -- and a 24th does not fit. Past that the
+ * OLDEST are dropped rather than the version being raised: a denser code
+ * scans worse, and a code that will not scan carries nothing at all.
+ *
+ * Both buffers are sized by the library's own macro rather than a literal, so
+ * a change of QR_VER cannot silently under-allocate them.
+ */
+#define QR_VER   23u
+#define QR_CAP   1091u          /* byte-mode payload at version 23, ECC L */
+#define QR_PX    3u             /* pixels per module */
+
+static uint8_t  qr_out[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
+static uint8_t  qr_dat[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
+static uint16_t qr_shown;       /* plays that fitted in the code */
+static uint8_t  qr_ui_open, qr_ui_dirty;
+
+/* Where the scan lands. The payload rides in the FRAGMENT, so it is never
+ * sent to the server -- the page decodes it in the browser, and the listening
+ * history does not touch anyone's logs on the way past.
+ *
+ * A PROJECT pages URL, because that is the one that can exist: GitHub serves
+ * harpmudd.github.io/<repo>/ from a repo that is already public, where a bare
+ * harpmudd.github.io needs a user-pages repo of that exact name which there
+ * is none of. Twenty-two bytes more, paid once per code rather than per play.
+ */
+#define QR_URL "https://harpmudd.github.io/HarpMudd.mp3player/scrobble/#"
+
+static uint32_t qr_puts(uint32_t o, const char *s)
+{
+    while (*s && o < QR_CAP) qr_dat[o++] = (uint8_t)*s++;
+    return o;
+}
+
+/* Percent-encoding, and it is not optional.
+ *
+ * The first version of this separated fields with a tab and records with a
+ * newline, which is unambiguous and completely wrong for the medium: a QR
+ * scanner hands the phone a STRING and the phone has to recognise a URL in
+ * it. Whitespace ends a URL. A tab or a newline truncates the payload at the
+ * first record, and so does the space in "The Only One I Know" -- which is to
+ * say, on the very first track anybody would test with.
+ *
+ * So: space becomes '+', the unreserved set and a few sub-delimiters that are
+ * legal in a fragment pass through, and everything else goes out as %XX --
+ * including the separators themselves when they occur inside a title, and
+ * every byte of a UTF-8 character. A typical title costs no more than it did
+ * with tabs, because letters, digits, spaces, apostrophes and parentheses are
+ * the whole of it. */
+static uint32_t qr_putenc(uint32_t o, uint8_t c)
+{
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+        c == '~' || c == '!' || c == '(' || c == ')' || c == ',') {
+        if (o < QR_CAP) qr_dat[o++] = c;
+    } else if (c == ' ') {
+        if (o < QR_CAP) qr_dat[o++] = '+';
+    } else {
+        static const char hx[] = "0123456789ABCDEF";
+        if (o + 2u < QR_CAP) {
+            qr_dat[o++] = '%';
+            qr_dat[o++] = (uint8_t)hx[c >> 4];
+            qr_dat[o++] = (uint8_t)hx[c & 15u];
+        } else {
+            o = QR_CAP;          /* no room: force the caller to roll back */
+        }
+    }
+    return o;
+}
+
+static uint32_t qr_putu(uint32_t o, uint32_t v)
+{
+    char t[12];
+    uint32_t n = 0;
+    do { t[n++] = (char)('0' + v % 10u); v /= 10u; } while (v);
+    while (n && o < QR_CAP) qr_dat[o++] = (uint8_t)t[--n];
+    return o;
+}
+
+/* One PSRAM string field, appended raw. Tab and newline are the separators,
+ * so either inside a title would corrupt the record -- neither occurs in a
+ * tag, and scr_field() already stored these as plain text. */
+static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
+{
+    psr_seek(w);
+    for (uint32_t i = 0; i + 1u < cap && o < QR_CAP; i++) {
+        uint8_t c = (uint8_t)psr_next();
+        if (!c) break;
+        o = qr_putenc(o, c);
+    }
+    return o;
+}
+
+/* Build newest-last, dropping the OLDEST that do not fit.
+ *
+ * Retrying the whole payload after each drop is quadratic in the number
+ * dropped, but it is PSRAM reads and byte copies -- no encoding, which is the
+ * expensive half -- and it runs once on a button press with the decoder
+ * already between frames. A 128-record session drops ~104 and still costs
+ * well under the load-time budget. */
+static uint32_t qr_build(void)
+{
+    uint32_t first = 0;
+    while (first < scr_n) {
+        /* Header line: format version, how many plays the session HELD, and
+         * whether the timestamps are real UTC. The count has to travel,
+         * because the code itself only carries what fitted -- the page is
+         * where "24 of 31" can actually be said, there being no room for a
+         * caption beside a 327 px code on a 360 px screen. The epoch flag
+         * matters more: with no RTC the times are seconds since boot, and a
+         * reader that submitted those as UTC would file every play in 1970. */
+        uint32_t o = qr_puts(0, QR_URL);
+        o = qr_puts(o, "1*");
+        o = qr_putu(o, scr_n);
+        o = qr_puts(o, scr_epoch ? "*1;" : "*0;");
+        uint32_t i = first;
+        for (; i < scr_n; i++) {
+            uint32_t b = SCR_PSR_BASE + (uint32_t)i * SCR_REC;
+            uint32_t mark = o;
+            psr_seek(b);
+            uint32_t t =  (uint32_t)(psr_next() & 0xFFu);
+            t |= (uint32_t)(psr_next() & 0xFFu) << 8;
+            t |= (uint32_t)(psr_next() & 0xFFu) << 16;
+            t |= (uint32_t)(psr_next() & 0xFFu) << 24;
+            o = qr_putu(o, t);
+            o = qr_puts(o, "*");
+            o = qr_putf(o, b + SCR_TI_OFF, SCR_TI_LEN);
+            o = qr_puts(o, "*");
+            o = qr_putf(o, b + SCR_AR_OFF, SCR_AR_LEN);
+            o = qr_puts(o, ";");
+            if (o >= QR_CAP) { o = mark; break; }   /* this one did not fit */
+        }
+        if (i >= scr_n) { qr_shown = (uint16_t)(scr_n - first); return o; }
+        first++;
+    }
+    qr_shown = 0;
+    return 0;
+}
+
+/* Runs of dark modules become ONE rect each. A version-23 code is 11,881
+ * modules; a rect per module is 11,881 draw commands, where runs bring a
+ * typical code to roughly two thousand -- about five playlist repaints, once.
+ */
+static void qr_ui_draw(void)
+{
+    int n = qrcodegen_getSize(qr_out);
+    uint32_t side = (uint32_t)n * QR_PX;          /* 109 * 3 = 327 */
+    uint32_t x0 = (FB_W - side) / 2u;             /* 36 px each side */
+    uint32_t y0 = (FB_H - side) / 2u;             /* 16 px top and bottom */
+
+    /* The WHOLE screen is the quiet zone. Painting it white rather than
+     * drawing a white patch on black is what makes the geometry work: the
+     * zone then measures 36 px at the sides and 16 at top and bottom, every
+     * one of them comfortably past the four modules the spec asks for, with
+     * no arithmetic that can run below zero. An earlier version put the
+     * patch at y0 = 6 and computed y0 - 4 * QR_PX, which is -6 in unsigned
+     * and a rect starting four billion rows down.
+     *
+     * There is no caption. 360 - (327 + 2 * 12) leaves nine pixels and the
+     * smallest cell is sixteen, so a line of text can only come out of the
+     * quiet zone -- and the count it would carry travels in the payload
+     * instead, where the page can say it properly. */
+    fb_rect(0, 0, FB_W, FB_H, 0xFFFFu);
+
+    for (int y = 0; y < n; y++) {
+        int x = 0;
+        while (x < n) {
+            if (!qrcodegen_getModule(qr_out, x, y)) { x++; continue; }
+            int run = 1;
+            while (x + run < n && qrcodegen_getModule(qr_out, x + run, y)) run++;
+            fb_rect(x0 + (uint32_t)x * QR_PX, y0 + (uint32_t)y * QR_PX,
+                    (uint32_t)run * QR_PX, QR_PX, 0x0000u);
+            x += run;
+        }
+    }
+}
+
+/* Closing repaints the player through the playlist's own restore path, which
+ * already exists to put back everything an overlay covered. The two display
+ * caches have to be invalidated by hand: both hold the value last DRAWN, and
+ * the clock in particular would otherwise wait up to a second to reappear. */
+static void qr_ui_close(void)
+{
+    qr_ui_open    = 0u;
+    paused &= ~(uint32_t)PAUSE_QR;
+    ui_last_sec   = 0xFFFFFFFFu;
+    ui_last_info  = 0xFFFFFFFFu;
+    pl_ui_restore = 1u;
+}
+
+/* Encoding is the slow half, and it is slow enough to need handling rather
+ * than a comment. MEASURED on the target toolchain under tools/rv32sim.py,
+ * a full version-23 code:
+ *
+ *     qrcodegen_Mask_AUTO   51,782,147 instr   1282 ms
+ *     qrcodegen_Mask_0       5,850,520 instr    145 ms
+ *
+ * AUTO is 89% mask trials: it applies all eight, scores each over 11,881
+ * modules, and unapplies them. Pinning the mask skips the scoring entirely.
+ * Any mask is spec-legal -- the score only picks the most robust of eight --
+ * and tools/host/qr_check.py renders the sample PNG through this same fixed
+ * mask, so what the user scanned is what the Pocket draws.
+ *
+ * 145 ms still cannot run with the audio going: pcm_fifo is AW(11), 2048
+ * samples, which is 46 ms at 44.1 kHz. A blocking encode would drain it three
+ * times over and underrun. So playback takes its own pause bit for the
+ * duration -- the FIFO plays out its 46 ms while the encode runs, leaving
+ * about a tenth of a second of clean silence rather than a stutter. The bit
+ * is separate from the user's, so closing the code cannot start music that
+ * was already paused when they opened it. */
+static void qr_ui_toggle(void)
+{
+    if (qr_ui_open) { qr_ui_close(); return; }
+    if (!scr_n) { ui_toast_msg("NOTHING TO SCROBBLE YET"); return; }
+
+    paused |= PAUSE_QR;
+    uint32_t len = qr_build();
+    if (!len || !qrcodegen_encodeBinary(qr_dat, (size_t)len, qr_out,
+                                        qrcodegen_Ecc_LOW,
+                                        (int)QR_VER, (int)QR_VER,
+                                        qrcodegen_Mask_0, false)) {
+        paused &= ~(uint32_t)PAUSE_QR;
+        ui_toast_msg("COULD NOT BUILD THE CODE");
+        return;
+    }
+    /* Pinned to version 23 at both ends so the module size on screen is
+     * FIXED. Letting it shrink to fit a short session would scale the drawing
+     * and change how the thing looks every time it is opened; a smaller code
+     * inside a 109-module frame is just more error correction. */
+    qr_ui_open  = 1u;
+    qr_ui_dirty = 1u;
+    ui_toast_t0 = 0;            /* 0 means inactive; a toast would sit on it */
 }
 
 /* Drawn ONCE per track load (from load_track(), after title/artist are
@@ -5201,6 +5454,19 @@ static void ui_draw_dynamic(void)
      * precedent. */
     /* Before the jump, so a fade that COMPLETES a dismissal this frame falls
      * through to the normal path instead of skipping it for one more. */
+    /* A full-screen takeover: unlike the playlist, this one covers the clock
+     * and the progress bar too, so it returns outright instead of jumping to
+     * ui_tail -- everything down there would draw straight through it.
+     *
+     * Safe to skip ui_tail only because ui_advance_time() runs ABOVE the
+     * blank check now. The elapsed clock and scr_second() keep going under
+     * the overlay; all that stops is drawing.
+     *
+     * Drawn once, on the flag, not per frame. */
+    if (qr_ui_open) {
+        if (qr_ui_dirty) { qr_ui_dirty = 0u; qr_ui_draw(); }
+        return;
+    }
     pl_ui_tick();
     if (pl_ui_open) goto ui_tail;
 
@@ -7761,6 +8027,16 @@ static void poll_input(void)
      * so nothing downstream also acts on them. Select is deliberately left in
      * `keys`/`fall`: its tap-to-close is the same code that opened it, and its
      * hold timer reads `keys` directly. */
+    /* The code owns the WHOLE pad while it is up -- a user holding a phone at
+     * the screen must not be able to skip a track by fumbling the d-pad. The
+     * triggers are left in `keys` so the hold that closes it can be seen; B
+     * closes it outright. */
+    if (qr_ui_open) {
+        if (edge & KEY_B) qr_ui_close();
+        edge = 0; fall = 0;
+        keys &= (KEY_L1 | KEY_R1);
+    }
+
     if (pl_ui_open && !pl_count) {      /* list emptied underneath it */
         pl_ui_open = 0u; pl_ui_restore = 1u;
     }
@@ -8153,6 +8429,33 @@ static void poll_input(void)
         ui_blank_touch();               /* restart the countdown from now */
         if (blank_min) ui_toast_set("SCREEN BLANK", blank_min, " MIN");
         else           ui_toast_msg("SCREEN BLANK OFF");
+    }
+
+    /* ---- Both triggers held: the scrobble code ----------------------------
+     * Every Select combination was already taken, and L and R are the one
+     * pair that can be claimed TOGETHER for free: pressing them changes the
+     * accent one step back and one step forward, which cancels, so the user
+     * ends on the colour they started with and only then does the code
+     * appear. A hold rather than a press, so neither colour step is lost.
+     *
+     * lr2_t0 is only read while lr2_armed is set -- a bare 0 deadline reads
+     * as "due 35 seconds ago" or "due shortly" depending on where the free
+     * running counter happens to be, which has cost this project a day. */
+    {
+        static uint32_t lr2_t0;
+        static uint8_t  lr2_armed, lr2_fired;
+        if ((keys & (KEY_L1 | KEY_R1)) == (KEY_L1 | KEY_R1)) {
+            if (!lr2_armed) { lr2_armed = 1u; lr2_fired = 0u; lr2_t0 = cycles(); }
+            else if (!lr2_fired &&
+                     (int32_t)(cycles() - lr2_t0) >=
+                     (int32_t)(CLK_HZ / 1000u * PL_HOLD_MS)) {
+                lr2_fired = 1u;
+                sel_used  = 1;          /* not a Select tap, if one is down */
+                qr_ui_toggle();
+            }
+        } else {
+            lr2_armed = 0u;
+        }
     }
 
     /* ---- Select as a modifier for L/R ---- */
