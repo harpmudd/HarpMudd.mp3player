@@ -1940,6 +1940,13 @@ static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
  * whether moving lrc_text into PSRAM is perceptible: the staging is modelled
  * at ~0.3 ms, which should be invisible, and a model is not a measurement.
  *     EXTRA_CFLAGS="-DLRC_TRACE=1 -Os" bash fw/build.sh */
+/* Watch the scrobble threshold on hardware. Shows how many plays the session
+ * holds, how many seconds of this track have been DECODED, and what it needs.
+ *     EXTRA_CFLAGS="-DSCROBBLE_TRACE=1 -Os" bash fw/build.sh */
+#ifndef SCROBBLE_TRACE
+#define SCROBBLE_TRACE 0
+#endif
+
 #ifndef LRC_TRACE
 #define LRC_TRACE 0
 #endif
@@ -2033,6 +2040,9 @@ static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
 static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
+#if SCROBBLE_TRACE
+static uint32_t ui_last_scr = 0xFFFFFFFFu;
+#endif
 #if LRC_TRACE
 static uint32_t ui_last_lrc = 0xFFFFFFFFu;
 #endif
@@ -2135,6 +2145,90 @@ static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
+
+/* ===================================================== SCROBBLE LOG (phase A)
+ *
+ * A session's worth of plays, kept in PSRAM, for export later. Capture only:
+ * nothing is shown and nothing leaves the device yet.
+ *
+ * WHAT QUALIFIES is Last.fm's rule, not one of our own -- a track longer than
+ * 30 seconds, played to at least half its length or four minutes, whichever
+ * comes first. Logged AT the threshold rather than at the end, so a track
+ * abandoned after it still counts, which is what the rule means.
+ *
+ * MEASURED IN DECODED SECONDS, not position. ui_sec is the obvious candidate
+ * and the wrong one: a seek sets it, so seeking to 80% of a track would
+ * qualify it instantly without a note being heard. scr_played only ever
+ * advances where a frame was actually decoded.
+ *
+ * IN PSRAM because it is cold -- one record written per track, read once at
+ * export -- and because the CPU's 256 KB cannot grow. One byte per 16-bit
+ * word, as pl_text and lrc_text do.
+ *
+ * The timestamp is seconds since boot for now. Last.fm wants UTC epoch and
+ * rtc_epoch_seconds is already wired into core_top, unused; exposing it is
+ * one MMIO register and an interlock bump, and that is phase B. The field is
+ * 32 bits either way, so nothing here changes when it lands.
+ *
+ * Volatile by nature: PSRAM does not survive a power cycle, which is why this
+ * is a SESSION log and the UI will have to say so. */
+#define SCR_PSR_BASE 24576u     /* words, clear of lrc_text's 16,384..19,967 */
+#define SCR_MAX      128u       /* records -- a long session, not a library  */
+#define SCR_REC      176u       /* words per record, one byte per word       */
+#define SCR_TI_OFF   4u
+#define SCR_TI_LEN   64u
+#define SCR_AR_OFF   68u
+#define SCR_AR_LEN   56u
+#define SCR_AL_OFF   124u
+#define SCR_AL_LEN   52u
+
+static uint16_t scr_n;          /* records held this session       */
+static uint32_t scr_uptime;     /* seconds since boot, 1 Hz        */
+static uint32_t scr_played;     /* seconds of THIS track decoded   */
+static uint32_t scr_start;      /* scr_uptime when it started      */
+static uint8_t  scr_done;       /* this track already logged       */
+
+/* Copy a C string into a fixed field, NUL-terminated and never overrunning. */
+static void scr_field(uint32_t w, const char *t, uint32_t cap)
+{
+    psr_seek(w);
+    uint32_t i = 0;
+    while (i + 1u < cap && t[i]) { psr_put((uint16_t)(uint8_t)t[i]); i++; }
+    psr_put(0);
+}
+
+static void scr_log(void)
+{
+    if (scr_n >= SCR_MAX) return;        /* full: keep the FIRST of a session */
+    uint32_t b = SCR_PSR_BASE + (uint32_t)scr_n * SCR_REC;
+    psr_seek(b);
+    psr_put((uint16_t)( scr_start        & 0xFFu));
+    psr_put((uint16_t)((scr_start >>  8) & 0xFFu));
+    psr_put((uint16_t)((scr_start >> 16) & 0xFFu));
+    psr_put((uint16_t)((scr_start >> 24) & 0xFFu));
+    scr_field(b + SCR_TI_OFF, track_title,  SCR_TI_LEN);
+    scr_field(b + SCR_AR_OFF, track_artist, SCR_AR_LEN);
+    scr_field(b + SCR_AL_OFF, track_album,  SCR_AL_LEN);
+    scr_n++;
+}
+
+/* One decoded second of the current track. */
+static void scr_second(void)
+{
+    scr_played++;
+    if (scr_done || track_secs < 30u) return;
+    uint32_t want = track_secs / 2u;
+    if (want > 240u) want = 240u;        /* four minutes caps it */
+    if (scr_played >= want) { scr_log(); scr_done = 1u; }
+}
+
+static void scr_track_start(void)
+{
+    scr_played = 0;
+    scr_done   = 0;
+    scr_start  = scr_uptime;
+}
+
 
 /* A staging copy of the one line a caller needs RIGHT NOW: PSRAM cannot hand
  * out a char *, and the wrap and row code both want one. 256 bytes to free
@@ -6451,7 +6545,11 @@ ui_tail:
     if (samprate && frames != ui_last_frames) {
         ui_last_frames = frames;
         ui_sec_acc += samp_per_frame;
-        while (ui_sec_acc >= samprate) { ui_sec_acc -= samprate; ui_sec++; }
+        while (ui_sec_acc >= samprate) {
+            ui_sec_acc -= samprate;
+            ui_sec++;
+            scr_second();      /* decoded, so it was heard -- unlike a seek */
+        }
     }
     uint32_t sec = ui_sec;
 
@@ -7082,6 +7180,25 @@ ui_tail:
     }
 #endif
 
+#if SCROBBLE_TRACE
+    if (scr_uptime != ui_last_scr) {
+        ui_last_scr = scr_uptime;
+        uint32_t want = track_secs / 2u;
+        if (want > 240u) want = 240u;
+        char b[48], *q = b;
+        *q++ = 'S'; *q++ = 'C'; *q++ = 'R'; *q++ = ' ';
+        q = ui_dec(q, scr_n);
+        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, scr_played);
+        *q++ = '/'; q = ui_dec(q, track_secs < 30u ? 0u : want);
+        if (scr_done) { *q++ = ' '; *q++ = 'O'; *q++ = 'K'; }
+        *q = 0;
+        uint16_t sbg2 = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg2);
+        fb_set_color(UI_RED, sbg2);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
 #if LRC_TRACE
     if (ui_sec != ui_last_lrc) {
         ui_last_lrc = ui_sec;
@@ -7568,6 +7685,7 @@ static void ui_blank_pump(void)
     if (screen_blank || !blank_min) return;
     if ((int32_t)(cycles() - blank_tick) < 0) return;
     blank_tick = cycles() + CLK_HZ;
+    scr_uptime++;              /* the only free-running second in the core */
     if (blank_sec < 0xFFFFu) blank_sec++;
     if (blank_sec >= blank_min * 60u) ui_blank_enter();
 }
@@ -10238,6 +10356,7 @@ static int load_track(void)
     /* A NEW track starts at 0:00, and this is the one place that knows one
      * started. ui_draw_chrome used to do it, which caught every repaint too. */
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
+    scr_track_start();
     track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
     /* FLAC-only, and it LEAKED. Nothing cleared it on an MP3 load, so an
      * MP3 played after a FLAC inherited that FLAC's first-frame offset --
