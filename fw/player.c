@@ -1936,6 +1936,17 @@ static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
  *     EXTRA_CFLAGS=-DUI_SHOW_LOAD_TIMES=1 bash fw/build.sh
  * which is the whole point of a measurement flag -- an investigation should
  * not need a source edit that then has to be remembered and reverted. */
+/* Microseconds the last lyrics repaint took, end to end. Added to settle
+ * whether moving lrc_text into PSRAM is perceptible: the staging is modelled
+ * at ~0.3 ms, which should be invisible, and a model is not a measurement.
+ *     EXTRA_CFLAGS="-DLRC_TRACE=1 -Os" bash fw/build.sh */
+#ifndef LRC_TRACE
+#define LRC_TRACE 0
+#endif
+#if LRC_TRACE
+static uint32_t lrc_us, lrc_us_max;
+#endif
+
 #ifndef UI_SHOW_LOAD_TIMES
 #define UI_SHOW_LOAD_TIMES 0
 #endif
@@ -2022,6 +2033,9 @@ static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
 static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
+#if LRC_TRACE
+static uint32_t ui_last_lrc = 0xFFFFFFFFu;
+#endif
 #if FIFO_DEFICIT
 static uint32_t ui_last_def = 0xFFFFFFFFu;   /* FIFO deficit row, 1 Hz */
 #endif
@@ -2131,8 +2145,15 @@ static uint16_t lrc_n;                  /* lines parsed                       */
  * the line is. The buffer is SHARED and overwritten per call -- both callers
  * consume it immediately. */
 static char lrc_line[256];
+/* The index currently staged. lrc_rows() and lrc_emit() are called back to
+ * back on the SAME line by the backward layout loop, so without this every
+ * line above the sung one is fetched from PSRAM twice. 0xFFFF on any change
+ * that invalidates the text. */
+static uint16_t lrc_line_idx = 0xFFFFu;
 static const char *lrc_line_at(uint32_t idx)
 {
+    if (idx == lrc_line_idx) return lrc_line;
+    lrc_line_idx = (uint16_t)idx;
     psr_seek(LRC_PSR_BASE + lrc_off[idx]);
     uint32_t j = 0;
     while (j + 1u < sizeof(lrc_line)) {
@@ -5257,6 +5278,9 @@ static void ui_draw_dynamic(void)
             lrc_last_t10 = t10;
 
             if (cur != lrc_drawn) {
+#if LRC_TRACE
+                uint32_t lrc_t0 = cycles();
+#endif
                 lrc_drawn = (uint16_t)cur;
                 ui_bg_restore(UI_MARGIN, top, ww, boxh);
 
@@ -5282,6 +5306,10 @@ static void ui_draw_dynamic(void)
                         lrc_emit(top, ww, cur - k, r, 0);
                     }
                 }
+#if LRC_TRACE
+                lrc_us = (cycles() - lrc_t0) / (CLK_HZ / 1000000u);
+                if (lrc_us > lrc_us_max) lrc_us_max = lrc_us;
+#endif
             }
             goto viz_done;
         }
@@ -7050,6 +7078,23 @@ ui_tail:
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
         fb_set_color(UI_RED, sbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+#if LRC_TRACE
+    if (ui_sec != ui_last_lrc) {
+        ui_last_lrc = ui_sec;
+        char b[48], *q = b;
+        const char *p0 = "LRC ";
+        while (*p0) *q++ = *p0++;
+        q = ui_dec(q, lrc_us);
+        *q++ = 'u'; *q++ = 's'; *q++ = ' '; *q++ = 'M'; *q++ = 'A'; *q++ = 'X';
+        q = ui_dec(q, lrc_us_max);
+        *q = 0;
+        uint16_t lbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), lbg);
+        fb_set_color(UI_RED, lbg);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
     }
 #endif
