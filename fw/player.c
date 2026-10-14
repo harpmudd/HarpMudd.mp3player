@@ -2089,13 +2089,61 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
 #define LRC_WRAP_MAX  3u
 #define LRC_NOTIME    0xFFFFu
 
-static char     lrc_text[LRC_TEXT_MAX];
+/* lrc_text LIVES IN PSRAM, like pl_text and for the same reason: it is 3,584
+ * bytes of a 256 KB RAM that can never grow. 87% of this device's block RAM is
+ * already that one array, and the next size up needs 64 more M10K against the
+ * 14 that are free.
+ *
+ * Safe because it is COLD, which is the only thing that makes a 21.7-cycle
+ * access affordable. lrc_drawn gates the lyrics repaint, so the text is read
+ * when the SUNG LINE changes -- a few times a minute, not at frame rate. The
+ * parse at load touches every byte a couple of times, about 3.5 ms against a
+ * load already north of a second.
+ *
+ * ONE BYTE PER 16-BIT WORD, as pl_text does. The parse NUL-terminates lines in
+ * place, so packing two to a word would put a read-modify-write under every
+ * one of those stores for no gain this part's size makes necessary.
+ *
+ * Based above pl_text's 12,288 words. */
+#define LRC_PSR_BASE 16384u
+static inline char lrc_get(uint32_t i)
+{
+    return (char)(uint8_t)psr_read16(LRC_PSR_BASE + i);
+}
+static inline void lrc_set(uint32_t i, char c)
+{
+    psr_write16(LRC_PSR_BASE + i, (uint16_t)(uint8_t)c);
+}
+
 static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
 static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
 static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
+
+/* A staging copy of the one line a caller needs RIGHT NOW: PSRAM cannot hand
+ * out a char *, and the wrap and row code both want one. 256 bytes to free
+ * 3,584 of them, and the same device plt_name uses.
+ *
+ * Sized against what can actually be shown: LRC_WRAP_MAX is 3 rows and a row
+ * holds 80 characters, so nothing beyond 240 reaches the screen however long
+ * the line is. The buffer is SHARED and overwritten per call -- both callers
+ * consume it immediately. */
+static char lrc_line[256];
+static const char *lrc_line_at(uint32_t idx)
+{
+    psr_seek(LRC_PSR_BASE + lrc_off[idx]);
+    uint32_t j = 0;
+    while (j + 1u < sizeof(lrc_line)) {
+        char c = (char)(uint8_t)psr_next();
+        lrc_line[j] = c;
+        if (!c) return lrc_line;
+        j++;
+    }
+    lrc_line[j] = 0;
+    return lrc_line;
+}
 static uint8_t  lrc_synced;             /* at least one real timestamp        */
 static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
 static void     lrc_load(void);
@@ -4850,7 +4898,7 @@ static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
 static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
 {
     uint16_t st[LRC_WRAP_MAX];
-    return lrc_wrap(lrc_text + lrc_off[idx], ww, st);
+    return lrc_wrap(lrc_line_at(idx), ww, st);
 }
 
 /* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
@@ -4885,7 +4933,7 @@ static void lrc_row(uint32_t y, uint32_t ww, const char *s,
 static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
                          int32_t row, int is_cur)
 {
-    const char *s = lrc_text + lrc_off[idx];
+    const char *s = lrc_line_at(idx);
     uint32_t len = 0;
     while (s[len]) len++;
 
