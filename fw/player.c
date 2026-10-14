@@ -2187,7 +2187,41 @@ static uint16_t lrc_n;                  /* lines parsed                       */
 #define SCR_AL_LEN   52u
 
 static uint16_t scr_n;          /* records held this session       */
+/* Seconds since boot, ticked once a second by ui_clock_pump() whatever else
+ * is going on. It used to be incremented inside ui_blank_pump(), which
+ * returns early unless the screen-blank timeout is switched on -- and that
+ * defaults to off and is not persisted. So the "only free-running second in
+ * the core" was, for almost every user, permanently zero. */
 static uint32_t scr_uptime;     /* seconds since boot, 1 Hz        */
+
+/* APF sends the real-time clock ONCE, as bridge command 0x0090 --
+ * core_bridge_cmd.v says so in as many words: "it is not continuously
+ * updated". R_RTC therefore reads back the instant the core was LAUNCHED and
+ * never moves again.
+ *
+ * Reading it per track, which is what the first version of this did, stamped
+ * every play in a session with the launch time: all identical, and drifting
+ * further from the truth the longer you listened. The wall clock has to be
+ * that one fixed anchor PLUS the seconds elapsed since it was taken.
+ *
+ * The anchor is latched on the first read that returns non-zero rather than
+ * at boot, because 0x0090 arrives as a bridge command some time after the
+ * core starts and reads before it land as zero. */
+static uint32_t rtc_base;       /* epoch seconds at the anchor     */
+static uint32_t rtc_base_up;    /* scr_uptime when it was taken    */
+static uint8_t  rtc_have;
+/* Epoch seconds now, or 0 when the Pocket has no clock set. */
+static uint32_t rtc_now(void)
+{
+    if (!rtc_have) {
+        uint32_t t = REG(R_RTC);
+        if (!t) return 0;               /* not delivered yet, or unset */
+        rtc_have    = 1u;
+        rtc_base    = t;
+        rtc_base_up = scr_uptime;
+    }
+    return rtc_base + (scr_uptime - rtc_base_up);
+}
 static uint32_t scr_played;     /* seconds of THIS track decoded   */
 static uint32_t scr_start;      /* scr_uptime when it started      */
 static uint8_t  scr_done;       /* this track already logged       */
@@ -2240,7 +2274,7 @@ static void scr_track_start(void)
 {
     scr_played = 0;
     scr_done   = 0;
-    uint32_t t = REG(R_RTC);
+    uint32_t t = rtc_now();
     scr_epoch  = t ? 1u : 0u;
     scr_start  = t ? t : scr_uptime;
 }
@@ -7979,15 +8013,20 @@ static void sleep_pump(void)
     }
 }
 
-static void ui_blank_pump(void)
+/* One second, unconditionally. The blank countdown is a CONSUMER of this
+ * tick now rather than the thing that drives it -- that coupling is what left
+ * the wall clock stopped whenever the blank timeout was off. */
+static void ui_clock_pump(void)
 {
-    if (screen_blank || !blank_min) return;
     if ((int32_t)(cycles() - blank_tick) < 0) return;
     blank_tick = cycles() + CLK_HZ;
-    scr_uptime++;              /* the only free-running second in the core */
+    scr_uptime++;
+
+    if (screen_blank || !blank_min) return;
     if (blank_sec < 0xFFFFu) blank_sec++;
     if (blank_sec >= blank_min * 60u) ui_blank_enter();
 }
+
 
 /* Black the whole frame. Only the framebuffer -- there is no way to switch the
  * panel itself off from a core, so "blank" means every pixel black. The
@@ -11458,7 +11497,7 @@ int main(void)
          * is the whole reason this feature exists and was exactly the case it
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
-        ui_blank_pump();
+        ui_clock_pump();
         sleep_pump();
 #if SEEK_TRACE
         seek_trace_dump();
