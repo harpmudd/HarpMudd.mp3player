@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scrobble &middot; HarpMudd MP3 Player</title>
+<!--
+  The other half of the MP3 Player core's scrobbler.
+
+  The Pocket has no network. It records what you listened to, and when you
+  hold both triggers it draws the session as a QR code. Your phone scans it
+  and lands here, with the whole session in the URL FRAGMENT -- the part of a
+  URL a browser never sends to the server. GitHub serves this file and learns
+  nothing about what you have been playing; the decoding happens on your
+  phone, and the only thing that leaves it is the scrobble you ask for.
+
+  The payload is one record per play:
+
+      #1*<total>*<epoch>;<ts>*<title>*<artist>;...
+
+  Field separator '*', record separator ';', everything percent-encoded with
+  '+' for space -- because a QR scanner hands the phone a plain string and the
+  phone has to find a URL in it, so a single space would truncate the lot.
+  <total> is how many plays the session held, which can exceed the number in
+  the code: version 23 carries 1,091 bytes, which is 23 plays, and the oldest
+  are dropped past that. <epoch> is 1 when the Pocket had a real clock and 0 when the times are
+  seconds since the core booted.
+
+  Keep this in step with qr_build() and qr_putenc() in fw/player.c.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --bg:     #f4f2ee;
+  --panel:  #ffffff;
+  --line:   #e0dcd4;
+  --fg:     #1c1a17;
+  --muted:  #6d6760;
+  --accent: #b8323c;
+  --accent-fg: #ffffff;
+  --ok:     #2f6b46;
+  --warn:   #8a5a12;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:     #16151a;
+    --panel:  #201e26;
+    --line:   #332f3c;
+    --fg:     #ece9f0;
+    --muted:  #9a93a6;
+    --accent: #e8606c;
+    --accent-fg: #1a1016;
+    --ok:     #6cc08c;
+    --warn:   #d8a657;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:     #16151a;
+  --panel:  #201e26;
+  --line:   #332f3c;
+  --fg:     #ece9f0;
+  --muted:  #9a93a6;
+  --accent: #e8606c;
+  --accent-fg: #1a1016;
+  --ok:     #6cc08c;
+  --warn:   #d8a657;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  padding-block: 24px 48px;
+  padding-inline: 16px;
+  padding-top: calc(24px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(48px + env(safe-area-inset-bottom, 0px));
+}
+.wrap { max-width: 560px; margin: 0 auto; }
+
+header { margin-bottom: 22px; }
+h1 {
+  font-size: 1.45rem; line-height: 1.2; margin: 0 0 4px;
+  letter-spacing: -0.01em; text-wrap: balance;
+}
+.sub { color: var(--muted); font-size: 0.9rem; margin: 0; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.card h2 {
+  font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--muted); margin: 0 0 12px; font-weight: 600;
+}
+
+button {
+  font: inherit; font-weight: 600;
+  background: var(--accent); color: var(--accent-fg);
+  border: 0; border-radius: 8px;
+  padding: 12px 18px; width: 100%;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+button.secondary {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--line); font-weight: 500;
+}
+
+ol.plays { list-style: none; margin: 0; padding: 0; }
+ol.plays li {
+  display: flex; gap: 12px; align-items: baseline;
+  padding: 9px 0; border-top: 1px solid var(--line);
+}
+ol.plays li:first-child { border-top: 0; }
+.when {
+  color: var(--muted); font-size: 0.78rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  min-width: 4.2em;
+}
+.what { min-width: 0; }
+.title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.artist { display: block; color: var(--muted); font-size: 0.86rem; overflow-wrap: anywhere; }
+li.dup .title, li.dup .artist { opacity: 0.45; text-decoration: line-through; }
+
+.note { font-size: 0.85rem; color: var(--muted); margin: 12px 0 0; }
+.note.warn { color: var(--warn); }
+.note.ok   { color: var(--ok); }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em; background: var(--bg); padding: 1px 5px; border-radius: 4px;
+}
+a { color: var(--accent); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Scrobble</h1>
+  <p class="sub">HarpMudd MP3 Player for Analogue Pocket</p>
+</header>
+
+<div class="card" id="c-empty" hidden>
+  <h2>Nothing scanned</h2>
+  <p style="margin:0">Open this page by scanning the code on your Pocket:
+  play some music, then <strong>hold both triggers</strong>.</p>
+  <p class="note">The code holds up to about 23 plays. Scanning it does not
+  clear anything &mdash; the Pocket keeps the session until it is powered off.</p>
+</div>
+
+<div class="card" id="c-plays" hidden>
+  <h2 id="plays-h">Plays</h2>
+  <ol class="plays" id="list"></ol>
+  <p class="note" id="trunc" hidden></p>
+  <p class="note warn" id="noclock" hidden>Your Pocket had no clock set, so
+  these times are counted back from now. The order is right; the wall-clock
+  times are approximate.</p>
+</div>
+
+<div class="card" id="c-auth" hidden>
+  <h2>Last.fm</h2>
+  <div id="auth-out"></div>
+</div>
+
+<div class="card" id="c-config" hidden>
+  <h2>Not configured</h2>
+  <p style="margin:0">This page has no Last.fm API key compiled into it, so it
+  can show your plays but cannot submit them.</p>
+  <p class="note">Get a key at <a href="https://www.last.fm/api/account/create"
+  rel="noopener">last.fm/api/account/create</a> and set <code>API_KEY</code>
+  and <code>API_SECRET</code> at the top of this file.</p>
+</div>
+
+</div>
+
+<script>
+/* ------------------------------------------------------------------ config
+ * A Last.fm API account, created once by whoever hosts this page.
+ *
+ * The secret sits in a file anyone can read, and there is no way around that
+ * for a page with no server: Last.fm signs every write with it, so the only
+ * alternative is a backend to keep it in. Last.fm's own guidance accepts an
+ * embedded secret for desktop clients and the exposure is bounded -- it lets
+ * somebody else's app sign requests as this one, not read or write anybody's
+ * account. Each listener still authorises their own account separately, and
+ * the session key that comes back is stored on their phone only.
+ */
+var API_KEY    = "";
+var API_SECRET = "";
+
+var API = "https://ws.audioscrobbler.com/2.0/";
+var LS_SESSION = "hm_lfm_session";
+var LS_SENT    = "hm_lfm_sent";
+var LS_PENDING = "hm_pending_payload";
+
+/* --------------------------------------------------------------------- md5
+ * Needed only for Last.fm's api_sig. Compact public-domain-style
+ * implementation; nothing here is reached unless you press Submit.
+ */
+function md5(str) {
+  function rl(n, c) { return (n << c) | (n >>> (32 - c)); }
+  function au(x, y) {
+    var l = (x & 0xFFFF) + (y & 0xFFFF);
+    return (((x >> 16) + (y >> 16) + (l >> 16)) << 16) | (l & 0xFFFF);
+  }
+  function cmn(q, a, b, x, s, t) { return au(rl(au(au(a, q), au(x, t)), s), b); }
+  function ff(a,b,c,d,x,s,t){ return cmn((b & c) | (~b & d), a, b, x, s, t); }
+  function gg(a,b,c,d,x,s,t){ return cmn((b & d) | (c & ~d), a, b, x, s, t); }
+  function hh(a,b,c,d,x,s,t){ return cmn(b ^ c ^ d, a, b, x, s, t); }
+  function ii(a,b,c,d,x,s,t){ return cmn(c ^ (b | ~d), a, b, x, s, t); }
+
+  /* UTF-8 first: a title with an accent must hash as the bytes Last.fm sees. */
+  var bytes = unescape(encodeURIComponent(str));
+  var n = bytes.length;
+  var words = [];
+  for (var i = 0; i < n; i++)
+    words[i >> 2] = (words[i >> 2] || 0) | (bytes.charCodeAt(i) << ((i % 4) * 8));
+  words[n >> 2] = (words[n >> 2] || 0) | (0x80 << ((n % 4) * 8));
+  var len = (((n + 8) >> 6) + 1) * 16;
+  while (words.length < len) words.push(0);
+  words[len - 2] = n * 8;
+
+  var a = 1732584193, b = -271733879, c = -1732584194, d = 271733878;
+  for (var j = 0; j < len; j += 16) {
+    var oa = a, ob = b, oc = c, od = d, x = words.slice(j, j + 16);
+    for (var k = 0; k < 16; k++) if (x[k] === undefined) x[k] = 0;
+    a=ff(a,b,c,d,x[0],7,-680876936);    d=ff(d,a,b,c,x[1],12,-389564586);
+    c=ff(c,d,a,b,x[2],17,606105819);    b=ff(b,c,d,a,x[3],22,-1044525330);
+    a=ff(a,b,c,d,x[4],7,-176418897);    d=ff(d,a,b,c,x[5],12,1200080426);
+    c=ff(c,d,a,b,x[6],17,-1473231341);  b=ff(b,c,d,a,x[7],22,-45705983);
+    a=ff(a,b,c,d,x[8],7,1770035416);    d=ff(d,a,b,c,x[9],12,-1958414417);
+    c=ff(c,d,a,b,x[10],17,-42063);      b=ff(b,c,d,a,x[11],22,-1990404162);
+    a=ff(a,b,c,d,x[12],7,1804603682);   d=ff(d,a,b,c,x[13],12,-40341101);
+    c=ff(c,d,a,b,x[14],17,-1502002290); b=ff(b,c,d,a,x[15],22,1236535329);
+    a=gg(a,b,c,d,x[1],5,-165796510);    d=gg(d,a,b,c,x[6],9,-1069501632);
+    c=gg(c,d,a,b,x[11],14,643717713);   b=gg(b,c,d,a,x[0],20,-373897302);
+    a=gg(a,b,c,d,x[5],5,-701558691);    d=gg(d,a,b,c,x[10],9,38016083);
+    c=gg(c,d,a,b,x[15],14,-660478335);  b=gg(b,c,d,a,x[4],20,-405537848);
+    a=gg(a,b,c,d,x[9],5,568446438);     d=gg(d,a,b,c,x[14],9,-1019803690);
+    c=gg(c,d,a,b,x[3],14,-187363961);   b=gg(b,c,d,a,x[8],20,1163531501);
+    a=gg(a,b,c,d,x[13],5,-1444681467);  d=gg(d,a,b,c,x[2],9,-51403784);
+    c=gg(c,d,a,b,x[7],14,1735328473);   b=gg(b,c,d,a,x[12],20,-1926607734);
+    a=hh(a,b,c,d,x[5],4,-378558);       d=hh(d,a,b,c,x[8],11,-2022574463);
+    c=hh(c,d,a,b,x[11],16,1839030562);  b=hh(b,c,d,a,x[14],23,-35309556);
+    a=hh(a,b,c,d,x[1],4,-1530992060);   d=hh(d,a,b,c,x[4],11,1272893353);
+    c=hh(c,d,a,b,x[7],16,-155497632);   b=hh(b,c,d,a,x[10],23,-1094730640);
+    a=hh(a,b,c,d,x[13],4,681279174);    d=hh(d,a,b,c,x[0],11,-358537222);
+    c=hh(c,d,a,b,x[3],16,-722521979);   b=hh(b,c,d,a,x[6],23,76029189);
+    a=hh(a,b,c,d,x[9],4,-640364487);    d=hh(d,a,b,c,x[12],11,-421815835);
+    c=hh(c,d,a,b,x[15],16,530742520);   b=hh(b,c,d,a,x[2],23,-995338651);
+    a=ii(a,b,c,d,x[0],6,-198630844);    d=ii(d,a,b,c,x[7],10,1126891415);
+    c=ii(c,d,a,b,x[14],15,-1416354905); b=ii(b,c,d,a,x[5],21,-57434055);
+    a=ii(a,b,c,d,x[12],6,1700485571);   d=ii(d,a,b,c,x[3],10,-1894986606);
+    c=ii(c,d,a,b,x[10],15,-1051523);    b=ii(b,c,d,a,x[1],21,-2054922799);
+    a=ii(a,b,c,d,x[8],6,1873313359);    d=ii(d,a,b,c,x[15],10,-30611744);
+    c=ii(c,d,a,b,x[6],15,-1560198380);  b=ii(b,c,d,a,x[13],21,1309151649);
+    a=ii(a,b,c,d,x[4],6,-145523070);    d=ii(d,a,b,c,x[11],10,-1120210379);
+    c=ii(c,d,a,b,x[2],15,718787259);    b=ii(b,c,d,a,x[9],21,-343485551);
+    a = au(a, oa); b = au(b, ob); c = au(c, oc); d = au(d, od);
+  }
+  var hex = "0123456789abcdef", out = "";
+  var vals = [a, b, c, d];
+  for (var v = 0; v < 4; v++)
+    for (var byi = 0; byi < 4; byi++) {
+      var by = (vals[v] >> (byi * 8)) & 0xFF;
+      out += hex.charAt(by >> 4) + hex.charAt(by & 15);
+    }
+  return out;
+}
+
+/* ----------------------------------------------------------------- storage
+ * Every accessor is wrapped: a phone in private browsing throws on the first
+ * read, and a page that falls over there is a page that fails exactly when
+ * somebody is being careful.
+ */
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+/* ------------------------------------------------------------------ decode */
+function dec(s) {
+  try { return decodeURIComponent(s.replace(/\+/g, "%20")); }
+  catch (e) { return s.replace(/\+/g, " "); }
+}
+
+function parsePayload(raw) {
+  if (!raw) return null;
+  var parts = raw.split(";");
+  var head = (parts.shift() || "").split("*");
+  if (head[0] !== "1") return null;              /* unknown format version */
+  var out = {
+    total: parseInt(head[1], 10) || 0,
+    realClock: head[2] === "1",
+    plays: []
+  };
+  for (var i = 0; i < parts.length; i++) {
+    if (!parts[i]) continue;
+    var f = parts[i].split("*");
+    if (f.length < 3) continue;
+    var ts = parseInt(f[0], 10);
+    if (!isFinite(ts)) continue;
+    out.plays.push({ ts: ts, title: dec(f[1]), artist: dec(f[2]) });
+  }
+  return out.plays.length ? out : null;
+}
+
+/* With no RTC the Pocket counts seconds from boot, and Last.fm would file
+ * every one of those in 1970. Anchor the LAST play just before now and walk
+ * the rest back by the same gaps: the order and the spacing are real even
+ * when the absolute time is not. */
+function anchor(data) {
+  if (data.realClock) return;
+  var now = Math.floor(Date.now() / 1000);
+  var last = data.plays[data.plays.length - 1].ts;
+  for (var i = 0; i < data.plays.length; i++)
+    data.plays[i].ts = now - (last - data.plays[i].ts) - 30;
+}
+
+function fmtWhen(ts) {
+  var d = new Date(ts * 1000);
+  var hh = d.getHours(), mm = d.getMinutes();
+  return (hh < 10 ? "0" : "") + hh + ":" + (mm < 10 ? "0" : "") + mm;
+}
+
+/* -------------------------------------------------------------------- dedup
+ * Scanning the same code twice is the normal way to use this -- you submit,
+ * the page stays open, you scan again later in the session and the earlier
+ * plays are still in the code. Keyed on artist, track and timestamp, which is
+ * what Last.fm itself treats as one play.
+ */
+function sentKeys() {
+  try { return JSON.parse(lsGet(LS_SENT) || "[]"); } catch (e) { return []; }
+}
+function keyOf(p) { return p.ts + "\u0000" + p.artist + "\u0000" + p.title; }
+function rememberSent(plays) {
+  var k = sentKeys();
+  for (var i = 0; i < plays.length; i++) k.push(keyOf(plays[i]));
+  lsSet(LS_SENT, JSON.stringify(k.slice(-400)));
+}
+
+/* ----------------------------------------------------------------- last.fm */
+function sign(params) {
+  var keys = Object.keys(params).sort(), s = "";
+  for (var i = 0; i < keys.length; i++) s += keys[i] + params[keys[i]];
+  return md5(s + API_SECRET);
+}
+
+function call(params, method) {
+  params.api_key = API_KEY;
+  params.api_sig = sign(params);
+  params.format = "json";
+  var body = new URLSearchParams(params).toString();
+  if (method === "POST") {
+    return fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body
+    }).then(function (r) { return r.json(); });
+  }
+  return fetch(API + "?" + body).then(function (r) { return r.json(); });
+}
+
+/* ---------------------------------------------------------------------- ui */
+var $ = function (id) { return document.getElementById(id); };
+var data = null;
+
+function show(id, on) { $(id).hidden = !on; }
+
+function renderPlays() {
+  var sent = {}, ks = sentKeys();
+  for (var i = 0; i < ks.length; i++) sent[ks[i]] = 1;
+
+  var ol = $("list");
+  ol.textContent = "";
+  var fresh = 0;
+  for (var j = 0; j < data.plays.length; j++) {
+    var p = data.plays[j];
+    var dup = !!sent[keyOf(p)];
+    if (!dup) fresh++;
+    var li = document.createElement("li");
+    if (dup) li.className = "dup";
+    var w = document.createElement("span");
+    w.className = "when"; w.textContent = fmtWhen(p.ts);
+    var what = document.createElement("span");
+    what.className = "what";
+    var t = document.createElement("span");
+    t.className = "title"; t.textContent = p.title || "(untitled)";
+    var a = document.createElement("span");
+    a.className = "artist"; a.textContent = p.artist || "(unknown artist)";
+    what.appendChild(t); what.appendChild(a);
+    li.appendChild(w); li.appendChild(what);
+    ol.appendChild(li);
+  }
+
+  $("plays-h").textContent = data.plays.length + " play" +
+    (data.plays.length === 1 ? "" : "s");
+
+  if (data.total > data.plays.length) {
+    $("trunc").textContent = "This code carries " + data.plays.length +
+      " of the " + data.total + " plays in the session. A code holds about " +
+      "23, and the oldest are left out. Submit, then open the code again to " +
+      "catch anything new.";
+    show("trunc", true);
+  }
+  show("noclock", !data.realClock);
+  return fresh;
+}
+
+function setAuth(html) { $("auth-out").innerHTML = ""; $("auth-out").appendChild(html); }
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function renderAuth() {
+  var sess = null;
+  try { sess = JSON.parse(lsGet(LS_SESSION) || "null"); } catch (e) {}
+
+  var box = document.createDocumentFragment();
+
+  if (!sess) {
+    var b = el("button", null, "Connect Last.fm");
+    b.onclick = function () {
+      /* The round trip drops the fragment, so the payload has to be put
+       * somewhere it survives. */
+      lsSet(LS_PENDING, location.hash.slice(1));
+      var cb = location.origin + location.pathname;
+      location.href = "https://www.last.fm/api/auth/?api_key=" +
+        encodeURIComponent(API_KEY) + "&cb=" + encodeURIComponent(cb);
+    };
+    box.appendChild(b);
+    box.appendChild(el("p", "note",
+      "You will be sent to Last.fm to approve this once. Nothing is " +
+      "submitted until you come back and press Submit."));
+    setAuth(box);
+    return;
+  }
+
+  var fresh = data ? renderPlays() : 0;
+  box.appendChild(el("p", "note ok", "Connected as " + sess.name + "."));
+
+  if (data && fresh > 0) {
+    var s = el("button", null, "Submit " + fresh + " play" + (fresh === 1 ? "" : "s"));
+    s.onclick = function () { submit(s); };
+    box.appendChild(s);
+  } else if (data) {
+    box.appendChild(el("p", "note", "Every play in this code has already been submitted."));
+  }
+
+  var d = el("button", "secondary", "Disconnect");
+  d.style.marginTop = "10px";
+  d.onclick = function () {
+    try { localStorage.removeItem(LS_SESSION); } catch (e) {}
+    renderAuth();
+  };
+  box.appendChild(d);
+  setAuth(box);
+}
+
+function submit(btn) {
+  var sess = JSON.parse(lsGet(LS_SESSION));
+  var sent = {}, ks = sentKeys();
+  for (var i = 0; i < ks.length; i++) sent[ks[i]] = 1;
+  var todo = data.plays.filter(function (p) { return !sent[keyOf(p)]; });
+  if (!todo.length) return;
+
+  btn.disabled = true;
+  btn.textContent = "Submitting…";
+
+  /* Last.fm takes up to 50 a batch; a code never holds that many, but the
+   * loop is here so a future larger payload does not silently lose the tail. */
+  var batches = [];
+  for (var b = 0; b < todo.length; b += 50) batches.push(todo.slice(b, b + 50));
+
+  var okCount = 0;
+  var chain = Promise.resolve();
+  batches.forEach(function (batch) {
+    chain = chain.then(function () {
+      var p = { method: "track.scrobble", sk: sess.key };
+      batch.forEach(function (x, i) {
+        p["artist[" + i + "]"] = x.artist;
+        p["track[" + i + "]"] = x.title;
+        p["timestamp[" + i + "]"] = String(x.ts);
+      });
+      return call(p, "POST").then(function (res) {
+        if (res.error) throw new Error(res.message || ("error " + res.error));
+        rememberSent(batch);
+        okCount += batch.length;
+      });
+    });
+  });
+
+  chain.then(function () {
+    btn.remove();
+    var out = el("p", "note ok", "Scrobbled " + okCount + " play" +
+      (okCount === 1 ? "" : "s") + " to Last.fm.");
+    $("auth-out").appendChild(out);
+    renderPlays();
+  }).catch(function (e) {
+    btn.disabled = false;
+    btn.textContent = "Try again";
+    var out = el("p", "note warn", "Last.fm said: " + e.message +
+      (okCount ? " (" + okCount + " already went through)" : ""));
+    $("auth-out").appendChild(out);
+  });
+}
+
+/* -------------------------------------------------------------------- boot */
+(function () {
+  var hash = location.hash.slice(1);
+
+  /* Coming back from Last.fm: the fragment is gone and a token is on the
+   * query string instead. Pick the payload back up and trade the token. */
+  var qs = new URLSearchParams(location.search);
+  var token = qs.get("token");
+  if (!hash) hash = lsGet(LS_PENDING) || "";
+
+  data = parsePayload(hash);
+  if (data) anchor(data);
+
+  show("c-empty", !data);
+  show("c-plays", !!data);
+  if (data) renderPlays();
+
+  if (!API_KEY || !API_SECRET) { show("c-config", true); return; }
+  show("c-auth", true);
+
+  if (token) {
+    $("auth-out").appendChild(el("p", "note", "Finishing sign-in…"));
+    call({ method: "auth.getSession", token: token }, "GET")
+      .then(function (res) {
+        if (res.error || !res.session) throw new Error(res.message || "sign-in failed");
+        lsSet(LS_SESSION, JSON.stringify({
+          name: res.session.name, key: res.session.key
+        }));
+        try { localStorage.removeItem(LS_PENDING); } catch (e) {}
+        /* Drop the token from the URL and put the payload back in the
+         * fragment, so a reload or a bookmark still works. */
+        history.replaceState(null, "", location.pathname +
+          (hash ? "#" + hash : ""));
+        renderAuth();
+      })
+      .catch(function (e) {
+        setAuth(el("p", "note warn", "Could not sign in: " + e.message));
+      });
+    return;
+  }
+
+  renderAuth();
+})();
+</script>
+</body>
+</html>
