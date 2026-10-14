@@ -62,6 +62,7 @@ LICENCE_CHECKS = [
      ['RPSL', 'helixcommunity.org']),
     ('VexRiscv attribution', ['VexRiscv']),
     ('picojpeg attribution', ['picojpeg']),
+    ('qrcodegen attribution', ['qrcodegen', 'Nayuki']),
     ('Inter / OFL attribution', ['Inter', 'Open Font License']),
     ('Unifont attribution', ['Unifont']),
     ('agg23 attribution', ['agg23']),

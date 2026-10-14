@@ -109,6 +109,7 @@ mp3player_m10kdiet.rbf_r
 mp3player_170dev.rom
 fw/fw.sym
 tools/host/*_gen.c
+tools/host/*_payload.bin
 tools/host/*.elf
 tools/host/*.sym
 jpeg_bench.bin

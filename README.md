@@ -358,6 +358,8 @@ from that source file's own copyright header.
 - **[picojpeg](https://github.com/richgel999/picojpeg)** — Rich Geldreich
   ([richgel999](https://github.com/richgel999)), with changes from Chris
   Phoenix (public domain).
+- **[QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)**
+  — Project Nayuki (MIT).
 - **SDRAM controller and i2s audio bridge** — Adam Gastineau
   ([agg23](https://github.com/agg23)) (MIT).
 - **[Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/)** — Robert
