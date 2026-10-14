@@ -204,7 +204,9 @@ mp3_soc u_soc (
     .psr_wr   (soc_psr_wr),
     .psr_rdata(psr_dout),
     .psr_avail(psr_avail),
-    .psr_busy (psr_busy)
+    .psr_busy (psr_busy),
+    .rtc_epoch(rtc_epoch_seconds),
+    .rtc_ok   (rtc_valid)
 );
 
 // ---- PSRAM -------------------------------------------------------------

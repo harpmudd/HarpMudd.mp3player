@@ -73,6 +73,9 @@
 #define R_PSR_ADDR  0x80000074u   /* W: word address  R: current address    */
 #define R_PSR_DATA  0x80000078u   /* W: data + start write  R: last read    */
 #define R_PSR_ST    0x8000007Cu   /* W: start a read  R: {ready, busy}      */
+/* Wall clock from APF, rev 25. UTC seconds, or 0 when the Pocket's clock is
+ * not set -- one value to test rather than a second validity register. */
+#define R_RTC       0x80000080u   /* R: UTC epoch seconds, 0 = no clock     */
 #define PSR_BUSY(s)  ((s) & 1u)
 #define PSR_READY(s) ((s) & 2u)
 
@@ -227,7 +230,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503318u   /* rev 24: native 24/32px font cells  */
+#define EXPECT_VERSION 0x4D503319u   /* rev 25: the RTC is readable        */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
@@ -2187,6 +2190,7 @@ static uint32_t scr_uptime;     /* seconds since boot, 1 Hz        */
 static uint32_t scr_played;     /* seconds of THIS track decoded   */
 static uint32_t scr_start;      /* scr_uptime when it started      */
 static uint8_t  scr_done;       /* this track already logged       */
+static uint8_t  scr_epoch;      /* scr_start is UTC, not uptime    */
 
 /* Copy a C string into a fixed field, NUL-terminated and never overrunning. */
 static void scr_field(uint32_t w, const char *t, uint32_t cap)
@@ -2222,11 +2226,22 @@ static void scr_second(void)
     if (scr_played >= want) { scr_log(); scr_done = 1u; }
 }
 
+/* Real time where the Pocket has it, uptime where it does not.
+ *
+ * Last.fm wants UTC seconds and filters what it does not like, "timestamp too
+ * old" among the reasons -- so a boot-relative figure is not merely imprecise,
+ * it gets rejected. R_RTC reads 0 when APF says the clock is unset, which is
+ * the only case the fallback is for; the export then has to anchor those
+ * against when they were scanned, and say so.
+ *
+ * scr_epoch distinguishes the two for whatever reads the log. */
 static void scr_track_start(void)
 {
     scr_played = 0;
     scr_done   = 0;
-    scr_start  = scr_uptime;
+    uint32_t t = REG(R_RTC);
+    scr_epoch  = t ? 1u : 0u;
+    scr_start  = t ? t : scr_uptime;
 }
 
 
