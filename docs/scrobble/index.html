@@ -14,6 +14,13 @@
   nothing about what you have been playing; the decoding happens on your
   phone, and the only thing that leaves it is the scrobble you ask for.
 
+  There is NO API key in this file, and that is deliberate. A page with no
+  server has nowhere to hide a shared secret, so the alternative was to commit
+  one application secret readable by anybody who opened the file -- which puts
+  every user's scrobbling at the mercy of whoever abuses it first. Instead
+  each listener registers their own Last.fm API account and the key lives in
+  their own browser. Two minutes of setup, once, and nothing to leak.
+
   The payload is one record per play:
 
       #1*<total>*<epoch>;<ts>*<title>*<artist>;...
@@ -23,124 +30,14 @@
   phone has to find a URL in it, so a single space would truncate the lot.
   <total> is how many plays the session held, which can exceed the number in
   the code: version 23 carries 1,091 bytes, which is 23 plays, and the oldest
-  are dropped past that. <epoch> is 1 when the Pocket had a real clock and 0 when the times are
-  seconds since the core booted.
+  are dropped past that. <epoch> is 1 when the Pocket had a real clock and 0
+  when the times are seconds since the core booted.
 
   Keep this in step with qr_build() and qr_putenc() in fw/player.c.
+  tools/host/scrobble_check.js checks that it is, and checks the md5 below
+  against node's own.
 -->
-<style>
-:root {
-  color-scheme: light;
-  --bg:     #f4f2ee;
-  --panel:  #ffffff;
-  --line:   #e0dcd4;
-  --fg:     #1c1a17;
-  --muted:  #6d6760;
-  --accent: #b8323c;
-  --accent-fg: #ffffff;
-  --ok:     #2f6b46;
-  --warn:   #8a5a12;
-  --radius: 10px;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg:     #16151a;
-    --panel:  #201e26;
-    --line:   #332f3c;
-    --fg:     #ece9f0;
-    --muted:  #9a93a6;
-    --accent: #e8606c;
-    --accent-fg: #1a1016;
-    --ok:     #6cc08c;
-    --warn:   #d8a657;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg:     #16151a;
-  --panel:  #201e26;
-  --line:   #332f3c;
-  --fg:     #ece9f0;
-  --muted:  #9a93a6;
-  --accent: #e8606c;
-  --accent-fg: #1a1016;
-  --ok:     #6cc08c;
-  --warn:   #d8a657;
-}
-
-* { box-sizing: border-box; }
-html, body { margin: 0; }
-body {
-  background: var(--bg);
-  color: var(--fg);
-  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-        "Helvetica Neue", Arial, sans-serif;
-  padding-block: 24px 48px;
-  padding-inline: 16px;
-  padding-top: calc(24px + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(48px + env(safe-area-inset-bottom, 0px));
-}
-.wrap { max-width: 560px; margin: 0 auto; }
-
-header { margin-bottom: 22px; }
-h1 {
-  font-size: 1.45rem; line-height: 1.2; margin: 0 0 4px;
-  letter-spacing: -0.01em; text-wrap: balance;
-}
-.sub { color: var(--muted); font-size: 0.9rem; margin: 0; }
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 16px;
-}
-.card h2 {
-  font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.09em;
-  color: var(--muted); margin: 0 0 12px; font-weight: 600;
-}
-
-button {
-  font: inherit; font-weight: 600;
-  background: var(--accent); color: var(--accent-fg);
-  border: 0; border-radius: 8px;
-  padding: 12px 18px; width: 100%;
-  cursor: pointer;
-}
-button:disabled { opacity: 0.45; cursor: default; }
-button.secondary {
-  background: transparent; color: var(--muted);
-  border: 1px solid var(--line); font-weight: 500;
-}
-
-ol.plays { list-style: none; margin: 0; padding: 0; }
-ol.plays li {
-  display: flex; gap: 12px; align-items: baseline;
-  padding: 9px 0; border-top: 1px solid var(--line);
-}
-ol.plays li:first-child { border-top: 0; }
-.when {
-  color: var(--muted); font-size: 0.78rem;
-  font-variant-numeric: tabular-nums; white-space: nowrap;
-  min-width: 4.2em;
-}
-.what { min-width: 0; }
-.title { display: block; font-weight: 600; overflow-wrap: anywhere; }
-.artist { display: block; color: var(--muted); font-size: 0.86rem; overflow-wrap: anywhere; }
-li.dup .title, li.dup .artist { opacity: 0.45; text-decoration: line-through; }
-
-.note { font-size: 0.85rem; color: var(--muted); margin: 12px 0 0; }
-.note.warn { color: var(--warn); }
-.note.ok   { color: var(--ok); }
-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.85em; background: var(--bg); padding: 1px 5px; border-radius: 4px;
-}
-a { color: var(--accent); }
-[hidden] { display: none !important; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="wrap">
@@ -167,45 +64,63 @@ a { color: var(--accent); }
   times are approximate.</p>
 </div>
 
+<div class="card" id="c-setup" hidden>
+  <h2>One-time setup</h2>
+  <p style="margin:0 0 10px">This page has no Last.fm key built into it, on
+  purpose &mdash; a page with no server cannot keep a secret, so rather than
+  ship one that everybody shares, you use your own. It stays in this browser.</p>
+  <ol class="steps">
+    <li>Create an API account at
+      <a href="https://www.last.fm/api/account/create" target="_blank"
+         rel="noopener">last.fm/api/account/create</a>.</li>
+    <li>Put this in its <strong>Callback URL</strong> box, exactly:
+      <code id="cburl"></code></li>
+    <li>Copy the API key and shared secret it gives you into the boxes below.</li>
+  </ol>
+  <p class="note"><a href="setup.html">Step-by-step guide, with what to put in
+  every box and what to do when Last.fm complains &rarr;</a></p>
+  <label for="f-key">API key</label>
+  <input type="text" id="f-key" autocomplete="off" autocapitalize="off"
+         autocorrect="off" spellcheck="false" placeholder="32 hex characters">
+  <label for="f-sec">Shared secret</label>
+  <input type="text" id="f-sec" autocomplete="off" autocapitalize="off"
+         autocorrect="off" spellcheck="false" placeholder="32 hex characters">
+  <p class="note warn" id="setup-err" hidden></p>
+  <p style="margin-top:14px"><button id="f-save">Save</button></p>
+  <p class="note">Stored only in this browser, never sent anywhere except to
+  Last.fm when you submit.</p>
+</div>
+
 <div class="card" id="c-auth" hidden>
   <h2>Last.fm</h2>
   <div id="auth-out"></div>
 </div>
 
-<div class="card" id="c-config" hidden>
-  <h2>Not configured</h2>
-  <p style="margin:0">This page has no Last.fm API key compiled into it, so it
-  can show your plays but cannot submit them.</p>
-  <p class="note">Get a key at <a href="https://www.last.fm/api/account/create"
-  rel="noopener">last.fm/api/account/create</a> and set <code>API_KEY</code>
-  and <code>API_SECRET</code> at the top of this file.</p>
-</div>
-
 </div>
 
 <script>
-/* ------------------------------------------------------------------ config
- * A Last.fm API account, created once by whoever hosts this page.
+/* ----------------------------------------------------------------- config
+ * No key in this file. Each listener registers their own Last.fm API account
+ * and it lives in their own browser.
  *
- * The secret sits in a file anyone can read, and there is no way around that
- * for a page with no server: Last.fm signs every write with it, so the only
- * alternative is a backend to keep it in. Last.fm's own guidance accepts an
- * embedded secret for desktop clients and the exposure is bounded -- it lets
- * somebody else's app sign requests as this one, not read or write anybody's
- * account. Each listener still authorises their own account separately, and
- * the session key that comes back is stored on their phone only.
+ * The reasoning, since it looks like extra friction: signing a scrobble needs
+ * the secret, and a static page has nowhere to put one that the reader cannot
+ * also see. Committing a single application secret would mean every user's
+ * scrobbling depends on nobody abusing the key that is sitting in a public
+ * repository -- and when it is revoked it breaks for all of them at once.
+ * A key per listener costs one signup and has nothing to leak.
  */
-var API_KEY    = "";
-var API_SECRET = "";
-
 var API = "https://ws.audioscrobbler.com/2.0/";
+var LS_CFG     = "hm_lfm_cfg";
 var LS_SESSION = "hm_lfm_session";
 var LS_SENT    = "hm_lfm_sent";
 var LS_PENDING = "hm_pending_payload";
 
 /* --------------------------------------------------------------------- md5
  * Needed only for Last.fm's api_sig. Compact public-domain-style
- * implementation; nothing here is reached unless you press Submit.
+ * implementation; checked against node's crypto by
+ * tools/host/scrobble_check.js, including the block-boundary lengths where a
+ * hand-written md5 usually goes wrong.
  */
 function md5(str) {
   function rl(n, c) { return (n << c) | (n >>> (32 - c)); }
@@ -285,6 +200,13 @@ function md5(str) {
  */
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+function lsJson(k) { try { return JSON.parse(lsGet(k) || "null"); } catch (e) { return null; } }
+
+function getCfg() {
+  var c = lsJson(LS_CFG);
+  return (c && c.key && c.secret) ? c : null;
+}
 
 /* ------------------------------------------------------------------ decode */
 function dec(s) {
@@ -333,12 +255,12 @@ function fmtWhen(ts) {
 
 /* -------------------------------------------------------------------- dedup
  * Scanning the same code twice is the normal way to use this -- you submit,
- * the page stays open, you scan again later in the session and the earlier
- * plays are still in the code. Keyed on artist, track and timestamp, which is
- * what Last.fm itself treats as one play.
+ * then later in the session the earlier plays are still in the code. Keyed on
+ * artist, track and timestamp, which is what Last.fm treats as one play.
  */
 function sentKeys() {
-  try { return JSON.parse(lsGet(LS_SENT) || "[]"); } catch (e) { return []; }
+  var k = lsJson(LS_SENT);
+  return (k && k.length) ? k : [];
 }
 function keyOf(p) { return p.ts + "\u0000" + p.artist + "\u0000" + p.title; }
 function rememberSent(plays) {
@@ -348,15 +270,17 @@ function rememberSent(plays) {
 }
 
 /* ----------------------------------------------------------------- last.fm */
-function sign(params) {
+function sign(params, secret) {
   var keys = Object.keys(params).sort(), s = "";
   for (var i = 0; i < keys.length; i++) s += keys[i] + params[keys[i]];
-  return md5(s + API_SECRET);
+  return md5(s + secret);
 }
 
 function call(params, method) {
-  params.api_key = API_KEY;
-  params.api_sig = sign(params);
+  var cfg = getCfg();
+  if (!cfg) return Promise.reject(new Error("no API key set"));
+  params.api_key = cfg.key;
+  params.api_sig = sign(params, cfg.secret);
   params.format = "json";
   var body = new URLSearchParams(params).toString();
   if (method === "POST") {
@@ -374,6 +298,14 @@ var $ = function (id) { return document.getElementById(id); };
 var data = null;
 
 function show(id, on) { $(id).hidden = !on; }
+function callbackUrl() { return location.origin + location.pathname; }
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
 
 function renderPlays() {
   var sent = {}, ks = sentKeys();
@@ -388,15 +320,10 @@ function renderPlays() {
     if (!dup) fresh++;
     var li = document.createElement("li");
     if (dup) li.className = "dup";
-    var w = document.createElement("span");
-    w.className = "when"; w.textContent = fmtWhen(p.ts);
-    var what = document.createElement("span");
-    what.className = "what";
-    var t = document.createElement("span");
-    t.className = "title"; t.textContent = p.title || "(untitled)";
-    var a = document.createElement("span");
-    a.className = "artist"; a.textContent = p.artist || "(unknown artist)";
-    what.appendChild(t); what.appendChild(a);
+    var w = el("span", "when", fmtWhen(p.ts));
+    var what = el("span", "what");
+    what.appendChild(el("span", "title", p.title || "(untitled)"));
+    what.appendChild(el("span", "artist", p.artist || "(unknown artist)"));
     li.appendChild(w); li.appendChild(what);
     ol.appendChild(li);
   }
@@ -415,35 +342,66 @@ function renderPlays() {
   return fresh;
 }
 
-function setAuth(html) { $("auth-out").innerHTML = ""; $("auth-out").appendChild(html); }
+/* ------------------------------------------------------------------- setup */
+function renderSetup() {
+  $("cburl").textContent = callbackUrl();
+  var cfg = getCfg();
+  if (cfg) {
+    $("f-key").value = cfg.key;
+    $("f-sec").value = cfg.secret;
+  }
+  $("f-save").onclick = function () {
+    var k = $("f-key").value.trim();
+    var s = $("f-sec").value.trim();
+    /* Both are 32 hex characters. Checking here turns the commonest mistake
+     * -- a half-copied value, or the two swapped into the wrong boxes -- into
+     * a message now rather than an opaque "Invalid method signature" after a
+     * round trip through Last.fm. */
+    if (!/^[0-9a-fA-F]{32}$/.test(k) || !/^[0-9a-fA-F]{32}$/.test(s)) {
+      $("setup-err").textContent =
+        "Both of those should be 32 hex characters. Check you copied the " +
+        "whole value, and that the key and the secret are the right way round.";
+      show("setup-err", true);
+      return;
+    }
+    show("setup-err", false);
+    lsSet(LS_CFG, JSON.stringify({ key: k, secret: s }));
+    show("c-setup", false);
+    show("c-auth", true);
+    renderAuth();
+  };
+  show("c-setup", true);
+}
 
-function el(tag, cls, text) {
-  var e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
+/* -------------------------------------------------------------------- auth */
+function setAuth(node) {
+  $("auth-out").textContent = "";
+  $("auth-out").appendChild(node);
 }
 
 function renderAuth() {
-  var sess = null;
-  try { sess = JSON.parse(lsGet(LS_SESSION) || "null"); } catch (e) {}
-
+  var sess = lsJson(LS_SESSION);
   var box = document.createDocumentFragment();
 
-  if (!sess) {
+  if (!sess || !sess.key) {
     var b = el("button", null, "Connect Last.fm");
     b.onclick = function () {
+      var cfg = getCfg();
+      if (!cfg) { renderSetup(); return; }
       /* The round trip drops the fragment, so the payload has to be put
        * somewhere it survives. */
       lsSet(LS_PENDING, location.hash.slice(1));
-      var cb = location.origin + location.pathname;
       location.href = "https://www.last.fm/api/auth/?api_key=" +
-        encodeURIComponent(API_KEY) + "&cb=" + encodeURIComponent(cb);
+        encodeURIComponent(cfg.key) + "&cb=" + encodeURIComponent(callbackUrl());
     };
     box.appendChild(b);
     box.appendChild(el("p", "note",
       "You will be sent to Last.fm to approve this once. Nothing is " +
       "submitted until you come back and press Submit."));
+    var ch = el("button", "secondary", "Change API key");
+    ch.style.marginTop = "10px";
+    ch.onclick = function () { show("c-auth", false); renderSetup(); };
+    box.appendChild(ch);
     setAuth(box);
     return;
   }
@@ -461,16 +419,13 @@ function renderAuth() {
 
   var d = el("button", "secondary", "Disconnect");
   d.style.marginTop = "10px";
-  d.onclick = function () {
-    try { localStorage.removeItem(LS_SESSION); } catch (e) {}
-    renderAuth();
-  };
+  d.onclick = function () { lsDel(LS_SESSION); renderAuth(); };
   box.appendChild(d);
   setAuth(box);
 }
 
 function submit(btn) {
-  var sess = JSON.parse(lsGet(LS_SESSION));
+  var sess = lsJson(LS_SESSION);
   var sent = {}, ks = sentKeys();
   for (var i = 0; i < ks.length; i++) sent[ks[i]] = 1;
   var todo = data.plays.filter(function (p) { return !sent[keyOf(p)]; });
@@ -504,27 +459,25 @@ function submit(btn) {
 
   chain.then(function () {
     btn.remove();
-    var out = el("p", "note ok", "Scrobbled " + okCount + " play" +
-      (okCount === 1 ? "" : "s") + " to Last.fm.");
-    $("auth-out").appendChild(out);
+    $("auth-out").appendChild(el("p", "note ok",
+      "Scrobbled " + okCount + " play" + (okCount === 1 ? "" : "s") + " to Last.fm."));
     renderPlays();
   }).catch(function (e) {
     btn.disabled = false;
     btn.textContent = "Try again";
-    var out = el("p", "note warn", "Last.fm said: " + e.message +
-      (okCount ? " (" + okCount + " already went through)" : ""));
-    $("auth-out").appendChild(out);
+    $("auth-out").appendChild(el("p", "note warn",
+      "Last.fm said: " + e.message +
+      (okCount ? " (" + okCount + " already went through)" : "")));
   });
 }
 
 /* -------------------------------------------------------------------- boot */
 (function () {
   var hash = location.hash.slice(1);
+  var token = new URLSearchParams(location.search).get("token");
 
-  /* Coming back from Last.fm: the fragment is gone and a token is on the
-   * query string instead. Pick the payload back up and trade the token. */
-  var qs = new URLSearchParams(location.search);
-  var token = qs.get("token");
+  /* Coming back from Last.fm the fragment is gone and a token is on the query
+   * string instead, so the payload is picked back up from where it was left. */
   if (!hash) hash = lsGet(LS_PENDING) || "";
 
   data = parsePayload(hash);
@@ -534,26 +487,30 @@ function submit(btn) {
   show("c-plays", !!data);
   if (data) renderPlays();
 
-  if (!API_KEY || !API_SECRET) { show("c-config", true); return; }
+  if (!getCfg()) { renderSetup(); return; }
   show("c-auth", true);
 
   if (token) {
-    $("auth-out").appendChild(el("p", "note", "Finishing sign-in…"));
+    setAuth(el("p", "note", "Finishing sign-in…"));
     call({ method: "auth.getSession", token: token }, "GET")
       .then(function (res) {
         if (res.error || !res.session) throw new Error(res.message || "sign-in failed");
         lsSet(LS_SESSION, JSON.stringify({
           name: res.session.name, key: res.session.key
         }));
-        try { localStorage.removeItem(LS_PENDING); } catch (e) {}
+        lsDel(LS_PENDING);
         /* Drop the token from the URL and put the payload back in the
          * fragment, so a reload or a bookmark still works. */
-        history.replaceState(null, "", location.pathname +
-          (hash ? "#" + hash : ""));
+        history.replaceState(null, "", location.pathname + (hash ? "#" + hash : ""));
         renderAuth();
       })
       .catch(function (e) {
-        setAuth(el("p", "note warn", "Could not sign in: " + e.message));
+        var box = document.createDocumentFragment();
+        box.appendChild(el("p", "note warn", "Could not sign in: " + e.message));
+        var ch = el("button", "secondary", "Check API key");
+        ch.onclick = function () { show("c-auth", false); renderSetup(); };
+        box.appendChild(ch);
+        setAuth(box);
       });
     return;
   }

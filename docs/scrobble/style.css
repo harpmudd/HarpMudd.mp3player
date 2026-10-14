@@ -1,0 +1,143 @@
+/* Shared look for the scrobble pages (the app and its setup guide).
+ *
+ * Three theme states, not two: an explicit choice sets data-theme on the root,
+ * and the default "system" setting sets nothing at all -- so for most readers
+ * only prefers-color-scheme distinguishes light from dark. Every colour is a
+ * token defined on bare :root first; the two dark blocks only redefine them.
+ * A colour whose only definition lives inside a media query is the classic
+ * unreadable-page bug.
+ */
+:root {
+  color-scheme: light;
+  --bg:     #f4f2ee;
+  --panel:  #ffffff;
+  --line:   #e0dcd4;
+  --fg:     #1c1a17;
+  --muted:  #6d6760;
+  --accent: #b8323c;
+  --accent-fg: #ffffff;
+  --ok:     #2f6b46;
+  --warn:   #8a5a12;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:     #16151a;
+    --panel:  #201e26;
+    --line:   #332f3c;
+    --fg:     #ece9f0;
+    --muted:  #9a93a6;
+    --accent: #e8606c;
+    --accent-fg: #1a1016;
+    --ok:     #6cc08c;
+    --warn:   #d8a657;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:     #16151a;
+  --panel:  #201e26;
+  --line:   #332f3c;
+  --fg:     #ece9f0;
+  --muted:  #9a93a6;
+  --accent: #e8606c;
+  --accent-fg: #1a1016;
+  --ok:     #6cc08c;
+  --warn:   #d8a657;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  padding-inline: 16px;
+  padding-top: calc(24px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(48px + env(safe-area-inset-bottom, 0px));
+}
+.wrap { max-width: 560px; margin: 0 auto; }
+
+header { margin-bottom: 22px; }
+h1 {
+  font-size: 1.45rem; line-height: 1.2; margin: 0 0 4px;
+  letter-spacing: -0.01em; text-wrap: balance;
+}
+.sub { color: var(--muted); font-size: 0.9rem; margin: 0; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.card h2 {
+  font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--muted); margin: 0 0 12px; font-weight: 600;
+}
+
+button, .btn {
+  font: inherit; font-weight: 600;
+  background: var(--accent); color: var(--accent-fg);
+  border: 0; border-radius: 8px;
+  padding: 12px 18px; width: 100%;
+  cursor: pointer;
+  display: block; text-align: center; text-decoration: none;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+button.secondary, .btn.secondary {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--line); font-weight: 500;
+}
+
+label { display: block; font-size: 0.8rem; color: var(--muted); margin: 12px 0 4px; }
+input[type=text] {
+  font: inherit; width: 100%;
+  padding: 10px 12px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px;
+}
+input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+ol.steps { margin: 0 0 4px; padding-left: 1.3em; font-size: 0.9rem; }
+ol.steps li { margin-bottom: 6px; }
+
+/* The setup guide's numbered walkthrough: a bit more room to breathe than
+ * the inline version on the app page. */
+ol.walk { margin: 0; padding-left: 1.4em; }
+ol.walk > li { margin-bottom: 18px; }
+ol.walk > li > strong { display: block; margin-bottom: 4px; }
+
+dl.fields { margin: 8px 0 0; font-size: 0.9rem; }
+dl.fields dt { font-weight: 600; margin-top: 8px; }
+dl.fields dd { margin: 2px 0 0 0; color: var(--muted); }
+
+ol.plays { list-style: none; margin: 0; padding: 0; }
+ol.plays li {
+  display: flex; gap: 12px; align-items: baseline;
+  padding: 9px 0; border-top: 1px solid var(--line);
+}
+ol.plays li:first-child { border-top: 0; }
+.when {
+  color: var(--muted); font-size: 0.78rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  min-width: 4.2em;
+}
+.what { min-width: 0; }
+.title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.artist { display: block; color: var(--muted); font-size: 0.86rem; overflow-wrap: anywhere; }
+li.dup .title, li.dup .artist { opacity: 0.45; text-decoration: line-through; }
+
+.note { font-size: 0.85rem; color: var(--muted); margin: 12px 0 0; }
+.note.warn { color: var(--warn); }
+.note.ok   { color: var(--ok); }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em; background: var(--bg); padding: 1px 5px; border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+a { color: var(--accent); }
+[hidden] { display: none !important; }

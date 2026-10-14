@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scrobble setup &middot; HarpMudd MP3 Player</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Scrobble setup</h1>
+  <p class="sub">Getting your own Last.fm API key &mdash; about two minutes, once</p>
+</header>
+
+<div class="card">
+  <h2>Why your own key</h2>
+  <p style="margin:0">Scrobbling has to be signed with a Last.fm
+  <em>secret</em>. The scrobble page has no server behind it &mdash; it is a
+  single file on GitHub Pages &mdash; so anything built into it is readable by
+  anyone who opens it.</p>
+  <p class="note">Shipping one shared secret would mean everybody's scrobbling
+  stops the day somebody abuses it. A key of your own costs one signup, is
+  stored only in your own browser, and cannot affect anyone else. Your Last.fm
+  password is never involved either way.</p>
+</div>
+
+<div class="card">
+  <h2>Steps</h2>
+  <ol class="walk">
+    <li>
+      <strong>Sign in to Last.fm, then open the API account form.</strong>
+      <a href="https://www.last.fm/api/account/create" target="_blank"
+         rel="noopener">last.fm/api/account/create</a>
+    </li>
+    <li>
+      <strong>Fill it in.</strong>
+      Only the callback matters; the rest is free text and nobody reviews it.
+      <dl class="fields">
+        <dt>Application name</dt>
+        <dd>Anything &mdash; for example <code>Pocket MP3 Player</code>.</dd>
+        <dt>Application description</dt>
+        <dd>Anything, e.g. &ldquo;scrobbles from my Analogue Pocket&rdquo;.</dd>
+        <dt>Application homepage</dt>
+        <dd>Optional. <code id="home"></code> will do.</dd>
+        <dt>Callback URL</dt>
+        <dd><strong>This one must be exact.</strong> Paste:<br>
+            <code id="cb"></code></dd>
+      </dl>
+    </li>
+    <li>
+      <strong>Submit, and copy what it gives you.</strong>
+      You get an <em>API key</em> and a <em>shared secret</em>, each 32
+      characters of hex. Both are needed. If you lose them they are always
+      visible again at
+      <a href="https://www.last.fm/api/accounts" target="_blank"
+         rel="noopener">last.fm/api/accounts</a>.
+    </li>
+    <li>
+      <strong>Paste them into the scrobble page.</strong>
+      Open it, and the setup boxes appear at the bottom. Paste the key and
+      the secret, press Save.
+    </li>
+    <li>
+      <strong>Press Connect Last.fm and approve.</strong>
+      Last.fm asks once whether this application may scrobble for you. You
+      come back to the page signed in. Nothing is submitted until you press
+      Submit.
+    </li>
+  </ol>
+  <p style="margin-top:4px"><a class="btn" id="openapp" href="./">Open the scrobble page</a></p>
+</div>
+
+<div class="card">
+  <h2>If something goes wrong</h2>
+  <dl class="fields">
+    <dt>&ldquo;Invalid method signature supplied&rdquo;</dt>
+    <dd>Almost always the key and the secret swapped into the wrong boxes, or
+        one of them copied short. Press Change API key and re-paste both.</dd>
+    <dt>&ldquo;Unauthorized Token&rdquo; or it never comes back signed in</dt>
+    <dd>The Callback URL on your API account does not match the page. It has
+        to be exactly <code id="cb2"></code>, trailing slash and all.</dd>
+    <dt>It asks for the key again later</dt>
+    <dd>The key lives in your browser's storage for this site. A private
+        window, or clearing site data, loses it &mdash; and so does opening
+        the page in a different browser. Your scrobbles are already on
+        Last.fm; only the setup is local.</dd>
+    <dt>A play is missing</dt>
+    <dd>The Pocket only logs a track once you have heard half of it, or four
+        minutes, whichever comes first, and never a track under 30 seconds.
+        Those are Last.fm's own rules, not ours. A code also carries about 23
+        plays at most &mdash; if the session was longer, the page says so and
+        the oldest are left out.</dd>
+  </dl>
+</div>
+
+<div class="card">
+  <h2>What gets sent</h2>
+  <p style="margin:0">Only the track title, artist and timestamp of plays you
+  press Submit on, and only to Last.fm.</p>
+  <p class="note">The session travels inside the <em>fragment</em> of the
+  scanned link &mdash; the part after <code>#</code>, which browsers never
+  send to the server. GitHub serves the page and never sees your listening.
+  There is no analytics on this page and no third-party script.</p>
+</div>
+
+</div>
+
+<script>
+/* Fill in the real URLs from wherever this page is actually served, so a
+ * fork, a local copy or a renamed repo gives instructions that match itself
+ * rather than instructions for somebody else's deployment. The callback is
+ * the APP, which is this file's directory. */
+(function () {
+  var app = location.href.replace(/setup\.html.*$/, "");
+  var home = location.origin + "/";
+  var set = function (id, text) {
+    var e = document.getElementById(id);
+    if (e) e.textContent = text;
+  };
+  set("cb", app);
+  set("cb2", app);
+  set("home", home);
+})();
+</script>
+</body>
+</html>
