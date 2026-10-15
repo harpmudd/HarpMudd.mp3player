@@ -12,20 +12,14 @@ using the core: what you will notice and what to press, not how it is built.
   them. Needs a Last.fm API key of your own, which takes about two minutes to
   set up once and is explained in the
   [guide](https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html).
-- **With screen blanking turned on, elapsed time no longer stops.** The clock
-  froze while the screen was black and did not catch up when it came back.
-  Blanking is off unless you switch it on with **Select** + **Down**, so most
-  people will never have seen this.
-- **Album art with an unusual tag layout now decodes.** Some covers written
-  without a description field showed **COVER ERROR** when the picture was
-  perfectly good.
 - **Lyrics moved to the core's larger memory**, which is what made room for
-  scrobbling. The words themselves are now read and parsed as a track loads,
-  rather than being kept in the small, fast memory the decoders need for
-  audio. Nothing changes in use: they still scroll in time, still pick out
-  the line being sung, and still fall back to lyrics inside the file's own
-  tag when there is no `.lrc` beside it. The only measurable cost is under
-  two milliseconds while a track opens.
+  scrobbling. They are parsed as a track loads rather than kept in the fast
+  memory the decoders need. Nothing changes in use.
+- Fixed: **elapsed time stopped while the screen was blanked**, and did not
+  catch up when the screen came back. Blanking is off unless you switch it on
+  with **Select** + **Down**, so most people will never have seen it.
+- Fixed: **album art stored without a description field showed COVER
+  ERROR** when the picture was perfectly good.
 
 ## v1.7.0 — 12 October 2026
 
