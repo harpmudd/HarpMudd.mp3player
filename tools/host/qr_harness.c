@@ -34,7 +34,7 @@ void *memmove(void *d, const void *s, size_t n)
 
 /* Version 23 is the biggest that fits 360 px at 3 px a module: 109 modules,
  * module on the Pocket's panel. The buffers are the real firmware cost. */
-#define QR_MAXVER 23
+#define QR_MAXVER 19
 
 static uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAXVER)];
 static uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAXVER)];

@@ -28,10 +28,12 @@
   Field separator '*', record separator ';', everything percent-encoded with
   '+' for space -- because a QR scanner hands the phone a plain string and the
   phone has to find a URL in it, so a single space would truncate the lot.
-  <total> is how many plays the session held, which can exceed the number in
-  the code: version 23 carries 1,091 bytes, which is 23 plays, and the oldest
-  are dropped past that. <epoch> is 1 when the Pocket had a real clock and 0
-  when the times are seconds since the core booted.
+  <total> is how many plays the session held, which is usually more than any
+  one code carries: a version-19 code holds 792 bytes, about 16 plays, and
+  the Pocket pages the session across as many codes as it needs. Left and
+  Right move between them. Scanning each in turn submits the whole session --
+  the dedup below means overlapping scans cost nothing. <epoch> is 1 when the
+  Pocket had a real clock and 0 when the times are seconds since boot.
 
   Keep this in step with qr_build() and qr_putenc() in fw/player.c.
   tools/host/scrobble_check.js checks that it is, and checks the md5 below
@@ -51,8 +53,10 @@
   <h2>Nothing scanned</h2>
   <p style="margin:0">Open this page by scanning the code on your Pocket:
   play some music, then <strong>hold both triggers</strong>.</p>
-  <p class="note">The code holds up to about 23 plays. Scanning it does not
-  clear anything &mdash; the Pocket keeps the session until it is powered off.</p>
+  <p class="note">Each code holds about 16 plays. A longer session is split
+  across several &mdash; the caption shows which one you are looking at, and
+  Left and Right move between them. Scanning does not clear anything; the
+  Pocket keeps the session until it is powered off.</p>
 </div>
 
 <div class="card" id="c-plays" hidden>
@@ -333,9 +337,9 @@ function renderPlays() {
 
   if (data.total > data.plays.length) {
     $("trunc").textContent = "This code carries " + data.plays.length +
-      " of the " + data.total + " plays in the session. A code holds about " +
-      "23, and the oldest are left out. Submit, then open the code again to " +
-      "catch anything new.";
+      " of the " + data.total + " plays in the session. Press Left or Right " +
+      "on the Pocket for the other codes and scan each one \u2014 anything " +
+      "you have already submitted is skipped automatically.";
     show("trunc", true);
   }
   show("noclock", !data.realClock);

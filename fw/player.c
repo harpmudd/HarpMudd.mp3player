@@ -3277,9 +3277,32 @@ static char *ui_hex2(char *p, uint8_t v)
  * Both buffers are sized by the library's own macro rather than a literal, so
  * a change of QR_VER cannot silently under-allocate them.
  */
-#define QR_VER   23u
-#define QR_CAP   1091u          /* byte-mode payload at version 23, ECC L */
+#define QR_VER   19u
+#define QR_CAP   792u           /* byte-mode payload at version 19, ECC L */
 #define QR_PX    3u             /* pixels per module */
+#define QR_MODS  (4u * QR_VER + 17u)            /* 93 */
+#define QR_SIDE  (QR_MODS * QR_PX)              /* 279 px of code  */
+#define QR_QUIET (4u * QR_PX)                   /* 12 px, four modules */
+#define QR_FIELD (QR_SIDE + 2u * QR_QUIET)      /* 303 px of white */
+#define QR_PAGES_MAX 16u
+
+/* VERSION 19, and the screen chose it.
+ *
+ * At 3 px a module -- the density a phone camera needs, proven by scanning
+ * the PNG tools/host/qr_check.py renders -- a version-23 code plus its quiet
+ * zone is 351 px of a 360 px panel. That left nine pixels, and the smallest
+ * text cell is sixteen, so the first version of this screen could say
+ * nothing at all: no page number, no count, nothing.
+ *
+ * Paging is what made a smaller code possible, and a smaller code is what
+ * made room to describe it. Version 19 is 93 modules, 303 px with its quiet
+ * zone, and carries 792 bytes -- about 16 plays. Eight pages covers the 128
+ * a session can hold, where one version-23 code reached 23 and the rest were
+ * simply unreachable.
+ *
+ * Both buffers are sized by the library's own macro rather than a literal,
+ * so a change of QR_VER cannot silently under-allocate them.
+ */
 
 /* Every byte of the export lives in its own sections, which link.ld places
  * AFTER everything else. This is not tidiness, it is the fix for a measured
@@ -3293,14 +3316,16 @@ static char *ui_hex2(char *p, uint8_t v)
 #define QR_COLD __attribute__((section(".qrtext")))
 
 /* Ordinary .bss. A named section here would come out PROGBITS -- GCC only
- * treats .bss* as NOBITS -- and 3 KB of zeroes would be baked into the ROM,
- * which put the image up at 220 KB when this was first written. Measured:
- * .bss position does not affect the decode path anyway; it was the CODE
- * ahead of it that mattered. */
+ * treats .bss* as NOBITS -- and the zeroes would be baked into the ROM, which
+ * put the image up at 220 KB when this was first written. Measured: .bss
+ * position does not affect the decode path anyway; it was the CODE ahead of
+ * it that mattered. */
 static uint8_t  qr_out[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
 static uint8_t  qr_dat[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
-static uint16_t qr_shown;       /* plays that fitted in the code */
+
 static uint8_t  qr_ui_open, qr_ui_dirty;
+static uint8_t  qr_page, qr_pages;      /* 0-based index, total       */
+static uint16_t qr_first, qr_shown;     /* first record and count     */
 
 /* Where the scan lands. The payload rides in the FRAGMENT, so it is never
  * sent to the server -- the page decodes it in the browser, and the listening
@@ -3309,8 +3334,7 @@ static uint8_t  qr_ui_open, qr_ui_dirty;
  * A PROJECT pages URL, because that is the one that can exist: GitHub serves
  * harpmudd.github.io/<repo>/ from a repo that is already public, where a bare
  * harpmudd.github.io needs a user-pages repo of that exact name which there
- * is none of. Twenty-two bytes more, paid once per code rather than per play.
- */
+ * is none of. */
 #define QR_URL "https://harpmudd.github.io/HarpMudd.mp3player/scrobble/#"
 
 QR_COLD static uint32_t qr_puts(uint32_t o, const char *s)
@@ -3326,14 +3350,7 @@ QR_COLD static uint32_t qr_puts(uint32_t o, const char *s)
  * scanner hands the phone a STRING and the phone has to recognise a URL in
  * it. Whitespace ends a URL. A tab or a newline truncates the payload at the
  * first record, and so does the space in "The Only One I Know" -- which is to
- * say, on the very first track anybody would test with.
- *
- * So: space becomes '+', the unreserved set and a few sub-delimiters that are
- * legal in a fragment pass through, and everything else goes out as %XX --
- * including the separators themselves when they occur inside a title, and
- * every byte of a UTF-8 character. A typical title costs no more than it did
- * with tabs, because letters, digits, spaces, apostrophes and parentheses are
- * the whole of it. */
+ * say, on the very first track anybody would test with. */
 QR_COLD static uint32_t qr_putenc(uint32_t o, uint8_t c)
 {
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -3364,9 +3381,9 @@ QR_COLD static uint32_t qr_putu(uint32_t o, uint32_t v)
     return o;
 }
 
-/* One PSRAM string field, appended raw. Tab and newline are the separators,
- * so either inside a title would corrupt the record -- neither occurs in a
- * tag, and scr_field() already stored these as plain text. */
+/* One PSRAM string field. Tab and newline were the separators once and are
+ * now impossible by construction -- qr_putenc escapes everything that is not
+ * plainly safe in a URL fragment, the '*' and ';' separators included. */
 QR_COLD static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
 {
     psr_seek(w);
@@ -3378,77 +3395,103 @@ QR_COLD static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
     return o;
 }
 
-/* Build newest-last, dropping the OLDEST that do not fit.
+/* Fill qr_dat with as many records as fit, starting at `from`. Returns the
+ * index of the first record that did NOT fit, and writes the payload length
+ * through `len`.
  *
- * Retrying the whole payload after each drop is quadratic in the number
- * dropped, but it is PSRAM reads and byte copies -- no encoding, which is the
- * expensive half -- and it runs once on a button press with the decoder
- * already between frames. A 128-record session drops ~104 and still costs
- * well under the load-time budget. */
-QR_COLD static uint32_t qr_build(void)
+ * Packing runs OLDEST first, so page 1 is the start of the session and the
+ * pages read in the order the music was played. The old single-code build
+ * did the opposite -- it kept the newest and dropped the oldest, which meant
+ * anything beyond the last 23 plays could never be got off the device at
+ * all. */
+QR_COLD static uint32_t qr_pack(uint32_t from, uint32_t *len)
 {
-    uint32_t first = 0;
-    while (first < scr_n) {
-        /* Header line: format version, how many plays the session HELD, and
-         * whether the timestamps are real UTC. The count has to travel,
-         * because the code itself only carries what fitted -- the page is
-         * where "24 of 31" can actually be said, there being no room for a
-         * caption beside a 327 px code on a 360 px screen. The epoch flag
-         * matters more: with no RTC the times are seconds since boot, and a
-         * reader that submitted those as UTC would file every play in 1970. */
-        uint32_t o = qr_puts(0, QR_URL);
-        o = qr_puts(o, "1*");
-        o = qr_putu(o, scr_n);
-        o = qr_puts(o, scr_epoch ? "*1;" : "*0;");
-        uint32_t i = first;
-        for (; i < scr_n; i++) {
-            uint32_t b = SCR_PSR_BASE + (uint32_t)i * SCR_REC;
-            uint32_t mark = o;
-            psr_seek(b);
-            uint32_t t =  (uint32_t)(psr_next() & 0xFFu);
-            t |= (uint32_t)(psr_next() & 0xFFu) << 8;
-            t |= (uint32_t)(psr_next() & 0xFFu) << 16;
-            t |= (uint32_t)(psr_next() & 0xFFu) << 24;
-            o = qr_putu(o, t);
-            o = qr_puts(o, "*");
-            o = qr_putf(o, b + SCR_TI_OFF, SCR_TI_LEN);
-            o = qr_puts(o, "*");
-            o = qr_putf(o, b + SCR_AR_OFF, SCR_AR_LEN);
-            o = qr_puts(o, ";");
-            if (o >= QR_CAP) { o = mark; break; }   /* this one did not fit */
-        }
-        if (i >= scr_n) { qr_shown = (uint16_t)(scr_n - first); return o; }
-        first++;
+    uint32_t o = qr_puts(0, QR_URL);
+    o = qr_puts(o, "1*");
+    o = qr_putu(o, scr_n);
+    o = qr_puts(o, scr_epoch ? "*1;" : "*0;");
+
+    uint32_t i = from;
+    for (; i < scr_n; i++) {
+        uint32_t b = SCR_PSR_BASE + (uint32_t)i * SCR_REC;
+        uint32_t mark = o;
+        psr_seek(b);
+        uint32_t t =  (uint32_t)(psr_next() & 0xFFu);
+        t |= (uint32_t)(psr_next() & 0xFFu) << 8;
+        t |= (uint32_t)(psr_next() & 0xFFu) << 16;
+        t |= (uint32_t)(psr_next() & 0xFFu) << 24;
+        o = qr_putu(o, t);
+        o = qr_puts(o, "*");
+        o = qr_putf(o, b + SCR_TI_OFF, SCR_TI_LEN);
+        o = qr_puts(o, "*");
+        o = qr_putf(o, b + SCR_AR_OFF, SCR_AR_LEN);
+        o = qr_puts(o, ";");
+        if (o >= QR_CAP) { o = mark; break; }   /* this one did not fit */
     }
-    qr_shown = 0;
-    return 0;
+    *len = o;
+    return i;
 }
 
-/* Runs of dark modules become ONE rect each. A version-23 code is 11,881
- * modules; a rect per module is 11,881 draw commands, where runs bring a
- * typical code to roughly two thousand -- about five playlist repaints, once.
- */
+/* How many codes the session needs. Cheap: PSRAM reads and byte copies, no
+ * encoding, and at most 128 records. */
+QR_COLD static void qr_count_pages(void)
+{
+    uint32_t i = 0, len;
+    qr_pages = 0;
+    while (i < scr_n && qr_pages < QR_PAGES_MAX) {
+        uint32_t next = qr_pack(i, &len);
+        if (next == i) break;          /* one record too big to ever fit */
+        i = next;
+        qr_pages++;
+    }
+    if (!qr_pages) qr_pages = 1u;
+}
+
+/* ---- the panel ------------------------------------------------------- */
+#define QRP_X   UI_MARGIN                        /* 20  */
+#define QRP_W   UI_INNER_W                       /* 360 */
+#define QRP_Y   5u
+#define QRP_PAD 10u
+#define QRP_GAP 8u
+#define QRP_CAP_H FB_CELL(TS_1X)                 /* 16 */
+#define QRP_H   (QRP_PAD + QR_FIELD + QRP_GAP + QRP_CAP_H + QRP_PAD)
+#define QRF_X   (QRP_X + (QRP_W - QR_FIELD) / 2u)
+#define QRF_Y   (QRP_Y + QRP_PAD)
+#define QRC_Y   (QRF_Y + QR_FIELD + QRP_GAP)     /* caption row */
+
+/* A page arrow: a solid triangle, the same shape language as the playlist's
+ * play marker. Dimmed rather than hidden at the ends of the range, so the
+ * caption never changes width and the page number never moves. */
+QR_COLD static void qr_arrow(uint32_t x, uint32_t y, int right, uint16_t c)
+{
+    const uint32_t h = 9u;                       /* odd, so it has a point */
+    for (uint32_t i = 0; i < h; i++) {
+        uint32_t w = (i < h / 2u ? i : h - 1u - i) + 1u;
+        uint32_t px = right ? x : x + (h / 2u + 1u) - w;
+        fb_rect(px, y + i, w, 1u, c);
+    }
+}
+
+/* Runs of dark modules become ONE rect each. A version-19 code is 8,649
+ * modules; a rect per module is 8,649 draw commands, where runs bring a
+ * typical code to roughly fifteen hundred. */
 QR_COLD static void qr_ui_draw(void)
 {
+    ui_gradient();
+
+    /* The card, on the gradient, with the same corner radius the rest of the
+     * core uses for panels -- fb_round_rect cuts its corners back to the
+     * ramp, so it sits on the background instead of punching a hole in it. */
+    fb_round_rect(QRP_X, QRP_Y, QRP_W, QRP_H, 10u, UI_PANEL);
+
+    /* The white field, with softer corners, cut to the PANEL rather than the
+     * gradient. Radius 6 against a 12 px quiet zone: the cut never reaches
+     * within 6 px of where a finder pattern starts, so the code stays
+     * readable and only the white border is rounded. */
+    fb_round_rect_on(QRF_X, QRF_Y, QR_FIELD, QR_FIELD, 6u, UI_WHITE, UI_PANEL);
+
     int n = qrcodegen_getSize(qr_out);
-    uint32_t side = (uint32_t)n * QR_PX;          /* 109 * 3 = 327 */
-    uint32_t x0 = (FB_W - side) / 2u;             /* 36 px each side */
-    uint32_t y0 = (FB_H - side) / 2u;             /* 16 px top and bottom */
-
-    /* The WHOLE screen is the quiet zone. Painting it white rather than
-     * drawing a white patch on black is what makes the geometry work: the
-     * zone then measures 36 px at the sides and 16 at top and bottom, every
-     * one of them comfortably past the four modules the spec asks for, with
-     * no arithmetic that can run below zero. An earlier version put the
-     * patch at y0 = 6 and computed y0 - 4 * QR_PX, which is -6 in unsigned
-     * and a rect starting four billion rows down.
-     *
-     * There is no caption. 360 - (327 + 2 * 12) leaves nine pixels and the
-     * smallest cell is sixteen, so a line of text can only come out of the
-     * quiet zone -- and the count it would carry travels in the payload
-     * instead, where the page can say it properly. */
-    fb_rect(0, 0, FB_W, FB_H, 0xFFFFu);
-
+    uint32_t x0 = QRF_X + QR_QUIET, y0 = QRF_Y + QR_QUIET;
     for (int y = 0; y < n; y++) {
         int x = 0;
         while (x < n) {
@@ -3460,6 +3503,43 @@ QR_COLD static void qr_ui_draw(void)
             x += run;
         }
     }
+
+    /* Caption: page position, then what is actually in this code. The total
+     * is only worth the width when there is more than one page. */
+    char b[48], *q = b;
+    q = ui_dec(q, (uint32_t)qr_page + 1u);
+    *q++ = '/';
+    q = ui_dec(q, qr_pages);
+    /* Plain spaces. A middot sat here first, and it is NOT in the base
+     * font -- 0x20..0x7E -- so it would have come from the extended
+     * font, which is an optional asset: without mp3font.bin fb_resolve
+     * falls back to '?' and the chrome reads as a bug. */
+    *q++ = ' '; *q++ = ' '; *q++ = ' '; *q++ = ' ';
+    q = ui_dec(q, qr_shown);
+    if (qr_pages > 1u) {
+        const char *p = " OF ";
+        while (*p) *q++ = *p++;
+        q = ui_dec(q, scr_n);
+    }
+    {
+        const char *p = (qr_shown == 1u && qr_pages == 1u) ? " PLAY" : " PLAYS";
+        while (*p) *q++ = *p++;
+    }
+    *q = 0;
+
+    uint32_t w = fb_text_width(b, TS_1X);
+    fb_set_color(UI_DIM, UI_PANEL);
+    fb_text_clipped(QRP_X + ((QRP_W > w) ? (QRP_W - w) / 2u : 0u),
+                    QRC_Y, b, TS_1X, TS_1X, QRP_W);
+
+    /* Arrows at the panel edges, so Left and Right read as the way to move
+     * between codes. Accent when there is somewhere to go, UI_TRACK when
+     * there is not -- the same "available / unavailable" pair the transport
+     * row uses. */
+    qr_arrow(QRP_X + 16u, QRC_Y + 4u, 0,
+             qr_page ? ui_accent : UI_TRACK);
+    qr_arrow(QRP_X + QRP_W - 16u - 5u, QRC_Y + 4u, 1,
+             (qr_page + 1u < qr_pages) ? ui_accent : UI_TRACK);
 }
 
 /* Closing repaints the player through the playlist's own restore path, which
@@ -3475,47 +3555,61 @@ QR_COLD static void qr_ui_close(void)
     pl_ui_restore = 1u;
 }
 
-/* Encoding is the slow half, and it is slow enough to need handling rather
+/* Encode one page. The slow half, and slow enough to need handling rather
  * than a comment. MEASURED on the target toolchain under tools/rv32sim.py,
  * a full version-23 code:
  *
  *     qrcodegen_Mask_AUTO   51,782,147 instr   1282 ms
  *     qrcodegen_Mask_0       5,850,520 instr    145 ms
  *
- * AUTO is 89% mask trials: it applies all eight, scores each over 11,881
- * modules, and unapplies them. Pinning the mask skips the scoring entirely.
- * Any mask is spec-legal -- the score only picks the most robust of eight --
- * and tools/host/qr_check.py renders the sample PNG through this same fixed
- * mask, so what the user scanned is what the Pocket draws.
+ * AUTO is 89% mask trials: it applies all eight, scores each over the whole
+ * grid, and unapplies them. Pinning the mask skips the scoring entirely. Any
+ * mask is spec-legal -- the score only picks the most robust of eight -- and
+ * tools/host/qr_check.py renders the sample PNG through this same fixed
+ * mask, so what the user scanned is what the Pocket draws. Version 19 is
+ * smaller again, roughly two thirds of the modules.
  *
- * 145 ms still cannot run with the audio going: pcm_fifo is AW(11), 2048
- * samples, which is 46 ms at 44.1 kHz. A blocking encode would drain it three
- * times over and underrun. So playback takes its own pause bit for the
- * duration -- the FIFO plays out its 46 ms while the encode runs, leaving
- * about a tenth of a second of clean silence rather than a stutter. The bit
- * is separate from the user's, so closing the code cannot start music that
- * was already paused when they opened it. */
+ * It still cannot run with the audio going: pcm_fifo is AW(11), 2048
+ * samples, which is 46 ms at 44.1 kHz. A blocking encode would drain it
+ * several times over and underrun. So playback takes its own pause bit for
+ * as long as the code is up, which also covers paging -- every Left and
+ * Right re-encodes, and none of it is audible. The bit is separate from the
+ * user's, so closing the code cannot start music that was already paused
+ * when they opened it. */
+QR_COLD static int qr_show_page(uint8_t page)
+{
+    uint32_t i = 0, len = 0;
+    for (uint8_t k = 0; k < page; k++) i = qr_pack(i, &len);
+    uint32_t next = qr_pack(i, &len);
+
+    qr_first = (uint16_t)i;
+    qr_shown = (uint16_t)(next - i);
+    if (!len || !qr_shown) return 0;
+
+    if (!qrcodegen_encodeBinary(qr_dat, (size_t)len, qr_out,
+                                qrcodegen_Ecc_LOW,
+                                (int)QR_VER, (int)QR_VER,
+                                qrcodegen_Mask_0, false))
+        return 0;
+
+    qr_page     = page;
+    qr_ui_dirty = 1u;
+    return 1;
+}
+
 QR_COLD static void qr_ui_toggle(void)
 {
     if (qr_ui_open) { qr_ui_close(); return; }
     if (!scr_n) { ui_toast_msg("NOTHING TO SCROBBLE YET"); return; }
 
     paused |= PAUSE_QR;
-    uint32_t len = qr_build();
-    if (!len || !qrcodegen_encodeBinary(qr_dat, (size_t)len, qr_out,
-                                        qrcodegen_Ecc_LOW,
-                                        (int)QR_VER, (int)QR_VER,
-                                        qrcodegen_Mask_0, false)) {
+    qr_count_pages();
+    if (!qr_show_page(0)) {
         paused &= ~(uint32_t)PAUSE_QR;
         ui_toast_msg("COULD NOT BUILD THE CODE");
         return;
     }
-    /* Pinned to version 23 at both ends so the module size on screen is
-     * FIXED. Letting it shrink to fit a short session would scale the drawing
-     * and change how the thing looks every time it is opened; a smaller code
-     * inside a 109-module frame is just more error correction. */
     qr_ui_open  = 1u;
-    qr_ui_dirty = 1u;
     ui_toast_t0 = 0;            /* 0 means inactive; a toast would sit on it */
 }
 
@@ -8088,6 +8182,10 @@ static void poll_input(void)
      * closes it outright. */
     if (qr_ui_open) {
         if (edge & KEY_B) qr_ui_close();
+        else if ((edge & KEY_LEFT) && qr_page)
+            qr_show_page((uint8_t)(qr_page - 1u));
+        else if ((edge & KEY_RIGHT) && (uint32_t)qr_page + 1u < qr_pages)
+            qr_show_page((uint8_t)(qr_page + 1u));
         edge = 0; fall = 0;
         keys &= (KEY_L1 | KEY_R1);
     }
