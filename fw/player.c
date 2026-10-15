@@ -2263,11 +2263,18 @@ static void scr_second(void)
 
 /* Real time where the Pocket has it, uptime where it does not.
  *
- * Last.fm wants UTC seconds and filters what it does not like, "timestamp too
- * old" among the reasons -- so a boot-relative figure is not merely imprecise,
- * it gets rejected. R_RTC reads 0 when APF says the clock is unset, which is
- * the only case the fallback is for; the export then has to anchor those
- * against when they were scanned, and say so.
+ * What R_RTC carries is the owner's LOCAL time as an epoch -- APF passes the
+ * Pocket's own clock through with no zone attached. It is NOT UTC, and
+ * nothing down here can make it UTC: the core has no idea what zone it is
+ * in. Last.fm reads every timestamp as UTC, so the conversion has to happen
+ * where the zone is known, which is the phone; docs/scrobble/ does it with
+ * the browser's own offset. Said plainly because the obvious reading of
+ * "epoch seconds" is UTC, and acting on that put every scrobble four hours
+ * early.
+ *
+ * R_RTC reads 0 when APF says the clock is unset, which is the only case the
+ * uptime fallback is for; the export then anchors those against when they
+ * were scanned, and says so.
  *
  * scr_epoch distinguishes the two for whatever reads the log. */
 static void scr_track_start(void)

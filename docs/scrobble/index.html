@@ -239,16 +239,43 @@ function parsePayload(raw) {
   return out.plays.length ? out : null;
 }
 
-/* With no RTC the Pocket counts seconds from boot, and Last.fm would file
- * every one of those in 1970. Anchor the LAST play just before now and walk
- * the rest back by the same gaps: the order and the spacing are real even
- * when the absolute time is not. */
+/* Put the timestamps onto a real UTC footing. Two different problems.
+ *
+ * WITH a clock, the Pocket reports LOCAL time as an epoch. The Analogue
+ * Pocket's clock is whatever the owner set on the device, and APF hands it
+ * over through rtc_epoch_seconds with no zone attached, so a track played at
+ * 14:00 arrives as the epoch for 14:00 UTC. Last.fm reads every timestamp as
+ * UTC and duly filed everything four hours early on a UTC-4 card -- it
+ * showed "4 hours ago" for a track submitted seconds before. The same error
+ * skewed this page's own clock column, which was harder to notice because
+ * every row was wrong by the same amount.
+ *
+ * The phone is the only part of this chain that knows the zone, so it does
+ * the conversion. The offset is taken AT each timestamp rather than now, so
+ * a session spanning a DST change still lands correctly. This assumes the
+ * phone and the Pocket are in the same zone, which is the case that exists:
+ * you scan the screen in front of you.
+ *
+ * WITHOUT a clock the Pocket counts seconds from boot, and Last.fm would
+ * file all of it in 1970. Anchor the LAST play just before now and walk the
+ * rest back by the same gaps: order and spacing are real even when the
+ * absolute time is not. Date.now() is already UTC, so that path needs no
+ * zone correction -- applying one would double-count. */
 function anchor(data) {
-  if (data.realClock) return;
-  var now = Math.floor(Date.now() / 1000);
-  var last = data.plays[data.plays.length - 1].ts;
-  for (var i = 0; i < data.plays.length; i++)
-    data.plays[i].ts = now - (last - data.plays[i].ts) - 30;
+  var i;
+  if (!data.realClock) {
+    var now = Math.floor(Date.now() / 1000);
+    var last = data.plays[data.plays.length - 1].ts;
+    for (i = 0; i < data.plays.length; i++)
+      data.plays[i].ts = now - (last - data.plays[i].ts) - 30;
+    return;
+  }
+  for (i = 0; i < data.plays.length; i++) {
+    var p = data.plays[i];
+    /* getTimezoneOffset() is minutes to ADD to local to reach UTC: 240 on
+     * UTC-4. Positive west of Greenwich, which is the direction needed. */
+    p.ts += new Date(p.ts * 1000).getTimezoneOffset() * 60;
+  }
 }
 
 function fmtWhen(ts) {
