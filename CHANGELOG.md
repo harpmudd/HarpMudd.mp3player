@@ -12,9 +12,9 @@ using the core: what you will notice and what to press, not how it is built.
   them. Needs a Last.fm API key of your own, which takes about two minutes to
   set up once and is explained in the
   [guide](https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html).
-- **Lyrics moved to the core's larger memory**, which is what made room for
-  scrobbling. They are parsed as a track loads rather than kept in the fast
-  memory the decoders need. Nothing changes in use.
+- **Lyrics moved to PSRAM**, which is what made room for scrobbling. They
+  are parsed as a track loads rather than held in the block RAM the decoders
+  need. Nothing changes in use.
 - Fixed: **elapsed time stopped while the screen was blanked**, and did not
   catch up when the screen came back. Blanking is off unless you switch it on
   with **Select** + **Down**, so most people will never have seen it.
