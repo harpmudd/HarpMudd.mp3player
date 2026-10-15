@@ -3291,7 +3291,17 @@ static char *ui_hex2(char *p, uint8_t v)
 #define QR_SIDE  (QR_MODS * QR_PX)              /* 279 px of code  */
 #define QR_QUIET (4u * QR_PX)                   /* 12 px, four modules */
 #define QR_FIELD (QR_SIDE + 2u * QR_QUIET)      /* 303 px of white */
-#define QR_PAGES_MAX 16u
+/* Equal to SCR_MAX on purpose, so the record cap is the ONLY limit.
+ *
+ * How many plays a code carries is a BYTE budget, not a song count: 727
+ * bytes after the URL and header. Short ASCII tags pack 23; a worst-case
+ * record is 367 bytes -- both PSRAM fields full of characters that
+ * percent-encode to three bytes each -- which is one per code. A library
+ * tagged in a non-Latin script sits near that end, and at 16 pages the tail
+ * of a long session would simply be unreachable, which is the defect paging
+ * was added to remove. The walk is O(scr_n) however many pages it finds, so
+ * the generous bound is free. */
+#define QR_PAGES_MAX 128u
 
 /* VERSION 19, and the screen chose it.
  *
