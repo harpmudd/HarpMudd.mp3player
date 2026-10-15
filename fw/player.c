@@ -3281,6 +3281,22 @@ static char *ui_hex2(char *p, uint8_t v)
 #define QR_CAP   1091u          /* byte-mode payload at version 23, ECC L */
 #define QR_PX    3u             /* pixels per module */
 
+/* Every byte of the export lives in its own sections, which link.ld places
+ * AFTER everything else. This is not tidiness, it is the fix for a measured
+ * regression: the caches are 4 KB DIRECT-MAPPED, so where code sits decides
+ * what evicts what, and dropping ten kilobytes into the middle of .text moved
+ * the whole FLAC path onto a layout that thrashed. FLAC went from 15% idle to
+ * 0 and the audio broke up; MP3, with a tighter working set, barely moved.
+ *
+ * Anything added here must carry QR_COLD, or it lands in the middle of .text
+ * again and the next person gets to re-bisect this. */
+#define QR_COLD __attribute__((section(".qrtext")))
+
+/* Ordinary .bss. A named section here would come out PROGBITS -- GCC only
+ * treats .bss* as NOBITS -- and 3 KB of zeroes would be baked into the ROM,
+ * which put the image up at 220 KB when this was first written. Measured:
+ * .bss position does not affect the decode path anyway; it was the CODE
+ * ahead of it that mattered. */
 static uint8_t  qr_out[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
 static uint8_t  qr_dat[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
 static uint16_t qr_shown;       /* plays that fitted in the code */
@@ -3297,7 +3313,7 @@ static uint8_t  qr_ui_open, qr_ui_dirty;
  */
 #define QR_URL "https://harpmudd.github.io/HarpMudd.mp3player/scrobble/#"
 
-static uint32_t qr_puts(uint32_t o, const char *s)
+QR_COLD static uint32_t qr_puts(uint32_t o, const char *s)
 {
     while (*s && o < QR_CAP) qr_dat[o++] = (uint8_t)*s++;
     return o;
@@ -3318,7 +3334,7 @@ static uint32_t qr_puts(uint32_t o, const char *s)
  * every byte of a UTF-8 character. A typical title costs no more than it did
  * with tabs, because letters, digits, spaces, apostrophes and parentheses are
  * the whole of it. */
-static uint32_t qr_putenc(uint32_t o, uint8_t c)
+QR_COLD static uint32_t qr_putenc(uint32_t o, uint8_t c)
 {
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
         (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
@@ -3339,7 +3355,7 @@ static uint32_t qr_putenc(uint32_t o, uint8_t c)
     return o;
 }
 
-static uint32_t qr_putu(uint32_t o, uint32_t v)
+QR_COLD static uint32_t qr_putu(uint32_t o, uint32_t v)
 {
     char t[12];
     uint32_t n = 0;
@@ -3351,7 +3367,7 @@ static uint32_t qr_putu(uint32_t o, uint32_t v)
 /* One PSRAM string field, appended raw. Tab and newline are the separators,
  * so either inside a title would corrupt the record -- neither occurs in a
  * tag, and scr_field() already stored these as plain text. */
-static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
+QR_COLD static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
 {
     psr_seek(w);
     for (uint32_t i = 0; i + 1u < cap && o < QR_CAP; i++) {
@@ -3369,7 +3385,7 @@ static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
  * expensive half -- and it runs once on a button press with the decoder
  * already between frames. A 128-record session drops ~104 and still costs
  * well under the load-time budget. */
-static uint32_t qr_build(void)
+QR_COLD static uint32_t qr_build(void)
 {
     uint32_t first = 0;
     while (first < scr_n) {
@@ -3412,7 +3428,7 @@ static uint32_t qr_build(void)
  * modules; a rect per module is 11,881 draw commands, where runs bring a
  * typical code to roughly two thousand -- about five playlist repaints, once.
  */
-static void qr_ui_draw(void)
+QR_COLD static void qr_ui_draw(void)
 {
     int n = qrcodegen_getSize(qr_out);
     uint32_t side = (uint32_t)n * QR_PX;          /* 109 * 3 = 327 */
@@ -3450,7 +3466,7 @@ static void qr_ui_draw(void)
  * already exists to put back everything an overlay covered. The two display
  * caches have to be invalidated by hand: both hold the value last DRAWN, and
  * the clock in particular would otherwise wait up to a second to reappear. */
-static void qr_ui_close(void)
+QR_COLD static void qr_ui_close(void)
 {
     qr_ui_open    = 0u;
     paused &= ~(uint32_t)PAUSE_QR;
@@ -3479,7 +3495,7 @@ static void qr_ui_close(void)
  * about a tenth of a second of clean silence rather than a stutter. The bit
  * is separate from the user's, so closing the code cannot start music that
  * was already paused when they opened it. */
-static void qr_ui_toggle(void)
+QR_COLD static void qr_ui_toggle(void)
 {
     if (qr_ui_open) { qr_ui_close(); return; }
     if (!scr_n) { ui_toast_msg("NOTHING TO SCROBBLE YET"); return; }

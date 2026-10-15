@@ -109,13 +109,39 @@ _ring_size  = 0x4000;    /* 16 KB -- ~0.41 s at 320 kbps */
  * pulled backwards. */
 _tag_size   = 0x1000;    /* 4 KB  -- ID3 re-probe landing zone */
 
+/* THE QR EXPORT GOES LAST, IN EVERY SECTION.
+ *
+ * The instruction and data caches are 4 KB DIRECT-MAPPED -- one way, 128
+ * lines of 32 bytes (see ways_0_* in src/fpga/rtl/VexRiscv_Full.v). With a
+ * single way there is no associativity to absorb a collision: two hot regions
+ * whose addresses differ by a multiple of 4 KB evict each other on every
+ * single access, and whether any given pair does is decided purely by where
+ * the linker put them.
+ *
+ * That made image growth a performance risk rather than just a space one.
+ * Adding the ~10 KB QR encoder in the middle of .text shifted every function
+ * after it; FLAC fell from 15% idle to 0 and the audio broke up, while MP3
+ * was barely affected because its working set is tighter. It took a full
+ * bisect to find, because the cause was invisible in the diff: poll_input
+ * reverted cleanly and .bss shrank back, and neither helped -- the regression
+ * tracked nothing but the SIZE of the image ahead of the hot code.
+ *
+ * Keeping the cold code behind everything else means the decode path keeps
+ * the addresses it was tuned at, and anything added here is free. If a future
+ * feature is big and cold, give it a section and put it here too. */
 SECTIONS {
 	.text : {
 		KEEP(*(.text._start))
-		*(.text .text.*)
+		*(EXCLUDE_FILE (*qrcodegen.o) .text .text.*)
+		*(.qrtext .qrtext.*)
+		*qrcodegen.o(.text .text.*)
 	} > ram
 
-	.rodata : { *(.rodata .rodata.*) *(.srodata .srodata.*) } > ram
+	.rodata : {
+		*(EXCLUDE_FILE (*qrcodegen.o) .rodata .rodata.*)
+		*(EXCLUDE_FILE (*qrcodegen.o) .srodata .srodata.*)
+		*qrcodegen.o(.rodata .rodata.* .srodata .srodata.*)
+	} > ram
 	.data   : { *(.data .data.*) *(.sdata .sdata.*) } > ram
 
 	.bss : {
