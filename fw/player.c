@@ -2187,6 +2187,7 @@ static uint16_t lrc_n;                  /* lines parsed                       */
 #define SCR_AL_LEN   52u
 
 static uint16_t scr_n;          /* records held this session       */
+static uint16_t scr_seen;       /* scr_n when the code was last shown */
 /* Seconds since boot, ticked once a second by ui_clock_pump() whatever else
  * is going on. It used to be incremented inside ui_blank_pump(), which
  * returns early unless the screen-blank timeout is switched on -- and that
@@ -3563,8 +3564,52 @@ QR_COLD static void qr_ui_draw(void)
  * already exists to put back everything an overlay covered. The two display
  * caches have to be invalidated by hand: both hold the value last DRAWN, and
  * the clock in particular would otherwise wait up to a second to reappear. */
+/* A QR finder pattern in miniature -- the square-in-square that sits in
+ * three corners of every code. It is the most recognisable eight pixels in
+ * the whole format, so the badge looks like the thing it is pointing at
+ * rather than like a generic dot. 1 px ring, 2 px gap, 3 px centre.
+ *
+ * QR_COLD even though this draws once a second on the player, and
+ * deliberately: the hot decode path is laid out around a 4 KB direct-mapped
+ * cache, and putting 150 bytes of new code in the middle of .text is exactly
+ * what cost FLAC its headroom last time. One call a second into the cold
+ * section costs at most a cache miss nobody can hear. */
+QR_COLD __attribute__((noinline))
+static void scr_badge(uint16_t cbg)
+{
+    char sb[8], *q = sb;
+    q = ui_dec(q, scr_n);
+    *q = 0;
+
+    uint16_t c  = (scr_n > scr_seen) ? ui_accent : UI_FAINT;
+    uint32_t tw = fb_text_width(sb, TS_1X);
+    uint32_t rt = FB_W - UI_MARGIN
+                - (speed_fast ? fb_text_width("1.2x", TS_1X) + 12u : 0u);
+    uint32_t x  = rt - tw - 3u - 9u;
+    uint32_t y  = UI_TIME_Y + (FB_CELL(TS_24) - 9u) / 2u;
+
+    fb_rect(x - 3u, UI_TIME_Y, tw + 18u, FB_CELL(TS_24), cbg);
+
+    /* The square-in-square from three corners of every QR code: 1 px ring,
+     * 2 px gap, 3 px centre. The most recognisable eight pixels in the
+     * format, so the badge looks like the thing it points at. */
+    fb_rect(x,      y,      9u, 9u, c);
+    fb_rect(x + 1u, y + 1u, 7u, 7u, cbg);
+    fb_rect(x + 3u, y + 3u, 3u, 3u, c);
+
+    fb_set_color(c, cbg);
+    fb_text_clipped(x + 12u,
+                    UI_TIME_Y + (FB_CELL(TS_24) > FB_CELL(TS_1X)
+                               ? (FB_CELL(TS_24) - FB_CELL(TS_1X)) / 2u : 0u),
+                    sb, TS_1X, TS_1X, tw + 2u);
+}
+
 QR_COLD static void qr_ui_close(void)
 {
+    /* Everything logged so far has now been on screen. The badge goes quiet
+     * until something new is played, which is what makes it mean "there is
+     * something to scan" rather than merely "this feature exists". */
+    scr_seen      = scr_n;
     qr_ui_open    = 0u;
     paused &= ~(uint32_t)PAUSE_QR;
     ui_last_sec   = 0xFFFFFFFFu;
@@ -7074,6 +7119,22 @@ ui_tail:
             fb_set_color(ui_accent, cbg);
             fb_text_clipped(sx, sy, sp, TS_1X, TS_1X, sw + 2u);
         }
+
+        /* Plays waiting to be scanned, on the same row and for the same
+         * reason the speed badge is here: the clear above spans the full
+         * inner width every second, so anything drawn elsewhere on this row
+         * is wiped within a second of appearing.
+         *
+         * ACCENT while there is something new, UI_FAINT once the code has
+         * been shown -- the "on / off but still visible" pair the repeat and
+         * shuffle icons use. Faint rather than hidden, because a session that
+         * has already been scanned is still a session: quitting the core
+         * throws it away either way, and the count is the only warning of
+         * that there is.
+         *
+         * Sits left of the speed badge when both are up, so neither moves
+         * depending on the other's width. */
+        if (scr_n) scr_badge(cbg);
     }
 
     /* Slide the art panel toward its target. Each step is a background repaint
