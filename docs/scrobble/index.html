@@ -502,6 +502,37 @@ function submit(btn) {
   });
 }
 
+/* Take a payload and show it. Split out of boot so a SECOND code scanned
+ * into an already-open page goes through exactly the same path. */
+function loadPayload(raw) {
+  data = parsePayload(raw);
+  if (data) anchor(data);
+
+  show("c-empty", !data);
+  show("c-plays", !!data);
+  if (data) renderPlays();
+  if (getCfg()) renderAuth();
+}
+
+/* Scanning the next code is a SAME-DOCUMENT navigation: the URL differs only
+ * after the '#', so the browser fires hashchange and reloads nothing. Without
+ * this the page went on showing the first session until it was refreshed by
+ * hand -- which looked like the submission had failed.
+ *
+ * Re-reading beats forcing location.reload(): it is instant, it keeps the
+ * signed-in state on screen, and a reload would throw away the "Scrobbled N
+ * plays" confirmation before it had been read. */
+window.addEventListener("hashchange", function () {
+  loadPayload(location.hash.slice(1));
+});
+
+/* Same problem by another route: a phone restoring this page from the
+ * back/forward cache runs no script at all, so a fragment that changed while
+ * it was away would otherwise go unnoticed. */
+window.addEventListener("pageshow", function (e) {
+  if (e.persisted) loadPayload(location.hash.slice(1));
+});
+
 /* -------------------------------------------------------------------- boot */
 (function () {
   var hash = location.hash.slice(1);
