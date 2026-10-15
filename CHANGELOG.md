@@ -19,8 +19,13 @@ using the core: what you will notice and what to press, not how it is built.
 - **Album art with an unusual tag layout now decodes.** Some covers written
   without a description field showed **COVER ERROR** when the picture was
   perfectly good.
-- **Lyrics moved out of the way internally**, freeing memory for the above.
-  No change to how they look or work.
+- **Lyrics moved to the core's larger memory**, which is what made room for
+  scrobbling. The words themselves are now read and parsed as a track loads,
+  rather than being kept in the small, fast memory the decoders need for
+  audio. Nothing changes in use: they still scroll in time, still pick out
+  the line being sung, and still fall back to lyrics inside the file's own
+  tag when there is no `.lrc` beside it. The only measurable cost is under
+  two milliseconds while a track opens.
 
 ## v1.7.0 — 12 October 2026
 
