@@ -12,9 +12,10 @@ using the core: what you will notice and what to press, not how it is built.
   them. Needs a Last.fm API key of your own, which takes about two minutes to
   set up once and is explained in the
   [guide](https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html).
-- **The clock keeps running while the screen is blanked.** Elapsed time used
-  to stop when the screen went black and never caught up, so a track played
-  with the screen off finished minutes short on the display.
+- **With screen blanking turned on, elapsed time no longer stops.** The clock
+  froze while the screen was black and did not catch up when it came back.
+  Blanking is off unless you switch it on with **Select** + **Down**, so most
+  people will never have seen this.
 - **Album art with an unusual tag layout now decodes.** Some covers written
   without a description field showed **COVER ERROR** when the picture was
   perfectly good.
