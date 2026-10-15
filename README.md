@@ -48,6 +48,7 @@ The controls:
 | **Left** / **Right** | *Tap* — previous / next track |
 | **Left** / **Right** | *Hold* — seek, faster the longer you hold |
 | **Select** + **Left** / **Right** | Seek one second |
+| **L** + **R** | *Hold* — the scrobble code; **Left** / **Right** page, **B** closes |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
 | **X** | Cycle the meter (twelve styles) |
@@ -238,6 +239,48 @@ on `FLAT`.
 Presets are loudness-matched, so switching changes the tone without changing how
 loud the music seems.
 
+## Scrobbling to Last.fm
+
+The player keeps a list of what you have listened to, and shows it as a QR
+code. Scan it with your phone and a web page submits the plays to your
+Last.fm account.
+
+**Hold both shoulder buttons** to bring the code up. **Left** and **Right**
+move between codes when there is more than one, and **B** closes it. The
+music pauses while the code is on screen.
+
+A play is recorded once you have heard half of it, or four minutes,
+whichever comes first — and never for a track under 30 seconds. Those are
+Last.fm's own rules rather than ours, so what you submit is what the service
+would have counted anyway.
+
+### Setting it up, once
+
+Submitting needs a Last.fm API key of your own. The page has no key built
+in, deliberately: it is a single file served from GitHub, so anything inside
+it is readable by anyone, and one shared key would stop working for everybody
+the first time it was abused. Your own key lives in your own browser and
+cannot affect anyone else.
+
+The guide walks it through, including what to put in each box:
+
+**[harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html](https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html)**
+
+It takes about two minutes and you never do it again. Until it is done the
+page still shows your plays; it just cannot submit them.
+
+### What leaves the Pocket
+
+Only what you scan. The session lives in memory on the device and is not
+written to your card — the listening history travels in the part of the link
+after the `#`, which a browser never sends to a server, so the page is
+decoded on your phone and GitHub never sees any of it. Nothing is submitted
+until you press the button.
+
+The session is forgotten when you quit the core, so scan before you leave if
+you want the plays. The Pocket has no clock of its own beyond the one you
+set, and the page converts that to real time using your phone's timezone.
+
 ## Playback speed
 
 Hold **A** for 1.2×, hold again for normal. It's meant for spoken word: pitch
@@ -338,6 +381,9 @@ framework bugs that had to be found first — is in
   third faster in v1.6.0 and the files that used to break up no longer do,
   on any meter. If you find one that does, re-encoding at the default
   compression setting is the quickest fix.
+- **A listening session is forgotten when you quit the core**, and holds
+  128 plays. Bring the scrobble code up and scan it before you leave if you
+  want to keep them; the Pocket has nowhere safe to write them down.
 - **Japanese tags written in Shift-JIS come out wrong.** Modern taggers write
   UTF-8 or UTF-16 and display correctly; Shift-JIS is what older rips often
   carry, and converting it needs a lookup table the firmware has no room for.

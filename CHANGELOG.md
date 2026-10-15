@@ -3,6 +3,24 @@
 What each release adds, fixes and changes, newest first. Written for people
 using the core: what you will notice and what to press, not how it is built.
 
+## v1.8.0 — unreleased
+
+- **Scrobbling to Last.fm.** The player now keeps track of what you have
+  listened to and shows it as a QR code — hold both shoulder buttons. Scan it
+  with your phone and a web page submits the plays to your account. Long
+  sessions split across several codes; **Left** and **Right** move between
+  them. Needs a Last.fm API key of your own, which takes about two minutes to
+  set up once and is explained in the
+  [guide](https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html).
+- **The clock keeps running while the screen is blanked.** Elapsed time used
+  to stop when the screen went black and never caught up, so a track played
+  with the screen off finished minutes short on the display.
+- **Album art with an unusual tag layout now decodes.** Some covers written
+  without a description field showed **COVER ERROR** when the picture was
+  perfectly good.
+- **Lyrics moved out of the way internally**, freeing memory for the above.
+  No change to how they look or work.
+
 ## v1.7.0 — 12 October 2026
 
 - **Lyrics** — cycle to them with **X**. The words scroll in time with the
