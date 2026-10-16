@@ -2507,7 +2507,7 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * keep the rect count down; the ramp moves well under one level across four
  * rows, so stepping it there is not visible where a flat fill was. */
 #define EYE_GLOW_RX    72u        /* how far the light reaches outward    */
-#define EYE_GLOW_RY    20u        /* ...and half how tall the pool is     */
+#define EYE_GLOW_RY    25u        /* ...and half how tall the pool is     */
 #define EYE_GLOW_NB     9u        /* bands across that reach -- 8px each  */
 #define EYE_GLOW_S      4u        /* rows per quantised strip             */
 #define EYE_GLOW_STEPS  6u        /* intensity steps                      */
@@ -2518,13 +2518,17 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * span left up to 54 rows of the previous position on screen -- seen as a
  * faint line above the light. Self-erasing only works if the repainted area
  * does not move, so the area is the union and the rest is painted bed. */
-#define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
+/* From the TUBE, not from the box. It was measured off the box top back
+ * when the tube sat three rows below it; now the tube is anchored to the
+ * base instead, so a box-relative band leaves the light floating above the
+ * glass it is supposed to be coming from. */
+#define EYE_GLOW_TOP   13u        /* first row of that band, from the TUBE */
 /* Spans the whole box. Shortening it to clear the plinth was tried and looked
  * worse: the pools reach 72px past each tube while the base is 102px wide, so
  * the light was chopped flat in mid-air either side of it rather than stopping
  * at anything. On the base's OWN rows the pools skip its 8px of overhang
  * instead, which is the only part they would otherwise paint over. */
-#define EYE_GLOW_ROWS  56u        /* rows 16..71                            */
+#define EYE_GLOW_ROWS  (EYE_TUBE_H - 14u)   /* down to the base plate     */
 /* The GAP between the tubes is lit by BOTH of them, and leaving it dark was
  * the one place the illusion broke: two lamps 10px apart cannot leave the
  * space between them the darkest thing on the panel.
@@ -2537,7 +2541,7 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * It stops ABOVE the plinth. The gap sits over the middle of the base plate,
  * and painting the bed there would chew a notch out of it -- the same fault
  * the overhanging plinth had at its ends. */
-#define EYE_GAP_ROWS   48u        /* rows of the gap that are lit          */
+#define EYE_GAP_ROWS   (EYE_GLOW_ROWS - 8u) /* stops above the plinth     */
 /* POSITION and BRIGHTNESS come from different places, and that split is the
  * point.
  *
@@ -6677,7 +6681,12 @@ static void ui_draw_dynamic(void)
             /* Anchored to the BOTTOM of the box. Left at FY + 3 the tube
              * floated at the top of the taller band with its plinth in mid
              * air; it has always read as standing on the base. */
-            uint32_t ty   = UI_WAVE_FY + UI_WAVE_FH - EYE_TUBE_H;
+            /* The BASE PLATE is what has to fit, not the envelope. It is
+             * drawn from basy for EYE_BASE_H rows, so anchoring the tube
+             * flush with the bottom pushed the plate past the box and those
+             * rows are outside everything that clears -- which is why the
+             * base stayed on screen after switching meters. */
+            uint32_t ty   = UI_WAVE_FY + UI_WAVE_FH - EYE_TUBE_H - EYE_BASE_H;
             uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
             uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
             /* Grew with the envelope, so the taller tube is also a longer
@@ -6855,7 +6864,7 @@ static void ui_draw_dynamic(void)
                  * its repaint band. Computed whether or not the pool is
                  * redrawn -- the gap pass needs it either way. */
                 uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
-                uint32_t top = UI_WAVE_FY + EYE_GLOW_TOP;
+                uint32_t top = ty + EYE_GLOW_TOP;
                 /* Both ends. The upper clamp was dropped while the band was
                  * temporarily shortened and not restored with it, which let
                  * the pool sit five rows lower than intended and run into the
@@ -6944,7 +6953,7 @@ static void ui_draw_dynamic(void)
             if (!eye_face || key_of[0] != eye_gap_l
                           || key_of[1] != eye_gap_r) {
                 uint32_t gx  = x0 + EYE_TUBE_W;
-                uint32_t top = UI_WAVE_FY + EYE_GLOW_TOP;
+                uint32_t top = ty + EYE_GLOW_TOP;
                 /* Distance from each tube's inner face to the middle of the
                  * gap -- the same for both, which is why the sum is flat. */
                 uint32_t d = EYE_TUBE_G / 2u;
@@ -7015,7 +7024,13 @@ static void ui_draw_dynamic(void)
                     uint32_t top = (uint32_t)((int32_t)cy - hi);
                     uint32_t h   = (uint32_t)(hi - lo) + 2u;   /* min 2 px line */
                     if (top + h > UI_WAVE_FY + UI_WAVE_FH) h = UI_WAVE_FY + UI_WAVE_FH - top;
-                    uint16_t col = ui_mix(UI_TRACK, ui_accent, c + 1u, WAVE_COLS);
+                    /* Flat accent across the whole trace. The colour used
+                     * to ramp with the column index -- column 0 was UI_TRACK,
+                     * i.e. near-black -- so the left end of the trace faded
+                     * out. On a scrolling strip that would read as age; this
+                     * window is a single snapshot, where it just loses the
+                     * left third of the waveform. */
+                    uint16_t col = ui_accent;
                     fb_rect(x, top, w, h, col);
                 }
             }
@@ -7097,11 +7112,15 @@ static void ui_draw_dynamic(void)
              * the two bars -- 32 px of gap for 32 px of bar. Fix the gap at
              * 12 and give the rest to the bars: 42 px each, closer together
              * and taller. */
+            /* Inset top and bottom as well as the gap between: at 42 px
+             * each the pair filled the box edge to edge and read as a slab.
+             * 8 off each outer edge leaves 34 px bars. */
             const uint32_t gap = 12u;
-            const uint32_t bh  = (UI_WAVE_FH - gap) / 2u;
+            const uint32_t pad = 8u;
+            const uint32_t bh  = (UI_WAVE_FH - gap - 2u * pad) / 2u;
             uint16_t lit = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
             for (int ch = 0; ch < 2; ch++) {
-                uint32_t y  = UI_WAVE_FY + (ch ? bh + gap : 0u);
+                uint32_t y  = UI_WAVE_FY + pad + (ch ? bh + gap : 0u);
                 uint32_t v  = ch ? lvl_r : lvl_l;
                 uint32_t pk = ch ? lvl_pr : lvl_pl;
                 uint32_t bw = (v  * ww) / 255u;
