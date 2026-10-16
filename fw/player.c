@@ -4390,6 +4390,54 @@ static void ui_splash_title(uint32_t f, uint32_t den)
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
 }
 
+/* ---- title shine -------------------------------------------------------
+ *
+ * A highlight that travels along "MP3 PLAYER" while the card is being read.
+ *
+ * Per GLYPH, not per pixel. Text goes through fb_text_clipped and there is
+ * no way to vary colour inside a cell, so each character is drawn on its
+ * own at an accumulated x and tinted by its distance from the highlight.
+ * Ten characters is coarse, but with the highlight three wide and falling
+ * off either side the eye reads a sweep rather than letters taking turns.
+ *
+ * No erase pass, for the reason the loading dots give: a glyph cell paints
+ * its own background, so redrawing a character over itself leaves no gap
+ * for scanout to catch. The boot fade had to be capped at 33 steps because
+ * it refilled the whole CARD first; this touches only the glyphs.
+ *
+ * Free: it runs on the splash, where nothing is decoding, and it rides the
+ * 30 Hz tick the dots already use rather than adding a timer.
+ *
+ * The pass is longer than the title so there is a pause between sweeps --
+ * once `pos` walks past the end every character is plain accent again, and
+ * no special case is needed to hold it there. */
+#define SHINE_TXT   "MP3 PLAYER"
+#define SHINE_LEN   10            /* characters in it                      */
+#define SHINE_SPAN   3            /* how many each side the highlight lits  */
+#define SHINE_HOLD  14            /* steps of plain title between passes    */
+#define SHINE_CYCLE (SHINE_LEN + 2 * SHINE_SPAN + SHINE_HOLD)
+
+static uint32_t shine_t;
+
+static void ui_splash_shine(int32_t pos)
+{
+    uint32_t sc = fb_text_fit_native(SHINE_TXT, UI_INNER_W);
+    uint32_t x  = UI_MARGIN;
+    for (int32_t i = 0; i < SHINE_LEN; i++) {
+        char one[2]; one[0] = SHINE_TXT[i]; one[1] = 0;
+        uint32_t w = fb_text_width(one, sc);
+        int32_t d = i - pos;
+        if (d < 0) d = -d;
+        uint16_t c = (d >= SHINE_SPAN)
+                   ? ui_accent
+                   : ui_mix(ui_accent, UI_WHITE,
+                            (uint32_t)(SHINE_SPAN - d), (uint32_t)SHINE_SPAN);
+        fb_set_color(c, UI_PANEL);
+        fb_text_clipped(x, UI_TITLE_Y, one, sc, sc, w + 2u);
+        x += w;
+    }
+}
+
 static void ui_splash_card(uint32_t f, uint32_t den)
 {
     ui_splash_bg();
@@ -4588,19 +4636,50 @@ static void ui_splash_anim(void)
      * buys no animation at all; it is dead time in front of work that already
      * animates itself, and it only has to outlast a flicker. */
     ui_wave_anim_start();
-    const uint32_t INTRO_MS = 150u;
-    uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
+
+    /* 900, up from 150.
+     *
+     * 150 was right when the splash was followed by a slow card: the comment
+     * that set it argued, correctly, that a floor is dead time in front of
+     * work which already animates itself. That reasoning depends on the work
+     * taking a while. On a fast card the playlist read, the track open and
+     * the art decode are over in a few hundred milliseconds, and the whole
+     * boot screen goes by before the meter has swept in or the title has
+     * caught the light once -- which is exactly what it looked like.
+     *
+     * So this IS dead time, deliberately, and it is the cost of having a
+     * boot screen worth looking at: up to 0.9 s on a launch where the card
+     * is quick, and nothing at all on one where it is not, because the
+     * loading that follows overlaps it. One shine pass is 0.53 s and the
+     * meter sweeps in over 0.22; 900 fits both with room to breathe. */
+    const uint32_t INTRO_MS = 900u;
+    const uint32_t FADE_MS  = 220u;
+    uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * FADE_MS;
     /* Redraw the card only when the fade STEP changes -- 33 times, not once per
      * spin of an unpaced loop. Repainting the title thousands of times a second
      * is what made it flash: each repaint erases its own cell before writing
      * the glyph, and scanout catches the gap. */
     uint32_t last_f = 0xFFFFFFFFu;
+    uint32_t sh_next = 0;
+    uint8_t  sh_armed = 0;
     ui_splash_bg();                  /* ONCE -- see ui_splash_bg() */
     for (;;) {
         uint32_t el = cycles() - t0;
         if (el >= CLK_HZ / 1000u * INTRO_MS) break;
-        uint32_t f = (el < fade_end) ? (el * STEP_DEN / fade_end) : STEP_DEN;
-        if (f != last_f) { last_f = f; ui_splash_title(f, STEP_DEN); }
+        if (el < fade_end) {
+            uint32_t f = el * STEP_DEN / fade_end;
+            if (f != last_f) { last_f = f; ui_splash_title(f, STEP_DEN); }
+        } else {
+            /* The title has arrived; now it catches the light. Armed from
+             * cycles() rather than left at 0 -- a zero deadline reads as due
+             * 35 seconds ago or due shortly depending on where the free
+             * running counter is, which has cost this project a day. */
+            if (!sh_armed) { sh_armed = 1u; sh_next = cycles(); last_f = STEP_DEN; }
+            if ((int32_t)(cycles() - sh_next) >= 0) {
+                sh_next = cycles() + CLK_HZ / 30u;
+                ui_splash_shine((int32_t)(shine_t++ % SHINE_CYCLE) - SHINE_SPAN);
+            }
+        }
         ui_wave_anim_tick();
     }
 
@@ -4661,53 +4740,6 @@ static uint16_t ui_boot_bg(void)
     return ui_grad_at(UI_BOOT_Y);
 }
 
-/* ---- title shine -------------------------------------------------------
- *
- * A highlight that travels along "MP3 PLAYER" while the card is being read.
- *
- * Per GLYPH, not per pixel. Text goes through fb_text_clipped and there is
- * no way to vary colour inside a cell, so each character is drawn on its
- * own at an accumulated x and tinted by its distance from the highlight.
- * Ten characters is coarse, but with the highlight three wide and falling
- * off either side the eye reads a sweep rather than letters taking turns.
- *
- * No erase pass, for the reason the loading dots give: a glyph cell paints
- * its own background, so redrawing a character over itself leaves no gap
- * for scanout to catch. The boot fade had to be capped at 33 steps because
- * it refilled the whole CARD first; this touches only the glyphs.
- *
- * Free: it runs on the splash, where nothing is decoding, and it rides the
- * 30 Hz tick the dots already use rather than adding a timer.
- *
- * The pass is longer than the title so there is a pause between sweeps --
- * once `pos` walks past the end every character is plain accent again, and
- * no special case is needed to hold it there. */
-#define SHINE_TXT   "MP3 PLAYER"
-#define SHINE_LEN   10            /* characters in it                      */
-#define SHINE_SPAN   3            /* how many each side the highlight lits  */
-#define SHINE_HOLD  14            /* steps of plain title between passes    */
-#define SHINE_CYCLE (SHINE_LEN + 2 * SHINE_SPAN + SHINE_HOLD)
-
-static uint32_t shine_t;
-
-static void ui_splash_shine(int32_t pos)
-{
-    uint32_t sc = fb_text_fit_native(SHINE_TXT, UI_INNER_W);
-    uint32_t x  = UI_MARGIN;
-    for (int32_t i = 0; i < SHINE_LEN; i++) {
-        char one[2]; one[0] = SHINE_TXT[i]; one[1] = 0;
-        uint32_t w = fb_text_width(one, sc);
-        int32_t d = i - pos;
-        if (d < 0) d = -d;
-        uint16_t c = (d >= SHINE_SPAN)
-                   ? ui_accent
-                   : ui_mix(ui_accent, UI_WHITE,
-                            (uint32_t)(SHINE_SPAN - d), (uint32_t)SHINE_SPAN);
-        fb_set_color(c, UI_PANEL);
-        fb_text_clipped(x, UI_TITLE_Y, one, sc, sc, w + 2u);
-        x += w;
-    }
-}
 
 /* A 7x7 disc, one rect per row -- the way every other icon here is built,
  * because BRAM is at 97% and a glyph would cost a whole atlas cell. */
