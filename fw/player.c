@@ -4414,8 +4414,11 @@ static void ui_splash_title(uint32_t f, uint32_t den)
 #define SHINE_TXT   "MP3 PLAYER"
 #define SHINE_LEN   10            /* characters in it                      */
 #define SHINE_SPAN   3            /* how many each side the highlight lits  */
-#define SHINE_HOLD  14            /* steps of plain title between passes    */
-#define SHINE_CYCLE (SHINE_LEN + 2 * SHINE_SPAN + SHINE_HOLD)
+/* ONE pass, not a loop. A highlight that keeps going reads as a busy
+ * indicator; one that crosses once and stops reads as the title arriving.
+ * At SHINE_END the highlight has cleared the last character -- every glyph
+ * is back to plain accent -- so stopping there needs no final repaint. */
+#define SHINE_END   (SHINE_LEN + 2 * SHINE_SPAN)
 
 static uint32_t shine_t;
 
@@ -4502,7 +4505,14 @@ static void ui_splash(void)
  * came to 16 bytes over the link guard and was set aside rather than shrink a
  * memory guard to fit an animation. The work is on the branch; revisit it when
  * there is room. */
-#define WV_STEP    3u
+/* ONE column a frame, down from three.
+ *
+ * Three was chosen against 36 bars, where it swept in over 12 frames. The
+ * bar count is 24 now, so the same step finished in 8 -- about a fifth of a
+ * second, which is faster than the eye reads as a sweep at all. At one
+ * column a frame the fill takes 24 frames, two thirds of a second, and the
+ * ongoing scroll is sedate rather than frantic. */
+#define WV_STEP    1u
 
 #define WV_BODY   53u    /* percent of full height the body settles around */
 #define WV_PULL   18u    /* body is pulled back toward it by /this per frame */
@@ -4677,7 +4687,8 @@ static void ui_splash_anim(void)
             if (!sh_armed) { sh_armed = 1u; sh_next = cycles(); last_f = STEP_DEN; }
             if ((int32_t)(cycles() - sh_next) >= 0) {
                 sh_next = cycles() + CLK_HZ / 30u;
-                ui_splash_shine((int32_t)(shine_t++ % SHINE_CYCLE) - SHINE_SPAN);
+                if (shine_t <= SHINE_END)
+                    ui_splash_shine((int32_t)shine_t++ - SHINE_SPAN);
             }
         }
         ui_wave_anim_tick();
@@ -4803,7 +4814,11 @@ static void ui_boot_tick(void)
     uint32_t t  = ui_boot_t++ % UI_DOT_TICKS;
 
     /* The title catches the light on the same tick as the dots. */
-    ui_splash_shine((int32_t)(shine_t++ % SHINE_CYCLE) - SHINE_SPAN);
+    /* Carries on from wherever the intro loop left it, and stops for good
+     * once the pass is done -- so a slow card does not get the title
+     * flashing at it for the whole load. */
+    if (shine_t <= SHINE_END)
+        ui_splash_shine((int32_t)shine_t++ - SHINE_SPAN);
 
     /* No erase pass: every dot is redrawn every tick at a fixed position, so
      * each one covers its own footprint. Erase-then-draw on a single-buffered
