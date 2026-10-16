@@ -15,11 +15,31 @@ using the core: what you will notice and what to press, not how it is built.
 - **Lyrics moved to PSRAM**, which is what made room for scrobbling. They
   are parsed as a track loads rather than held in the block RAM the decoders
   need. Nothing changes in use.
+- **Every meter is taller.** They drew into a 72 px band; the cassette and
+  the lyrics view already used the full 96 px, and now all thirteen do. The
+  album art has not moved.
+- **The bars are wider** — 24 across the window instead of 36, so a bar is
+  13 px rather than 8, and 8 rather than 4 when the album art is showing.
+- **The VU meter looks like a VU meter.** Each channel sits on a recessed
+  instrument face with a graduated scale, a white needle and a machined
+  pivot, and the scale is logarithmic the way a real movement is — the marks
+  spread toward 0 and the red zone sits above it.
+- **The magic eye is bigger** and sits on its base again rather than
+  floating, and its light pool grew with it.
+- **The cassette label carries the artist**, always, instead of only the
+  playlist name.
+- **The boot screen has something to look at** — the title catches a
+  travelling highlight as it arrives, and the meter fills at a pace you can
+  actually see rather than snapping to full.
 - Fixed: **elapsed time stopped while the screen was blanked**, and did not
   catch up when the screen came back. Blanking is off unless you switch it on
   with **Select** + **Down**, so most people will never have seen it.
 - Fixed: **album art stored without a description field showed COVER
   ERROR** when the picture was perfectly good.
+- Fixed: **the scrolling meters were dimmer on one side than the other.**
+  Bars, mirrored bars and peak dots shaded by column across the whole
+  width, so the middle of the meter sat at about half strength. Only the
+  last few columns fade now, as they leave the screen.
 
 ## v1.7.0 — 12 October 2026
 
