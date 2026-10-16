@@ -134,6 +134,7 @@ SECTIONS {
 		KEEP(*(.text._start))
 		*(EXCLUDE_FILE (*qrcodegen.o) .text .text.*)
 		*(.qrtext .qrtext.*)
+		*(.coldtext .coldtext.*)
 		*qrcodegen.o(.text .text.*)
 	} > ram
 

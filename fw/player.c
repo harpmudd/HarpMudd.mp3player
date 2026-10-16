@@ -2551,6 +2551,11 @@ static uint32_t eye_glow_rx(uint32_t dy)
 
 
 
+/* Cold code: runs once, and link.ld places .coldtext after everything the
+ * decode path touches. Always pair it with noinline -- the section attribute
+ * on its own does not stop GCC inlining the body back into a hot caller. */
+#define UI_COLD __attribute__((section(".coldtext"), noinline))
+
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
  * sweep, which is what a real VU movement travels. The first attempt built one
  * table and tried to derive both components from it by index arithmetic; the
@@ -5639,6 +5644,99 @@ static void ui_advance_time(void)
     }
 }
 
+/* ---- VU gauge face -----------------------------------------------------
+ *
+ * One analogue movement, at whatever size the caller has room for: the
+ * player draws two of these 180 px wide inside the meter band, and the boot
+ * screen can draw the same thing larger. Everything here is FACE -- panel,
+ * scale, label -- so it is drawn once and the needle is the only thing that
+ * moves afterwards.
+ *
+ * UI_COLD, and noinline with it. This runs once per track, so it has no
+ * business sitting in the middle of .text where it would shift the decode
+ * path; the caches are 4 KB direct-mapped and that is how FLAC lost its
+ * headroom last time. A section attribute alone does not stop GCC inlining
+ * a single-call-site function, which is what noinline is for.
+ *
+ * Nothing is drawn INSIDE the needle's sweep. The needle is erased by
+ * repainting its own footprint, so anything under it would be rubbed out on
+ * the first frame -- which is why there are no numerals on the scale at this
+ * size, and why the label sits in the panel's corner. */
+#define VU_PANEL  0x1061u   /* near-black instrument face, a touch above pure */
+#define VU_EDGE   0x2965u   /* its bezel */
+#define VU_SCALE  0x8C71u   /* warm grey: the quiet two-thirds of the arc   */
+#define VU_NEEDLE 0xFFFFu
+#define VU_HUB    0xCE59u
+
+UI_COLD static void vu_draw_face(uint32_t ox, uint32_t oy, uint32_t w,
+                                 uint32_t h, uint32_t pivx, uint32_t pivy,
+                                 uint32_t len, const char *label)
+{
+    /* The recessed panel. This is what turns a floating arc into an
+     * instrument, and it is the one change that does most of the work. */
+    fb_round_rect(ox, oy, w, h, 4u, VU_PANEL);
+    fb_rect(ox, oy, w, 1u, VU_EDGE);
+
+    /* 21 ticks, every fifth one long.
+     *
+     * Each one is a LINE between two radii, stepped along its longest axis.
+     * Walking the radius a pixel at a time instead -- which is what this did
+     * first -- plots through the same rounded cell twice near the top of the
+     * sweep and skips cells near the sides, so every tick came out as a
+     * ragged dotted trail. Simulated before it ever reached hardware; see
+     * docs/splash/.
+     *
+     * 21 rather than 41 for the same reason the ticks have to be lines: at
+     * this radius the arc is about 90 px, so 41 of them sit two pixels apart
+     * and merge into a smear. */
+    for (uint32_t i = 0; i <= 20u; i++) {
+        uint32_t q = (i * 16u) / 20u, f = (i * 16u) % 20u;
+        uint32_t q1 = (q < 16u) ? q + 1u : 16u;
+        int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 20;
+        int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 20;
+
+        uint32_t major = (i % 5u == 0u);
+        int32_t  t0 = (int32_t)len - (major ? 9 : 5);
+        uint16_t col = (i >= 15u) ? ui_accent : VU_SCALE;   /* peak zone */
+
+        int32_t x0 = (int32_t)pivx + (t0 * sn) / 4096;
+        int32_t y0 = (int32_t)pivy - (t0 * cs) / 4096;
+        int32_t x1 = (int32_t)pivx + ((int32_t)len * sn) / 4096;
+        int32_t y1 = (int32_t)pivy - ((int32_t)len * cs) / 4096;
+        int32_t dx = x1 - x0, dy = y1 - y0;
+        int32_t adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+        int32_t n = (adx > ady ? adx : ady);
+        if (n < 1) n = 1;
+        for (int32_t k = 0; k <= n; k++) {
+            int32_t ax = x0 + dx * k / n;
+            int32_t ay = y0 + dy * k / n;
+            if (ay < (int32_t)oy + 1 || ay >= (int32_t)(oy + h)) continue;
+            if (ax < (int32_t)ox + 1 || ax >= (int32_t)(ox + w) - 1) continue;
+            fb_rect((uint32_t)ax, (uint32_t)ay, major ? 2u : 1u, 1u, col);
+        }
+    }
+
+    /* Channel label, recessed into the corner rather than shouting in the
+     * accent -- it competed with the needle before. */
+    if (label) {
+        fb_set_color(VU_SCALE, VU_PANEL);
+        fb_text_clipped(ox + 5u, oy + 3u, label, TS_1X, TS_1X, 20u);
+    }
+}
+
+/* The hub, drawn per frame with the needle. A disc rather than the old 5x5
+ * square: at this size four clipped corners are the whole difference between
+ * a machined pivot and a block. */
+UI_COLD static void vu_draw_hub(uint32_t pivx, uint32_t pivy)
+{
+    /* Row widths 3-5-7-7-5-3 around the pivot: a 7 px disc rather than the
+     * slab the first attempt drew, which read as a square at this size. */
+    static const uint8_t wsq[6] = { 3u, 5u, 7u, 7u, 5u, 3u };
+    for (uint32_t r = 0; r < 6u; r++)
+        fb_rect(pivx - wsq[r] / 2u, pivy - 3u + r, wsq[r], 1u, VU_HUB);
+    fb_rect(pivx - 1u, pivy - 1u, 3u, 2u, VU_EDGE);
+}
+
 static void ui_draw_dynamic(void)
 {
     ui_advance_time();
@@ -6454,6 +6552,9 @@ static void ui_draw_dynamic(void)
              * with `bed`, the gradient sampled once at its top row, which is a
              * flat slab on a ramp that falls to 62% of that value by the
              * bottom. The needles leave most of the box empty, so it shows. */
+            /* Clear to the ramp first: the two panels do not cover the
+             * whole band, and the gutter between and around them has to be
+             * background rather than whatever the last meter left. */
             if (!vu_face)
                 for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
                     fb_rect(UI_MARGIN, yy, ww, 1, ui_grad_at(yy));
@@ -6462,8 +6563,8 @@ static void ui_draw_dynamic(void)
                 uint32_t half = ww / 2u;
                 uint32_t ox   = UI_MARGIN + (uint32_t)ch * half;
                 uint32_t pivx = ox + half / 2u;
-                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 4u;
-                uint32_t len  = UI_WAVE_H - 18u;
+                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 7u;
+                uint32_t len  = UI_WAVE_H - 20u;
                 /* Needle stops short of the ticks, so erasing it can never rub
                  * them out and they never need repainting. */
                 uint32_t nlen = len - 6u;
@@ -6477,45 +6578,10 @@ static void ui_draw_dynamic(void)
                 else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
                                 if (*v < tgt) *v = tgt; }
 
-                if (!vu_face) {
-                    for (uint32_t t = 0; t <= 80u; t++) {
-                        uint32_t q = (t * 16u) / 80u, f = (t * 16u) % 80u;
-                        uint32_t q1 = (q < 16u) ? q + 1u : 16u;
-                        int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 80;
-                        int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 80;
-                        int32_t ar = (int32_t)len + 4;
-                        int32_t ax = (int32_t)pivx + (ar * sn) / 4096;
-                        int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
-                        if (ay < (int32_t)UI_WAVE_Y) continue;
-                        if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
-                        /* Everything on the face is a TONE OF THE ACCENT.
-                         * Fixed grey and red meant changing colour only moved
-                         * the needle and the labels, and the meter looked
-                         * unchanged. The peak zone is the accent at full
-                         * strength against a dimmed scale, so it still reads as
-                         * "the loud end" in any palette. */
-                        fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
-                                (t >= 60u) ? ui_accent
-                                           : ui_mix(ui_grad_at((uint32_t)ay),
-                                                    ui_accent, 2u, 5u));
-                    }
-                    for (uint32_t t = 0; t <= 4u; t++) {
-                        uint32_t i = t * 4u;
-                        for (uint32_t d = 0; d < 4u; d++) {
-                            int32_t ar = (int32_t)len - 1 - (int32_t)d;
-                            int32_t ax = (int32_t)pivx + (ar * vu_sn[i]) / 4096;
-                            int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
-                            if (ay < (int32_t)UI_WAVE_Y) continue;
-                            fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
-                                    (t >= 3u) ? ui_accent
-                                              : ui_mix(ui_grad_at((uint32_t)ay),
-                                                       ui_accent, 3u, 5u));
-                        }
-                    }
-                    fb_set_color(ui_accent, ui_grad_at(UI_WAVE_Y + 2u));
-                    fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
-                                    TS_1X, TS_1X, 16u);
-                }
+                if (!vu_face)
+                    vu_draw_face(ox + 3u, UI_WAVE_Y + 1u, half - 6u,
+                                 UI_WAVE_H - 2u, pivx, pivy, len,
+                                 ch ? "R" : "L");
 
                 uint8_t shown = ch ? vu_shown_r : vu_shown_l;
                 uint8_t now   = (uint8_t)*v;
@@ -6544,15 +6610,15 @@ static void ui_draw_dynamic(void)
                         if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
                         if (ny < (int32_t)UI_WAVE_Y) continue;
                         uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;
+                        /* Erases to the PANEL, not the gradient. The needle
+                         * sweeps inside the instrument now, so repainting its
+                         * footprint with the background ramp would cut a pale
+                         * wedge through the face wherever it had been. */
                         fb_rect((uint32_t)nx, (uint32_t)ny, th, th,
-                                pass ? ui_accent
-                                     : ui_grad_at((uint32_t)ny));
+                                pass ? VU_NEEDLE : VU_PANEL);
                     }
                 }
-                fb_rect(pivx - 2u, pivy - 2u, 5, 5, ui_accent);
-                for (uint32_t r = 0; r < 3u; r++)
-                    fb_rect(pivx - 1u, pivy - 1u + r, 3, 1,
-                            ui_grad_at(pivy - 1u + r));
+                vu_draw_hub(pivx, pivy);
 
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
             }
