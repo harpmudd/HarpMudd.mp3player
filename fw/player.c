@@ -2006,7 +2006,12 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
  *   toast     UI_TOAST_Y
  *   progress  UI_PROG_Y
  */
-#define UI_WAVE_N   36u
+/* 24, down from 36. At 36 a bar is ww/36 minus the gap -- 8 px at full
+ * width and only 4 beside the album art, which reads as a comb rather
+ * than a bar meter. 24 gives 13 px and 8. The array is the scroll
+ * history too, so this is also how much of the recent past the meter
+ * shows. */
+#define UI_WAVE_N   24u
 #define UI_WAVE_Y   173u
 #define UI_WAVE_H   72u
 /* Rows ABOVE the meter box that a meter is allowed to use.
@@ -2463,7 +2468,10 @@ static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 /* Sized to the last pixel of the meter box: pip on row 0, plinth ending on
  * row 71 of 72. Growing either dimension again means taking it from the
  * plinth or the dome, not from spare space -- there is none. */
-#define EYE_TUBE_H  62u
+/* 76, up from 62. The box is 96 now and the tube is anchored to its
+ * BASE rather than its top, so the extra height is glass rather than a gap
+ * above the plinth. */
+#define EYE_TUBE_H  76u
 /* The plinth. Overlaps the tube's last row on purpose -- those rows are socket
  * shadow, so the glass reads as seated IN the base rather than balanced on it,
  * which is how the photographed pair sits. Wider than the tubes now that the
@@ -4450,7 +4458,7 @@ static void ui_wave_gen(void)
 
     /* Body. One RNG draw, mean-reverting toward WV_BODY. */
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
-    int32_t body = (int32_t)((UI_WAVE_H * WV_BODY) / 100u);
+    int32_t body = (int32_t)((UI_WAVE_FH * WV_BODY) / 100u);
     /* Multiply-shift instead of modulo. A 0..N range from the top bits of the
      * RNG is as uniform as the remainder for this purpose, and it drops a
      * __umodsi3 call from a loop that runs 64 times a frame. */
@@ -4459,7 +4467,7 @@ static void ui_wave_gen(void)
                  - (int32_t)WV_DRIFT
                  - ((int32_t)wv_level - body) / (int32_t)WV_PULL;
     if (lv < (int32_t)WV_FLOOR)   lv = (int32_t)WV_FLOOR;
-    if (lv > (int32_t)UI_WAVE_H)  lv = (int32_t)UI_WAVE_H;
+    if (lv > (int32_t)UI_WAVE_FH)  lv = (int32_t)UI_WAVE_FH;
     wv_level = (uint8_t)lv;
 
     /* Transient. Decays first, then may be re-struck anywhere in the headroom
@@ -4468,7 +4476,7 @@ static void ui_wave_gen(void)
     wv_tr = (uint8_t)(((uint32_t)wv_tr * WV_DECAY) / 4u);
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
     if (wv_rng % WV_HIT == 0u) {
-        uint32_t head = (uint32_t)(UI_WAVE_H - wv_level);
+        uint32_t head = (uint32_t)(UI_WAVE_FH - wv_level);
         if (head) {
             wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
             uint32_t hit = ((wv_rng & 0x7FFFu) * (head + 1u)) >> 15;
@@ -4477,7 +4485,7 @@ static void ui_wave_gen(void)
     }
 
     uint32_t smp = (uint32_t)wv_level + wv_tr;
-    if (smp > UI_WAVE_H) smp = UI_WAVE_H;
+    if (smp > UI_WAVE_FH) smp = UI_WAVE_FH;
     wv_h[UI_WAVE_N - 1u] = (unsigned char)smp;
 }
 
@@ -4485,7 +4493,7 @@ static void ui_wave_gen(void)
  * settle: winding env down pulls the whole meter with it. */
 static void ui_wave_frame(void)
 {
-    uint16_t bed = ui_grad_at(UI_WAVE_Y);
+    uint16_t bed = ui_grad_at(UI_WAVE_FY);
     /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
      * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
      * was leaving a gap for an album-art panel that does not exist yet and
@@ -4500,9 +4508,9 @@ static void ui_wave_frame(void)
         uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
         uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
 
-        fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h,
+        fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - h, lit, h,
                 ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
-        if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+        if (UI_WAVE_FH > h) fb_rect(x, UI_WAVE_FY, lit, UI_WAVE_FH - h, bed);
     }
 }
 
@@ -4513,7 +4521,7 @@ static void ui_wave_anim_start(void)
      * the counter, so this animation was dead for the same half of every
      * 64.4 s wrap as the loading dots beside it. */
     wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
-    wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
+    wv_level = (uint8_t)((UI_WAVE_FH * WV_BODY) / 100u);
     wv_tr    = 0;
 
     /* EMPTY, deliberately -- the sweep in from the right IS the animation, and
@@ -5736,7 +5744,9 @@ UI_COLD static void vu_draw_face(uint32_t ox, uint32_t oy, uint32_t w,
     /* Channel label, recessed into the corner rather than shouting in the
      * accent -- it competed with the needle before. */
     if (label) {
-        fb_set_color(VU_SCALE, VU_PANEL);
+        /* Accent, like every other active indicator in the core. Neutral grey
+         * made the gauge the one element that ignored the chosen palette. */
+        fb_set_color(ui_accent, VU_PANEL);
         fb_text_clipped(ox + 5u, oy + 3u, label, TS_1X, TS_1X, 20u);
     }
 }
@@ -5932,8 +5942,8 @@ static void ui_draw_dynamic(void)
          * covers two display frames and both should count. */
         uint32_t src = wave_pend ? wave_pend : peak_amp;
         wave_pend = 0;
-        uint32_t amp = (src * UI_WAVE_H) / 32768u;
-        if (amp > UI_WAVE_H) amp = UI_WAVE_H;
+        uint32_t amp = (src * UI_WAVE_FH) / 32768u;
+        if (amp > UI_WAVE_FH) amp = UI_WAVE_FH;
         /* Frozen while paused: the forced pass exists only to recolour. */
         if (!paused) {
             for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) {
@@ -5951,7 +5961,7 @@ static void ui_draw_dynamic(void)
             if (wave_pk[i] > wave[i]) wave_pk[i]--;
 
         uint32_t ww  = ui_wave_w();
-        uint16_t bed = ui_grad_at(UI_WAVE_Y);
+        uint16_t bed = ui_grad_at(UI_WAVE_FY);
 
         /* ---- WATERFALL ----------------------------------------------------
          * Scroll the whole strip one pixel left with a single COPY, then draw
@@ -6049,8 +6059,12 @@ static void ui_draw_dynamic(void)
 
                 uint32_t cx = x0 + w - 1u;
                 ui_bg_restore(cx, UI_WAVE_FY, 1, UI_WAVE_FH);     /* clear column */
-                if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u,
-                               ui_mix(UI_TRACK, ui_accent, a, half));
+                /* One colour at every level. The brightness used to track
+                 * the amplitude, so quiet passages drew toward UI_TRACK and
+                 * the strip appeared to fade out as it scrolled away. Height
+                 * already encodes level; dimming it as well just loses the
+                 * quiet detail. */
+                if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u, ui_accent);
                 else   fb_rect(cx, cy, 1, 1, UI_TRACK);         /* silence line */
             }
             goto viz_done;
@@ -6186,10 +6200,15 @@ static void ui_draw_dynamic(void)
                  * name alone gives the same value either way, tape_face is
                  * never cleared, and the stale label stays painted however the
                  * guard reads. */
+                /* Hashed over whatever the label will SHOW, which is now
+                 * the artist wherever there is one. Hashing the playlist name
+                 * while drawing the artist would leave the face cached across
+                 * a track change and the label would never update. */
                 uint32_t nh = 0;
-                if (track_from_pl)
-                    for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
-                        nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
+                const char *lbl = track_artist[0] ? track_artist
+                                : (track_from_pl ? pl_name_full : "");
+                for (uint32_t i = 0; lbl[i] && i < 24u; i++)
+                    nh = nh * 31u + (uint32_t)(unsigned char)lbl[i];
                 if (nh != tape_name_h) { tape_name_h = nh; tape_face = 0; }
             }
             if (wf || ww != tape_face_w) tape_face = 0;
@@ -6235,13 +6254,18 @@ static void ui_draw_dynamic(void)
                  * had nothing to do with it. track_from_pl is already the
                  * flag for "the playlist started this track"; resume uses it
                  * the same way. */
-                if (track_from_pl && pl_count && pl_name_full[0]) {
+                /* The artist, always, because that is what is written on a
+                 * cassette's label. Falls back to the playlist name when the
+                 * tag has no artist. */
+                const char *src = track_artist[0] ? track_artist
+                                : ((track_from_pl && pl_count) ? pl_name_full : "");
+                if (src[0]) {
                     /* Without the extension. Nobody writes ".m3u" on a
                      * cassette label. */
                     char nm[PL_FULL_MAX + 1u];
                     uint32_t n = 0;
-                    while (pl_name_full[n] && n < PL_FULL_MAX) {
-                        nm[n] = pl_name_full[n]; n++;
+                    while (src[n] && n < PL_FULL_MAX) {
+                        nm[n] = src[n]; n++;
                     }
                     nm[n] = 0;
                     while (n && nm[n - 1u] != '.') n--;
@@ -6650,7 +6674,10 @@ static void ui_draw_dynamic(void)
             if (wf || ww != eye_face_w) eye_face = 0;
 
             uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
-            uint32_t ty   = UI_WAVE_FY + 3u;
+            /* Anchored to the BOTTOM of the box. Left at FY + 3 the tube
+             * floated at the top of the taller band with its plinth in mid
+             * air; it has always read as standing on the base. */
+            uint32_t ty   = UI_WAVE_FY + UI_WAVE_FH - EYE_TUBE_H;
             uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
             uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
             /* Grew with the envelope, so the taller tube is also a longer
@@ -7066,8 +7093,12 @@ static void ui_draw_dynamic(void)
             if (lvl_l > lvl_pl) lvl_pl = lvl_l; else if (lvl_pl) lvl_pl--;
             if (lvl_r > lvl_pr) lvl_pr = lvl_r; else if (lvl_pr) lvl_pr--;
 
-            const uint32_t bh = UI_WAVE_FH / 3u;          /* bar height */
-            const uint32_t gap = UI_WAVE_FH - 2u * bh;    /* space between */
+            /* A third each left a third of the box as dead space between
+             * the two bars -- 32 px of gap for 32 px of bar. Fix the gap at
+             * 12 and give the rest to the bars: 42 px each, closer together
+             * and taller. */
+            const uint32_t gap = 12u;
+            const uint32_t bh  = (UI_WAVE_FH - gap) / 2u;
             uint16_t lit = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
             for (int ch = 0; ch < 2; ch++) {
                 uint32_t y  = UI_WAVE_FY + (ch ? bh + gap : 0u);
@@ -7108,11 +7139,11 @@ static void ui_draw_dynamic(void)
             uint16_t lit_c = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u)
                                     : ui_accent;
             uint16_t c = ui_mix(UI_TRACK, lit_c, i + 1u, UI_WAVE_N);
-            fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h, c);
-            if (UI_WAVE_H > h)
-                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+            fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - h, lit, h, c);
+            if (UI_WAVE_FH > h)
+                fb_rect(x, UI_WAVE_FY, lit, UI_WAVE_FH - h, bed);
             if (pk > h + 1u)                       /* 1 px peak-hold marker */
-                fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 1, UI_WHITE);
+                fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - pk, lit, 1, UI_WHITE);
         }
     viz_done: ;
     }
