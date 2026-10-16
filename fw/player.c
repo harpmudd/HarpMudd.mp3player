@@ -4661,6 +4661,54 @@ static uint16_t ui_boot_bg(void)
     return ui_grad_at(UI_BOOT_Y);
 }
 
+/* ---- title shine -------------------------------------------------------
+ *
+ * A highlight that travels along "MP3 PLAYER" while the card is being read.
+ *
+ * Per GLYPH, not per pixel. Text goes through fb_text_clipped and there is
+ * no way to vary colour inside a cell, so each character is drawn on its
+ * own at an accumulated x and tinted by its distance from the highlight.
+ * Ten characters is coarse, but with the highlight three wide and falling
+ * off either side the eye reads a sweep rather than letters taking turns.
+ *
+ * No erase pass, for the reason the loading dots give: a glyph cell paints
+ * its own background, so redrawing a character over itself leaves no gap
+ * for scanout to catch. The boot fade had to be capped at 33 steps because
+ * it refilled the whole CARD first; this touches only the glyphs.
+ *
+ * Free: it runs on the splash, where nothing is decoding, and it rides the
+ * 30 Hz tick the dots already use rather than adding a timer.
+ *
+ * The pass is longer than the title so there is a pause between sweeps --
+ * once `pos` walks past the end every character is plain accent again, and
+ * no special case is needed to hold it there. */
+#define SHINE_TXT   "MP3 PLAYER"
+#define SHINE_LEN   10            /* characters in it                      */
+#define SHINE_SPAN   3            /* how many each side the highlight lits  */
+#define SHINE_HOLD  14            /* steps of plain title between passes    */
+#define SHINE_CYCLE (SHINE_LEN + 2 * SHINE_SPAN + SHINE_HOLD)
+
+static uint32_t shine_t;
+
+static void ui_splash_shine(int32_t pos)
+{
+    uint32_t sc = fb_text_fit_native(SHINE_TXT, UI_INNER_W);
+    uint32_t x  = UI_MARGIN;
+    for (int32_t i = 0; i < SHINE_LEN; i++) {
+        char one[2]; one[0] = SHINE_TXT[i]; one[1] = 0;
+        uint32_t w = fb_text_width(one, sc);
+        int32_t d = i - pos;
+        if (d < 0) d = -d;
+        uint16_t c = (d >= SHINE_SPAN)
+                   ? ui_accent
+                   : ui_mix(ui_accent, UI_WHITE,
+                            (uint32_t)(SHINE_SPAN - d), (uint32_t)SHINE_SPAN);
+        fb_set_color(c, UI_PANEL);
+        fb_text_clipped(x, UI_TITLE_Y, one, sc, sc, w + 2u);
+        x += w;
+    }
+}
+
 /* A 7x7 disc, one rect per row -- the way every other icon here is built,
  * because BRAM is at 97% and a glyph would cost a whole atlas cell. */
 static void ui_icon_dot(uint32_t x, uint32_t y, uint16_t c)
@@ -4721,6 +4769,9 @@ static void ui_boot_tick(void)
     uint16_t bg = ui_boot_bg();
     uint32_t dy = UI_BOOT_Y + (FB_CELL(TS_1X) - 7u) / 2u;   /* centred on the text */
     uint32_t t  = ui_boot_t++ % UI_DOT_TICKS;
+
+    /* The title catches the light on the same tick as the dots. */
+    ui_splash_shine((int32_t)(shine_t++ % SHINE_CYCLE) - SHINE_SPAN);
 
     /* No erase pass: every dot is redrawn every tick at a fixed position, so
      * each one covers its own footprint. Erase-then-draw on a single-buffered
