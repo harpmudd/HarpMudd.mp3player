@@ -14,13 +14,8 @@ What changed in each release, newest first.
 - **Lyrics moved to PSRAM**, which is what made room for scrobbling. They
   are parsed as a track loads rather than held in the block RAM the decoders
   need. Nothing changes in use.
-- **Meter refinements throughout.** Every meter now fills the same 96 px
-  the cassette and lyrics views already used, instead of a 72 px band, and
-  the bars are wider to suit it. The VU meter has been rebuilt as a real
-  instrument — recessed face, graduated logarithmic scale, white needle,
-  machined pivot, red zone above 0. The magic eye is bigger and sits on its
-  base again, and the cassette label now carries the artist. The album art
-  has not moved.
+- **Meter refinements.** The meters are taller, the bars are wider, and the
+  VU meter has been rebuilt to look like a real instrument.
 - Fixed: **elapsed time stopped while the screen was blanked**, and did not
   catch up when the screen came back. Blanking is off unless you switch it on
   with **Select** + **Down**, so most people will never have seen it.
