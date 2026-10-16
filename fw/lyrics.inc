@@ -355,14 +355,40 @@ static uint32_t lrc_tag_load(void)
     return 0;
 }
 
-/* Called from load_track(). Silent when there is no sidecar -- most tracks will
+/* Called from load_track(), and from the meter cycle when the lyrics view is
+ * arrived at mid-track. Silent when there is no sidecar -- most tracks will
  * not have one, and that is not a failure worth reporting. */
 static void lrc_load(void)
 {
     lrc_clear();
 
-    char path[96];
-    slot_filename(path, sizeof(path));
+    /* THE NAME COMES FROM track_file, NOT from slot_filename().
+     *
+     * slot_filename() asks APF nothing. It re-parses whatever 0190 response is
+     * sitting in the datatable right now -- "the longest run of filename text
+     * in the struct IS the name". Inside load_track() that is safe:
+     * read_track_head() runs slot_file_id() a few hundred lines earlier and
+     * nothing issues another 0190 in between, so the response describes the
+     * track.
+     *
+     * On the LAZY path it is not safe, and this is the bug it caused: two
+     * background polls take turns owning that response area during playback.
+     * The track poll fires every 2 s with a GETFILE on the MP3 slot, which is
+     * the right answer; pl_name_read() fires every 3 s with a GETFILE on the
+     * PLAYLIST slot, which is not. They are deliberately staggered 2 against 3
+     * so they do not collide, so whichever ran most recently decided what this
+     * function thought the track was called. When the playlist won, the sidecar
+     * asked for was playlist.lrc, the open failed, the ID3 fallback found
+     * nothing on a FLAC, and the meter drew NO LYRICS on a track that has them
+     * -- about as often as not, and only a track change cleared it, because
+     * that is the one path with a fresh 0190 in front of it.
+     *
+     * track_file is the copy slot_id_query(1) already captured at load time:
+     * the same bytes, from the same parser, taken at the one moment they are
+     * guaranteed to be the track's. It is also 160 bytes against the 96 this
+     * function used to allocate, so a deep folder no longer truncates the
+     * filename off the end of its own path. */
+    const char *path = track_file;
     if (!path[0]) return;
 
     /* Last component only. pl_open_try() supplies the directory from the MP3

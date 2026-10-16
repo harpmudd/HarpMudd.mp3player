@@ -35,15 +35,14 @@ instrument — recessed face, graduated logarithmic scale, white needle,
 machined pivot, red zone above 0. The magic eye is bigger and sits on its
 base again, and the cassette's label now carries the artist.
 
-**The boot screen does something.** The title catches a travelling
-highlight as it arrives and the meter fills at a pace you can see.
-
 ### Also fixed
 
 - Elapsed time stopped while the screen was blanked and never caught up.
 - Album art stored without a description field showed **COVER ERROR** when
   the picture was fine.
 - The scrolling meters were dimmer on one side than the other.
+- Switching to the lyrics meter part-way through a track sometimes said
+  **NO LYRICS** on a track that has them.
 
 ### Installing
 
