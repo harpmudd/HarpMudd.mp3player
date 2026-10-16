@@ -2916,6 +2916,25 @@ static uint16_t ui_mix(uint16_t a, uint16_t b, uint32_t t, uint32_t n)
     return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
+/* Age shading, confined to the TRAILING EDGE.
+ *
+ * The scrolling meters used to ramp their colour linearly across every
+ * column -- ui_mix(UI_TRACK, lit, i + 1, UI_WAVE_N) -- so a column was only
+ * at full strength at the very right and the dimming was obvious from the
+ * middle of the meter outward. That reads as half the display being darker
+ * than the other half rather than as decay.
+ *
+ * Full strength everywhere except the last few columns before a bar leaves
+ * the screen, which is where fading actually means something.
+ *
+ * i counts from the LEFT, so i == 0 is the column about to scroll off. */
+#define UI_WAVE_FADE 5u
+static uint16_t ui_age_mix(uint16_t lit, uint32_t i)
+{
+    if (i >= UI_WAVE_FADE) return lit;
+    return ui_mix(UI_TRACK, lit, i + 1u, UI_WAVE_FADE + 1u);
+}
+
 /* Top of the background ramp, tinted toward the user's accent. Recomputed
  * whenever the accent changes; the bottom stays black. */
 static uint16_t ui_grad_top_c = UI_GRAD_TOP;
@@ -4513,7 +4532,7 @@ static void ui_wave_frame(void)
         uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
 
         fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - h, lit, h,
-                ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
+                ui_age_mix(ui_accent, i));
         if (UI_WAVE_FH > h) fb_rect(x, UI_WAVE_FY, lit, UI_WAVE_FH - h, bed);
     }
 }
@@ -6501,7 +6520,7 @@ static void ui_draw_dynamic(void)
                 wave_drawn[i] = (unsigned char)h;
 
                 uint16_t lc  = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
-                uint16_t c   = ui_mix(UI_TRACK, lc, i + 1u, UI_WAVE_N);
+                uint16_t c   = ui_age_mix(lc, i);
 
                 /* Restore ONLY around the bar, never underneath it.
                  *
@@ -6543,7 +6562,7 @@ static void ui_draw_dynamic(void)
                 if (pk == wave_pk_drawn[i]) continue;
                 wave_pk_drawn[i] = (unsigned char)pk;
 
-                uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
+                uint16_t c   = ui_age_mix(ui_accent, i);
                 uint32_t top = UI_WAVE_FY + UI_WAVE_FH - pk;   /* first dot row */
                 uint32_t end = UI_WAVE_FY + UI_WAVE_FH;        /* one past box  */
                 if (top > UI_WAVE_FY)
@@ -7157,7 +7176,7 @@ static void ui_draw_dynamic(void)
              * reads as a state change across the UI rather than one word. */
             uint16_t lit_c = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u)
                                     : ui_accent;
-            uint16_t c = ui_mix(UI_TRACK, lit_c, i + 1u, UI_WAVE_N);
+            uint16_t c = ui_age_mix(lit_c, i);
             fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - h, lit, h, c);
             if (UI_WAVE_FH > h)
                 fb_rect(x, UI_WAVE_FY, lit, UI_WAVE_FH - h, bed);
