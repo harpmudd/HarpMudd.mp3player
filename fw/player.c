@@ -2023,6 +2023,19 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
  * erased nor restored -- the restore copies horizontally from a stash column
  * on the SAME row, and those rows had never been painted. */
 #define UI_WAVE_TOP 24u
+/* The FULL meter box: the band plus the rows reserved above it.
+ *
+ * 149..245, 96 tall, against the short box's 173..245. Every meter
+ * should be drawing into this; the cassette and the lyrics view always
+ * did, and the other ten were squeezed into 72 px for no reason beyond
+ * never having been changed.
+ *
+ * UI_WAVE_Y and UI_WAVE_H are deliberately NOT redefined. ART_Y is
+ * derived from them, so moving them would drag the album art up with
+ * the meters, and the clear, the stash and ui_bg_restore are already
+ * written in terms of UI_WAVE_TOP. */
+#define UI_WAVE_FY  (UI_WAVE_Y - UI_WAVE_TOP)   /* 149 */
+#define UI_WAVE_FH  (UI_WAVE_H + UI_WAVE_TOP)   /* 96  */
 #define UI_WAVE_GAP 2u
 #define UI_TRANSPORT_Y 262u
 #define UI_TIME_Y   288u
@@ -2617,7 +2630,11 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
  * 9 and never pegs. */
 #define LED_ROWS 12u
 #define LED_GAPV 1u
-#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 5 px */
+/* Derived from the FULL box, so twelve rows fill it exactly: 96/12 - 1
+ * is 7 px against the 5 it was at 72. Left on UI_WAVE_H the ladder
+ * would have stayed 72 px tall and sat in the taller box with a gap
+ * above it. */
+#define LED_BLKH (UI_WAVE_FH / LED_ROWS - LED_GAPV)    /* 7 px */
 #define SPEC_GAPX 3u                                   /* between columns */
 
 /* ---- OCTAVE FILTER BANK -----------------------------------------------
@@ -3052,7 +3069,7 @@ static void ui_bg_restore(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     if (!w || !h) return;
     if (!ui_bg_ready) {
-        for (uint32_t yy = UI_WAVE_Y - UI_WAVE_TOP;
+        for (uint32_t yy = UI_WAVE_FY;
              yy < UI_WAVE_Y + UI_WAVE_H; yy++)
             fb_rect(UI_BG_X, yy, UI_BG_W, 1, ui_grad_at(yy));
         ui_bg_ready = 1;
@@ -3770,7 +3787,7 @@ static void ui_wave_clear(void)
      * that. */
     ui_meter_faces_invalidate();
 
-    for (uint32_t y = UI_WAVE_Y - UI_WAVE_TOP;
+    for (uint32_t y = UI_WAVE_FY;
          y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
@@ -5958,8 +5975,8 @@ static void ui_draw_dynamic(void)
              * than displacing the line being sung.
              *
              * Redrawn only when the LINE changes, a few times a minute. */
-            const uint32_t top  = UI_WAVE_Y - UI_WAVE_TOP;
-            const uint32_t boxh = UI_WAVE_H + UI_WAVE_TOP;
+            const uint32_t top  = UI_WAVE_FY;
+            const uint32_t boxh = UI_WAVE_FH;
 
             uint32_t t10 = lrc_now10();
             uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(t10) : 0u;
@@ -6022,16 +6039,16 @@ static void ui_draw_dynamic(void)
 
         if (viz_mode == VIZ_SCROLL) {
             const uint32_t x0 = UI_MARGIN, w = ww;
-            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
-            const uint32_t half = UI_WAVE_H / 2u - 1u;
+            const uint32_t cy = UI_WAVE_FY + UI_WAVE_FH / 2u;
+            const uint32_t half = UI_WAVE_FH / 2u - 1u;
             if (!paused) {
-                fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
+                fb_copy(x0 + 1u, UI_WAVE_FY, x0, UI_WAVE_FY, w - 1u, UI_WAVE_FH);
 
                 uint32_t a = (peak_amp * half) / 32768u;
                 if (a > half) a = half;
 
                 uint32_t cx = x0 + w - 1u;
-                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H);     /* clear column */
+                ui_bg_restore(cx, UI_WAVE_FY, 1, UI_WAVE_FH);     /* clear column */
                 if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u,
                                ui_mix(UI_TRACK, ui_accent, a, half));
                 else   fb_rect(cx, cy, 1, 1, UI_TRACK);         /* silence line */
@@ -6060,7 +6077,7 @@ static void ui_draw_dynamic(void)
              * a per-row ramp -- a flat fill is the mistake the magic eye made.
              * Only on a repaint: the gaps never move. */
             int repaint = (spec_drawn[0] == 0xFFu);
-            if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
 
             uint32_t colw  = ww / SPEC_BANDS;
             uint32_t bw    = (colw > SPEC_GAPX) ? colw - SPEC_GAPX : 1u;
@@ -6081,7 +6098,7 @@ static void ui_draw_dynamic(void)
 
                 uint32_t x0 = UI_MARGIN + b * colw;
                 for (uint32_t r = lo; r < hi; r++) {
-                    uint32_t y = UI_WAVE_Y + UI_WAVE_H - (r + 1u) * pitch;
+                    uint32_t y = UI_WAVE_FY + UI_WAVE_FH - (r + 1u) * pitch;
                     uint16_t c;
                     if (r < lit) {
                         uint32_t half = LED_ROWS / 2u;
@@ -6145,7 +6162,7 @@ static void ui_draw_dynamic(void)
 
             uint32_t shw = (ww > TAPE_SHELL_W + 16u) ? TAPE_SHELL_W : (ww - 16u);
             uint32_t sx  = UI_MARGIN + (ww - shw) / 2u;
-            uint32_t y0  = UI_WAVE_Y + UI_WAVE_H - TAPE_SHELL_H;   /* 96 tall */
+            uint32_t y0  = UI_WAVE_FY + UI_WAVE_FH - TAPE_SHELL_H;   /* 96 tall */
             uint32_t cx0 = sx + shw / 2u;
             uint32_t bw  = (shw * 62u) / 100u;           /* window bezel width */
             uint32_t hdx = (bw * 28u) / 100u;            /* hub offset         */
@@ -6178,11 +6195,10 @@ static void ui_draw_dynamic(void)
             if (wf || ww != tape_face_w) tape_face = 0;
 
             if (!tape_face) {
-                /* Per ROW, and over the TALLER band -- this is the only meter
-                 * that draws above UI_WAVE_Y, so it is the only one that needs
+                /* Per ROW, and over the TALLER band -- every meter draws
+                 * into the full box now, so each one needs
                  * UI_WAVE_TOP restored. */
-                ui_bg_restore(UI_MARGIN, UI_WAVE_Y - UI_WAVE_TOP, ww,
-                              UI_WAVE_H + UI_WAVE_TOP);
+                ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
 
                 fb_round_rect(sx, y0, shw, TAPE_SHELL_H, 3u, c_shell);
                 /* All FOUR sides. Only top and bottom were outlined before, so
@@ -6440,13 +6456,13 @@ static void ui_draw_dynamic(void)
         }
 
         if (viz_mode == VIZ_MIRROR) {
-            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
-            const uint32_t half = UI_WAVE_H / 2u - 1u;
+            const uint32_t cy = UI_WAVE_FY + UI_WAVE_FH / 2u;
+            const uint32_t half = UI_WAVE_FH / 2u - 1u;
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
                 uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
                 uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
-                uint32_t h   = (wave[i] * half) / UI_WAVE_H;
+                uint32_t h   = (wave[i] * half) / UI_WAVE_FH;
                 if (!h) h = 1u;
 
                 /* Skip a column whose height has not moved, exactly as the
@@ -6468,13 +6484,13 @@ static void ui_draw_dynamic(void)
                  * a side effect of moving these meters onto the gradient
                  * (a flat `bed` fill used to double as the erase).
                  *
-                 * The two spans plus the bar always sum to exactly UI_WAVE_H,
+                 * The two spans plus the bar always sum to exactly UI_WAVE_FH,
                  * and the bar's own pixels are now written once, not twice. */
                 uint32_t top = cy - h;                      /* first bar row */
                 uint32_t bot = cy + h;                      /* last bar row  */
-                uint32_t end = UI_WAVE_Y + UI_WAVE_H;       /* one past box   */
-                if (top > UI_WAVE_Y)
-                    ui_bg_restore(x, UI_WAVE_Y, lit, top - UI_WAVE_Y);
+                uint32_t end = UI_WAVE_FY + UI_WAVE_FH;       /* one past box   */
+                if (top > UI_WAVE_FY)
+                    ui_bg_restore(x, UI_WAVE_FY, lit, top - UI_WAVE_FY);
                 if (bot + 1u < end)
                     ui_bg_restore(x, bot + 1u, lit, end - (bot + 1u));
                 fb_rect(x, top, lit, h * 2u + 1u, c);
@@ -6500,10 +6516,10 @@ static void ui_draw_dynamic(void)
                 wave_pk_drawn[i] = (unsigned char)pk;
 
                 uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-                uint32_t top = UI_WAVE_Y + UI_WAVE_H - pk;   /* first dot row */
-                uint32_t end = UI_WAVE_Y + UI_WAVE_H;        /* one past box  */
-                if (top > UI_WAVE_Y)
-                    ui_bg_restore(x, UI_WAVE_Y, lit, top - UI_WAVE_Y);
+                uint32_t top = UI_WAVE_FY + UI_WAVE_FH - pk;   /* first dot row */
+                uint32_t end = UI_WAVE_FY + UI_WAVE_FH;        /* one past box  */
+                if (top > UI_WAVE_FY)
+                    ui_bg_restore(x, UI_WAVE_FY, lit, top - UI_WAVE_FY);
                 if (top + 2u < end)
                     ui_bg_restore(x, top + 2u, lit, end - (top + 2u));
                 fb_rect(x, top, lit, 2u, c);
@@ -6514,19 +6530,19 @@ static void ui_draw_dynamic(void)
         if (viz_mode == VIZ_WATER) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             if (!paused) {
-                fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
+                fb_copy(x0 + 1u, UI_WAVE_FY, x0, UI_WAVE_FY, w - 1u, UI_WAVE_FH);
 
-                uint32_t a = (peak_amp * UI_WAVE_H) / 32768u;
-                if (a > UI_WAVE_H) a = UI_WAVE_H;
+                uint32_t a = (peak_amp * UI_WAVE_FH) / 32768u;
+                if (a > UI_WAVE_FH) a = UI_WAVE_FH;
 
                 /* Column drawn as three bands -- quiet bed, body, hot tip --
                  * so loud passages read as brighter AND taller. */
                 uint32_t cx = x0 + w - 1u;
-                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H - a);
+                ui_bg_restore(cx, UI_WAVE_FY, 1, UI_WAVE_FH - a);
                 if (a) {
-                    uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_H);
-                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, a, c);
-                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, 1, UI_WHITE);
+                    uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_FH);
+                    fb_rect(cx, UI_WAVE_FY + UI_WAVE_FH - a, 1, a, c);
+                    fb_rect(cx, UI_WAVE_FY + UI_WAVE_FH - a, 1, 1, UI_WHITE);
                 }
             }
             goto viz_done;
@@ -6556,15 +6572,15 @@ static void ui_draw_dynamic(void)
              * whole band, and the gutter between and around them has to be
              * background rather than whatever the last meter left. */
             if (!vu_face)
-                for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+                for (uint32_t yy = UI_WAVE_FY; yy < UI_WAVE_FY + UI_WAVE_FH; yy++)
                     fb_rect(UI_MARGIN, yy, ww, 1, ui_grad_at(yy));
 
             for (int ch = 0; ch < 2; ch++) {
                 uint32_t half = ww / 2u;
                 uint32_t ox   = UI_MARGIN + (uint32_t)ch * half;
                 uint32_t pivx = ox + half / 2u;
-                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 7u;
-                uint32_t len  = UI_WAVE_H - 20u;
+                uint32_t pivy = UI_WAVE_FY + UI_WAVE_FH - 7u;
+                uint32_t len  = UI_WAVE_FH - 20u;
                 /* Needle stops short of the ticks, so erasing it can never rub
                  * them out and they never need repainting. */
                 uint32_t nlen = len - 6u;
@@ -6579,8 +6595,8 @@ static void ui_draw_dynamic(void)
                                 if (*v < tgt) *v = tgt; }
 
                 if (!vu_face)
-                    vu_draw_face(ox + 3u, UI_WAVE_Y + 1u, half - 6u,
-                                 UI_WAVE_H - 2u, pivx, pivy, len,
+                    vu_draw_face(ox + 3u, UI_WAVE_FY + 1u, half - 6u,
+                                 UI_WAVE_FH - 2u, pivx, pivy, len,
                                  ch ? "R" : "L");
 
                 uint8_t shown = ch ? vu_shown_r : vu_shown_l;
@@ -6608,7 +6624,7 @@ static void ui_draw_dynamic(void)
                         int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
                         int32_t ny = (int32_t)pivy - (rr * cs) / 4096;
                         if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
-                        if (ny < (int32_t)UI_WAVE_Y) continue;
+                        if (ny < (int32_t)UI_WAVE_FY) continue;
                         uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;
                         /* Erases to the PANEL, not the gradient. The needle
                          * sweeps inside the instrument now, so repainting its
@@ -6634,7 +6650,7 @@ static void ui_draw_dynamic(void)
             if (wf || ww != eye_face_w) eye_face = 0;
 
             uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
-            uint32_t ty   = UI_WAVE_Y + 3u;
+            uint32_t ty   = UI_WAVE_FY + 3u;
             uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
             uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
             /* Grew with the envelope, so the taller tube is also a longer
@@ -6658,7 +6674,7 @@ static void ui_draw_dynamic(void)
                  * Painting the real ramp means the meter has no background of
                  * its own -- it sits on the screen's, and the glow fans into
                  * it with nothing to fan against. */
-                for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H; y++)
+                for (uint32_t y = UI_WAVE_FY; y < UI_WAVE_FY + UI_WAVE_FH; y++)
                     fb_rect(UI_MARGIN, y, ww, 1, ui_grad_at(y));
 
                 for (uint32_t ch = 0; ch < 2u; ch++) {
@@ -6812,7 +6828,7 @@ static void ui_draw_dynamic(void)
                  * its repaint band. Computed whether or not the pool is
                  * redrawn -- the gap pass needs it either way. */
                 uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
-                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                uint32_t top = UI_WAVE_FY + EYE_GLOW_TOP;
                 /* Both ends. The upper clamp was dropped while the band was
                  * temporarily shortened and not restored with it, which let
                  * the pool sit five rows lower than intended and run into the
@@ -6901,7 +6917,7 @@ static void ui_draw_dynamic(void)
             if (!eye_face || key_of[0] != eye_gap_l
                           || key_of[1] != eye_gap_r) {
                 uint32_t gx  = x0 + EYE_TUBE_W;
-                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                uint32_t top = UI_WAVE_FY + EYE_GLOW_TOP;
                 /* Distance from each tube's inner face to the middle of the
                  * gap -- the same for both, which is why the sum is flat. */
                 uint32_t d = EYE_TUBE_G / 2u;
@@ -6943,10 +6959,10 @@ static void ui_draw_dynamic(void)
          * One clear, then one vertical rect per column: ~65 commands, fewer
          * than the bars. */
         if (viz_mode == VIZ_WAVE) {
-            const int32_t ey = (int32_t)(UI_WAVE_H / 2u) - 1;
-            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
+            const int32_t ey = (int32_t)(UI_WAVE_FH / 2u) - 1;
+            const uint32_t cy = UI_WAVE_FY + UI_WAVE_FH / 2u;
 
-            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);      /* zero line */
 
             if (!paused) {
@@ -6971,7 +6987,7 @@ static void ui_draw_dynamic(void)
 
                     uint32_t top = (uint32_t)((int32_t)cy - hi);
                     uint32_t h   = (uint32_t)(hi - lo) + 2u;   /* min 2 px line */
-                    if (top + h > UI_WAVE_Y + UI_WAVE_H) h = UI_WAVE_Y + UI_WAVE_H - top;
+                    if (top + h > UI_WAVE_FY + UI_WAVE_FH) h = UI_WAVE_FY + UI_WAVE_FH - top;
                     uint16_t col = ui_mix(UI_TRACK, ui_accent, c + 1u, WAVE_COLS);
                     fb_rect(x, top, w, h, col);
                 }
@@ -6984,15 +7000,15 @@ static void ui_draw_dynamic(void)
          * bars. The whole trace is redrawn each pass rather than erased point
          * by point, which would double the count for no gain. */
         if (viz_mode == VIZ_SCOPE) {
-            const uint32_t r  = UI_WAVE_H / 2u;          /* usable radius */
+            const uint32_t r  = UI_WAVE_FH / 2u;          /* usable radius */
             const uint32_t cx = UI_MARGIN + ww / 2u;
-            const uint32_t cy = UI_WAVE_Y + r;
+            const uint32_t cy = UI_WAVE_FY + r;
 
-            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
 
             /* Centre cross: without it a quiet passage is an empty box, and
              * there is no way to tell "silent" from "not working". */
-            fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H, UI_TRACK);
+            fb_rect(cx, UI_WAVE_FY, 1, UI_WAVE_FH, UI_TRACK);
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);
 
             if (!paused) {
@@ -7015,8 +7031,8 @@ static void ui_draw_dynamic(void)
                         int32_t py = (int32_t)cy - (sy[k] * ey) / SCOPE_UNIT;
                         if (px < (int32_t)UI_MARGIN ||
                             px + (int32_t)sz > (int32_t)(UI_MARGIN + ww)) continue;
-                        if (py < (int32_t)UI_WAVE_Y ||
-                            py + (int32_t)sz > (int32_t)(UI_WAVE_Y + UI_WAVE_H)) continue;
+                        if (py < (int32_t)UI_WAVE_FY ||
+                            py + (int32_t)sz > (int32_t)(UI_WAVE_FY + UI_WAVE_FH)) continue;
                         fb_rect((uint32_t)px, (uint32_t)py, sz, sz, c);
 
                         /* Newest trace only: drop a point midway to the next
@@ -7029,8 +7045,8 @@ static void ui_draw_dynamic(void)
                             int32_t qy = (int32_t)cy - (((sy[k] + sy[k+1]) / 2) * ey) / SCOPE_UNIT;
                             if (qx >= (int32_t)UI_MARGIN &&
                                 qx + 1 < (int32_t)(UI_MARGIN + ww) &&
-                                qy >= (int32_t)UI_WAVE_Y &&
-                                qy + 1 < (int32_t)(UI_WAVE_Y + UI_WAVE_H))
+                                qy >= (int32_t)UI_WAVE_FY &&
+                                qy + 1 < (int32_t)(UI_WAVE_FY + UI_WAVE_FH))
                                 fb_rect((uint32_t)qx, (uint32_t)qy, 1, 1, c);
                         }
                     }
@@ -7050,11 +7066,11 @@ static void ui_draw_dynamic(void)
             if (lvl_l > lvl_pl) lvl_pl = lvl_l; else if (lvl_pl) lvl_pl--;
             if (lvl_r > lvl_pr) lvl_pr = lvl_r; else if (lvl_pr) lvl_pr--;
 
-            const uint32_t bh = UI_WAVE_H / 3u;          /* bar height */
-            const uint32_t gap = UI_WAVE_H - 2u * bh;    /* space between */
+            const uint32_t bh = UI_WAVE_FH / 3u;          /* bar height */
+            const uint32_t gap = UI_WAVE_FH - 2u * bh;    /* space between */
             uint16_t lit = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
             for (int ch = 0; ch < 2; ch++) {
-                uint32_t y  = UI_WAVE_Y + (ch ? bh + gap : 0u);
+                uint32_t y  = UI_WAVE_FY + (ch ? bh + gap : 0u);
                 uint32_t v  = ch ? lvl_r : lvl_l;
                 uint32_t pk = ch ? lvl_pr : lvl_pl;
                 uint32_t bw = (v  * ww) / 255u;
