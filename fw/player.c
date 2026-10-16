@@ -2928,7 +2928,7 @@ static uint16_t ui_mix(uint16_t a, uint16_t b, uint32_t t, uint32_t n)
  * the screen, which is where fading actually means something.
  *
  * i counts from the LEFT, so i == 0 is the column about to scroll off. */
-#define UI_WAVE_FADE 5u
+#define UI_WAVE_FADE 3u
 static uint16_t ui_age_mix(uint16_t lit, uint32_t i)
 {
     if (i >= UI_WAVE_FADE) return lit;
