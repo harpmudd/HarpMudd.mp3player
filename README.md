@@ -44,7 +44,8 @@ The controls:
 |---|---|
 | **A** | *Tap* — play / pause |
 | **A** | *Hold* — 1.2× speed; hold again for normal |
-| **Start** | Stop — returns to 0:00 |
+| **Start** | *Tap* — stop, returns to 0:00 |
+| **Start** | *Hold* — the controls cheatsheet; **B** closes |
 | **Left** / **Right** | *Tap* — previous / next track |
 | **Left** / **Right** | *Hold* — seek, faster the longer you hold |
 | **Select** + **Left** / **Right** | Seek one second |
@@ -60,6 +61,11 @@ The controls:
 | **Select** + **Down** | Screen blank: off → 1 → 5 → 10 → 30 min |
 | **Select** + **Up** | Sleep timer: off → 15 → 30 → 60 min |
 | **Select** + **Y** | Crossfeed: off → low → high → mono |
+
+**Hold Start** for a list of every button and combo on one screen, so none
+of this has to be remembered. The music keeps playing behind it; **B**
+closes. Because the hold has to be distinguishable from a tap, stopping now
+happens when you let Start go rather than the instant you press it.
 
 Track changes and seeking work while paused or stopped. Changing track takes a
 moment — the file has to be opened, its tag read and its artwork decoded;

@@ -16,6 +16,11 @@ What changed in each release, newest first.
   need. Nothing changes in use.
 - **Meter refinements.** The meters are taller, the bars are wider, and the
   VU meter has been rebuilt to look like a real instrument.
+- **A controls cheatsheet, on a hold of Start.** Every button and combo on
+  one screen, so none of it has to be remembered; **B** closes it and the
+  music carries on behind it. Stopping now happens when you release Start
+  rather than when you press it, so that reaching for the list does not stop
+  the track.
 - **The file format shows as a badge** — **MP3** or **FLAC** — in the corner
   of the track card and of the playlist browser, where the browser's follows
   the cursor. It used to be spelled out in the format row; a FLAC's row now

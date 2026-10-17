@@ -32,6 +32,10 @@ Your key lives in your own browser.
 **Setup guide:**
 <https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html>
 
+**A controls cheatsheet.** **Hold Start** and every button and combo is
+listed on one screen — nineteen of them, no scrolling. **B** closes it, and
+the music keeps playing behind it.
+
 **The file format shows as a badge** — **MP3** or **FLAC** — in the corner
 of the track card and of the playlist browser, where it follows the cursor
 as you scroll.
@@ -47,6 +51,10 @@ base again, and the cassette's label now carries the artist.
 
 **The format row drops the codec name**, which the badge now carries. A
 FLAC's row gives its bit depth on its own.
+
+**Start stops on release rather than on press**, so that holding it for the
+cheatsheet does not stop the track on the way in. In ordinary use the
+difference is not noticeable.
 
 **Lyrics are held in PSRAM**, which is what made room for scrobbling.
 Nothing changes in use.

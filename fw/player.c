@@ -1231,6 +1231,8 @@ static uint8_t  pl_ui_closing;     /* fading out, then restore the player     */
 static uint32_t pl_ui_fade_t0;     /* when the current ramp started            */
 static uint8_t  pl_ui_fade_from;   /* value it started from, for a mid-ramp turn */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
+static uint8_t  ctl_open;          /* controls cheatsheet is up               */
+static uint8_t  ctl_dirty;         /* ... and has not been painted yet        */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
 static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
@@ -5731,6 +5733,103 @@ static void pl_ui_draw(void)
 }
 
 
+/* The controls cheatsheet, on a HOLD of Start.
+ *
+ * Nineteen rows on ONE page -- no cursor, no paging, no scroll position. That
+ * is the whole reason it is worth having, and it was measured before it was
+ * written rather than discovered afterwards: against this font the widest key
+ * label is 155 px and the widest action 156, so two columns at a 15 px pitch
+ * land inside 376x343 with room on every side. A list that needed scrolling
+ * would need state, and state is how an overlay goes wrong.
+ *
+ * The 15 px pitch is one less than the 16 px cell, so each row's background
+ * paints over the row above's last cell line. Harmless: the ink occupies
+ * lines 1..11 of the cell, so nothing visible is ever touched.
+ *
+ * COLD. It is drawn once, when it opens, and has no business competing for
+ * the 4 KB instruction cache the decoders are fighting over.
+ *
+ * Start's own hold is deliberately NOT one of the rows. A line telling you
+ * how to reach the screen you are already looking at helps nobody; the README
+ * and the release notes are where that has to be said. */
+#define CTL_X     12u
+#define CTL_W     376u
+#define CTL_PAD   14u
+#define CTL_PITCH 15u
+#define CTL_TOP   44u                      /* header band above the first row */
+#define CTL_KEYX  (CTL_X + CTL_PAD)
+#define CTL_ACTX  (CTL_KEYX + 167u)        /* 155 px of key plus a 12 px gutter */
+
+static const char *const ctl_rows[] = {
+    "A",               "Play / pause",
+    "A HOLD",          "1.2x speed",
+    "B",               "Restart track",
+    "START",           "Stop",
+    "LEFT / RIGHT",    "Prev / next track",
+    "LEFT/RIGHT HOLD", "Seek",
+    "SELECT + L/R",    "Seek one second",
+    "UP / DOWN",       "Volume",
+    "X",               "Meter",
+    "Y",               "EQ preset",
+    "L / R",           "Accent colour",
+    "SELECT",          "Playlist browser",
+    "SELECT HOLD",     "Album art panel",
+    "SELECT + L",      "Repeat",
+    "SELECT + R",      "Shuffle",
+    "SELECT + UP",     "Sleep timer",
+    "SELECT + DOWN",   "Screen blank",
+    "SELECT + Y",      "Crossfeed / mono",
+    "L + R HOLD",      "Scrobble code",
+};
+#define CTL_N (sizeof(ctl_rows) / sizeof(ctl_rows[0]) / 2u)
+
+UI_COLD static void ctl_draw(void)
+{
+    uint32_t h  = CTL_TOP + CTL_N * CTL_PITCH + 14u;
+    uint32_t y0 = (FB_H - h) / 2u;
+
+    fb_round_rect(CTL_X, y0, CTL_W, h, 8u, UI_PANEL);
+
+    fb_set_color(ui_accent, UI_PANEL);
+    fb_text_clipped(CTL_KEYX, y0 + 14u, "CONTROLS", TS_1X, TS_1X,
+                    CTL_W - 2u * CTL_PAD);
+    {
+        /* Right-aligned, because a reader who does not know how to get OUT of
+         * a screen they opened by accident is the one failure this must not
+         * have. */
+        const char *hint = "B CLOSES";
+        uint32_t hw = fb_text_width(hint, TS_1X);
+        fb_set_color(UI_FAINT, UI_PANEL);
+        fb_text_clipped(CTL_X + CTL_W - CTL_PAD - hw, y0 + 14u, hint,
+                        TS_1X, TS_1X, hw);
+    }
+    /* A rule under the header, so the rows read as a table rather than as
+     * nineteen loose lines under a title. */
+    fb_rect(CTL_KEYX, y0 + 34u, CTL_W - 2u * CTL_PAD, 1u,
+            ui_mix(UI_PANEL, UI_DIM, 1u, 3u));
+
+    for (uint32_t i = 0; i < CTL_N; i++) {
+        uint32_t y = y0 + CTL_TOP + i * CTL_PITCH;
+        fb_set_color(UI_WHITE, UI_PANEL);
+        fb_text_clipped(CTL_KEYX, y, ctl_rows[i * 2u], TS_1X, TS_1X,
+                        CTL_ACTX - CTL_KEYX - 4u);
+        fb_set_color(UI_DIM, UI_PANEL);
+        fb_text_clipped(CTL_ACTX, y, ctl_rows[i * 2u + 1u], TS_1X, TS_1X,
+                        CTL_X + CTL_W - CTL_PAD - CTL_ACTX);
+    }
+}
+
+/* Playback is NOT paused while this is up, unlike the QR code -- that one has
+ * to pause, because scanning takes both hands and a while. A cheatsheet is
+ * glanced at mid-track and the music should carry on behind it. */
+UI_COLD static void ctl_close(void)
+{
+    ctl_open      = 0u;
+    ui_last_sec   = 0xFFFFFFFFu;    /* force the clock and format rows back */
+    ui_last_info  = 0xFFFFFFFFu;
+    pl_ui_restore = 1u;             /* the repaint path the QR overlay uses */
+}
+
 /* Where a line must be split so its first row fits `maxw`, or 0 if it fits
  * whole. Breaks at the last SPACE before the limit so words stay intact --
  * breaking mid-word is worse than clipping, because it reads as corruption
@@ -6092,6 +6191,10 @@ static void ui_draw_dynamic(void)
      * the overlay; all that stops is drawing.
      *
      * Drawn once, on the flag, not per frame. */
+    if (ctl_open) {
+        if (ctl_dirty) { ctl_dirty = 0u; ctl_draw(); }
+        return;
+    }
     if (qr_ui_open) {
         if (qr_ui_dirty) { qr_ui_dirty = 0u; qr_ui_draw(); }
         return;
@@ -8692,6 +8795,15 @@ static void poll_input(void)
      * so nothing downstream also acts on them. Select is deliberately left in
      * `keys`/`fall`: its tap-to-close is the same code that opened it, and its
      * hold timer reads `keys` directly. */
+    /* The cheatsheet owns the whole pad while it is up: B closes it and
+     * everything else is swallowed, so reading the controls cannot change a
+     * setting. `keys` is cleared too, which also disarms the Start hold that
+     * opened it -- see the disarm in the Start block. */
+    if (ctl_open) {
+        if (edge & KEY_B) ctl_close();
+        edge = 0; fall = 0; keys = 0;
+    }
+
     /* The code owns the WHOLE pad while it is up -- a user holding a phone at
      * the screen must not be able to skip a track by fumbling the d-pad. The
      * triggers are left in `keys` so the hold that closes it can be seen; B
@@ -8916,6 +9028,28 @@ static void poll_input(void)
             eq_apply = 1u;
         }
     }
+    /* Start: TAP stops, HOLD brings up the controls cheatsheet.
+     *
+     * The stop moved from the press to the RELEASE, and it had to: the press
+     * is also the start of the hold, so leaving the stop there would halt the
+     * music every time someone reached for the cheatsheet. This is the
+     * discipline A and Left/Right already use -- the tap resolves on release
+     * and is suppressed when the hold has already fired.
+     *
+     * SPEED_HOLD_MS (1 s) rather than PL_HOLD_MS (400 ms). 400 is short
+     * enough that an unhurried press meaning "stop" would open the sheet
+     * instead, and getting a screenful of text when you wanted silence is a
+     * worse miss than having to hold a beat longer.
+     *
+     * The DEBUG_DIAG readouts stay on the PRESS and deliberately do not arm
+     * the hold: they are Select combos, they never ship, and a developer
+     * poking at a diagnostic is not about to hold the button for a second
+     * first. */
+    {
+    static uint32_t st_t0;
+    static uint8_t  st_fired, st_armed;
+    const uint32_t  st_hold_cy = CLK_HZ / 1000u * SPEED_HOLD_MS;
+
     if (edge & KEY_START) {
 #if DEBUG_DIAG
         /* Seek state, live. Kept after the hold-to-seek fault: that took five
@@ -8985,10 +9119,26 @@ static void poll_input(void)
             ui_toast_set(b, 0xFFFFFFFFu, 0);
         } else
 #endif
-        if (!stopped) {
-            stopped = 1u; paused |= 1u; stop_req = 1u;
-        }
+        { st_t0 = cycles(); st_fired = 0; st_armed = 1u; }
     }
+
+    if ((keys & KEY_START) && st_armed && !st_fired &&
+        (int32_t)(cycles() - st_t0) >= (int32_t)st_hold_cy) {
+        st_fired  = 1;
+        ctl_open  = 1u;
+        ctl_dirty = 1u;
+    }
+
+    if ((fall & KEY_START) && st_armed && !st_fired && !stopped) {
+        stopped = 1u; paused |= 1u; stop_req = 1u;
+    }
+
+    /* AFTER both actions, for the reason the A block spells out: on the
+     * release pass `keys` has already lost START while `fall` still carries
+     * it, so disarming first would eat every ordinary tap. */
+    if (!(keys & KEY_START)) st_armed = 0u;
+    }
+
     if (edge & KEY_B) {
 #if DEBUG_DIAG
         if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
