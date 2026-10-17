@@ -1,7 +1,35 @@
 # Release notes
 
-What each release adds, fixes and changes, newest first. Written for people
-using the core: what you will notice and what to press, not how it is built.
+What changed in each release, newest first.
+
+## v1.8.0 — 17 October 2026
+
+- **Scrobbling to Last.fm.** The player now keeps track of what you have
+  listened to and shows it as a QR code — hold both shoulder buttons. Scan it
+  with your phone and a web page submits the plays to your account. Long
+  sessions split across several codes; **Left** and **Right** move between
+  them. Needs a Last.fm API key of your own, which takes about two minutes to
+  set up once and is explained in the
+  [guide](https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html).
+- **Lyrics moved to PSRAM**, which is what made room for scrobbling. They
+  are parsed as a track loads rather than held in the block RAM the decoders
+  need. Nothing changes in use.
+- **Meter refinements.** The meters are taller and the bars wider, the VU
+  meter has a new needle and dial face, and the magic eye is bigger.
+- **A controls cheatsheet, on a hold of Start.** Every button and combo on
+  one screen; **B** closes it. Stop now happens when you release Start
+  rather than when you press it.
+- **The file format shows as a badge** — **MP3** or **FLAC** — in the corner
+  of the track card and of the playlist browser, where the browser's follows
+  the cursor. It used to be spelled out in the format row; a FLAC's row now
+  gives its bit depth on its own.
+- Fixed: **elapsed time stopped while the screen was blanked**, and did not
+  catch up when the screen came back. Blanking is off unless you switch it on
+  with **Select** + **Down**, so most people will never have seen it.
+- Fixed: **album art stored without a description field showed COVER
+  ERROR** when the picture was perfectly fine.
+- Fixed: **switching to the lyrics meter mid-track sometimes said NO
+  LYRICS** on a track that has them.
 
 ## v1.7.0 — 12 October 2026
 

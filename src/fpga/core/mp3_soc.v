@@ -162,7 +162,14 @@ module mp3_soc #(
     output reg          psr_wr,
     input  wire [15:0]  psr_rdata,
     input  wire         psr_avail,
-    input  wire         psr_busy
+    input  wire         psr_busy,
+
+    // Wall clock from APF. core_bridge_cmd has always produced these and
+    // nothing ever read them; the scrobble log needs a real timestamp, and
+    // seconds since boot is not one -- a play logged this morning would
+    // submit with this evening's time.
+    input  wire [31:0]  rtc_epoch,
+    input  wire         rtc_ok
 );
 
     // ---------------------------------------------------------------- CPU ---
@@ -392,7 +399,10 @@ module mp3_soc #(
                      R_DT_ADDR = 8'h60, R_DT_DATA = 8'h64,
                      R_EQ      = 8'h68, R_SET_IDX = 8'h6C,
                      R_SET_DAT = 8'h70, R_PSR_ADDR= 8'h74,
-                     R_PSR_DATA= 8'h78, R_PSR_ST  = 8'h7C;
+                     R_PSR_DATA= 8'h78, R_PSR_ST  = 8'h7C,
+                     // mmio_reg is {dADR[5:0],2'b00}, so 0x80..0xFC are the
+                     // thirty-two offsets nothing has claimed yet.
+                     R_RTC     = 8'h80;
 
     // Bitstream/firmware interlock. Firmware compares this against its own
     // expected value and refuses to run on a mismatch.
@@ -405,7 +415,7 @@ module mp3_soc #(
     // a mismatched pair would run WRONG rather than merely degraded, which is
     // what rev 22 is: clk_sys moved and every timing constant moved with it, so
     // the wrong pairing plays 11% off pitch and says nothing.
-    localparam [31:0] CORE_VERSION = 32'h4D503318;   // "MP3" + rev 24 (native 24/32px cells)
+    localparam [31:0] CORE_VERSION = 32'h4D503319;   // "MP3" + rev 25 (RTC readable)
 
     wire [7:0] mmio_reg = {dADR[5:0], 2'b00};   // byte offset within MMIO page
 
@@ -600,6 +610,9 @@ module mp3_soc #(
             R_PSR_ADDR: mmio_rdata = {10'd0, psr_addr};
             R_PSR_DATA: mmio_rdata = {16'd0, psr_hold};
             R_PSR_ST:  mmio_rdata = {30'd0, psr_ready, psr_busy};
+            // Zero when APF says the clock is not set, so firmware has one
+            // value to test rather than two registers to read.
+            R_RTC:     mmio_rdata = rtc_ok ? rtc_epoch : 32'd0;
             R_STAT0:   mmio_rdata = status0;
             R_STAT1:   mmio_rdata = status1;
             R_STAT2:   mmio_rdata = status2;

@@ -29,7 +29,7 @@
 
 static void lrc_clear(void)
 {
-    lrc_n = 0; lrc_synced = 0; lrc_text[0] = 0;
+    lrc_n = 0; lrc_synced = 0; lrc_set(0, 0);
     /* INVALIDATE THE METER'S REDRAW GATE, which is keyed on the line index.
      *
      * A new track starts at line 0, and a track with no sidecar also sits at
@@ -71,11 +71,11 @@ static uint32_t lrc_read_raw(void)
         if (!n) break;
 
         step = want;
-        for (uint32_t k = 0; k < n; k++) lrc_text[got + k] = (char)tagbuf[k];
+        for (uint32_t k = 0; k < n; k++) lrc_set(got + k, (char)tagbuf[k]);
         got += n;
         if (n < want) break;                        /* short read = tail */
     }
-    lrc_text[got] = 0;
+    lrc_set(got, 0);
     return got;
 }
 
@@ -104,11 +104,11 @@ static void lrc_parse(uint32_t len)
     uint32_t i = 0;
 
     while (i < len && lrc_n < LRC_LINES) {
-        while (i < len && (lrc_text[i] == '\n' || lrc_text[i] == '\r')) i++;
+        while (i < len && (lrc_get(i) == '\n' || lrc_get(i) == '\r')) i++;
         if (i >= len) break;
 
         uint32_t a = i;
-        while (i < len && lrc_text[i] != '\n' && lrc_text[i] != '\r') i++;
+        while (i < len && lrc_get(i) != '\n' && lrc_get(i) != '\r') i++;
         uint32_t b = i;
 
         /* STEP PAST THE TERMINATOR BEFORE the NUL is written over it below.
@@ -123,37 +123,37 @@ static void lrc_parse(uint32_t len)
          * first lyric for the whole song. */
         if (i < len) i++;
 
-        while (b > a && lrc_text[b - 1u] == ' ') b--;
+        while (b > a && lrc_get(b - 1u) == ' ') b--;
 
         uint32_t t = LRC_NOTIME, p = a;
-        while (p + 1u < b && lrc_text[p] == '[') {
+        while (p + 1u < b && lrc_get(p) == '[') {
             uint32_t q = p + 1u, mm = 0, ss = 0, cs = 0;
             int ok = 0;
-            if (lrc_text[q] >= '0' && lrc_text[q] <= '9') {
-                while (q < b && lrc_text[q] >= '0' && lrc_text[q] <= '9')
-                    mm = mm * 10u + (uint32_t)(lrc_text[q++] - '0');
-                if (q < b && lrc_text[q] == ':') {
+            if (lrc_get(q) >= '0' && lrc_get(q) <= '9') {
+                while (q < b && lrc_get(q) >= '0' && lrc_get(q) <= '9')
+                    mm = mm * 10u + (uint32_t)(lrc_get(q++) - '0');
+                if (q < b && lrc_get(q) == ':') {
                     q++;
-                    while (q < b && lrc_text[q] >= '0' && lrc_text[q] <= '9')
-                        ss = ss * 10u + (uint32_t)(lrc_text[q++] - '0');
+                    while (q < b && lrc_get(q) >= '0' && lrc_get(q) <= '9')
+                        ss = ss * 10u + (uint32_t)(lrc_get(q++) - '0');
                     ok = 1;
                     /* The fractional part, which used to be skipped along with
                      * everything else up to the ']'. Both `.` and `:` appear as
                      * the separator in the wild. One digit means tenths
                      * already; two means centiseconds. */
-                    if (q < b && (lrc_text[q] == '.' || lrc_text[q] == ':')) {
+                    if (q < b && (lrc_get(q) == '.' || lrc_get(q) == ':')) {
                         q++;
                         uint32_t d = 0;
                         while (q < b && d < 2u &&
-                               lrc_text[q] >= '0' && lrc_text[q] <= '9') {
-                            cs = cs * 10u + (uint32_t)(lrc_text[q++] - '0');
+                               lrc_get(q) >= '0' && lrc_get(q) <= '9') {
+                            cs = cs * 10u + (uint32_t)(lrc_get(q++) - '0');
                             d++;
                         }
                         if (d == 1u) cs *= 10u;
                     }
                 }
             }
-            while (q < b && lrc_text[q] != ']') q++;
+            while (q < b && lrc_get(q) != ']') q++;
             if (q >= b) break;
             q++;
             if (ok && t == LRC_NOTIME) {
@@ -166,12 +166,12 @@ static void lrc_parse(uint32_t len)
             }
             p = q;
         }
-        while (p < b && lrc_text[p] == ' ') p++;
+        while (p < b && lrc_get(p) == ' ') p++;
 
         if (p < b) {
             lrc_off[lrc_n] = (uint16_t)p;
             lrc_sec[lrc_n] = (uint16_t)t;
-            lrc_text[b]    = 0;
+            lrc_set(b, 0);
             lrc_n++;
         }
     }
@@ -227,6 +227,20 @@ static uint32_t lrc_index_for(uint32_t t10)
 /* Defined further down player.c than this include sits, same reason the
  * FLAC and playlist declarations are hoisted. */
 static uint32_t id3_len(const uint8_t *b);
+
+/* u8_put() writes through a char *, which PSRAM cannot be. Same encoder and
+ * the same bounds check, one byte at a time through lrc_set(). */
+static uint32_t u8_put_lrc(uint32_t o, uint32_t cap, uint32_t cp)
+{
+    static const unsigned char lead[5] = { 0, 0, 0xC0, 0xE0, 0xF0 };
+    uint32_t k = (cp < 0x80u) ? 1u : (cp < 0x800u) ? 2u : (cp < 0x10000u) ? 3u : 4u;
+    if (o + k >= cap) return o;
+    if (k == 1u) { lrc_set(o, (char)cp); return o + 1u; }
+    uint32_t sh = 6u * (k - 1u);
+    lrc_set(o++, (char)(lead[k] | (cp >> sh)));
+    while (sh) { sh -= 6u; lrc_set(o++, (char)(0x80u | ((cp >> sh) & 0x3Fu))); }
+    return o;
+}
 
 /* Decode a USLT body into lrc_text as UTF-8, a tag-buffer window at a time.
  *
@@ -285,22 +299,22 @@ static uint32_t lrc_uslt_decode(uint32_t pos, uint32_t len)
             off += 2u;
             if (!u) break;
             if (u >= 0xD800u && u < 0xE000u) { if (u < 0xDC00u) off += 2u; u = '?'; }
-            o2 = u8_put(lrc_text, out, LRC_TEXT_MAX, u);
+            o2 = u8_put_lrc(out, LRC_TEXT_MAX, u);
         } else {
             uint8_t c = tagbuf[off++];
             if (!c) break;
             if (enc == 3u) {              /* already UTF-8: copy verbatim */
                 if (out + 1u >= LRC_TEXT_MAX) break;
-                lrc_text[out] = (char)c;
+                lrc_set(out, (char)c);
                 o2 = out + 1u;
             } else {
-                o2 = u8_put(lrc_text, out, LRC_TEXT_MAX, c);
+                o2 = u8_put_lrc(out, LRC_TEXT_MAX, c);
             }
         }
         if (o2 == out) break;
         out = o2;
     }
-    lrc_text[out] = 0;
+    lrc_set(out, 0);
     return out;
 }
 
@@ -341,14 +355,40 @@ static uint32_t lrc_tag_load(void)
     return 0;
 }
 
-/* Called from load_track(). Silent when there is no sidecar -- most tracks will
+/* Called from load_track(), and from the meter cycle when the lyrics view is
+ * arrived at mid-track. Silent when there is no sidecar -- most tracks will
  * not have one, and that is not a failure worth reporting. */
 static void lrc_load(void)
 {
     lrc_clear();
 
-    char path[96];
-    slot_filename(path, sizeof(path));
+    /* THE NAME COMES FROM track_file, NOT from slot_filename().
+     *
+     * slot_filename() asks APF nothing. It re-parses whatever 0190 response is
+     * sitting in the datatable right now -- "the longest run of filename text
+     * in the struct IS the name". Inside load_track() that is safe:
+     * read_track_head() runs slot_file_id() a few hundred lines earlier and
+     * nothing issues another 0190 in between, so the response describes the
+     * track.
+     *
+     * On the LAZY path it is not safe, and this is the bug it caused: two
+     * background polls take turns owning that response area during playback.
+     * The track poll fires every 2 s with a GETFILE on the MP3 slot, which is
+     * the right answer; pl_name_read() fires every 3 s with a GETFILE on the
+     * PLAYLIST slot, which is not. They are deliberately staggered 2 against 3
+     * so they do not collide, so whichever ran most recently decided what this
+     * function thought the track was called. When the playlist won, the sidecar
+     * asked for was playlist.lrc, the open failed, the ID3 fallback found
+     * nothing on a FLAC, and the meter drew NO LYRICS on a track that has them
+     * -- about as often as not, and only a track change cleared it, because
+     * that is the one path with a fresh 0190 in front of it.
+     *
+     * track_file is the copy slot_id_query(1) already captured at load time:
+     * the same bytes, from the same parser, taken at the one moment they are
+     * guaranteed to be the track's. It is also 160 bytes against the 96 this
+     * function used to allocate, so a deep folder no longer truncates the
+     * filename off the end of its own path. */
+    const char *path = track_file;
     if (!path[0]) return;
 
     /* Last component only. pl_open_try() supplies the directory from the MP3

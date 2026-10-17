@@ -73,6 +73,9 @@
 #define R_PSR_ADDR  0x80000074u   /* W: word address  R: current address    */
 #define R_PSR_DATA  0x80000078u   /* W: data + start write  R: last read    */
 #define R_PSR_ST    0x8000007Cu   /* W: start a read  R: {ready, busy}      */
+/* Wall clock from APF, rev 25. UTC seconds, or 0 when the Pocket's clock is
+ * not set -- one value to test rather than a second validity register. */
+#define R_RTC       0x80000080u   /* R: UTC epoch seconds, 0 = no clock     */
 #define PSR_BUSY(s)  ((s) & 1u)
 #define PSR_READY(s) ((s) & 2u)
 
@@ -227,12 +230,12 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
  * every timer wrong and NOTHING on screen to say so -- silent wrongness is
  * exactly what this exists to prevent. And the failure mode is no longer a
  * black screen: ui_mismatch_screen() now says what happened and what to do. */
-#define EXPECT_VERSION 0x4D503318u   /* rev 24: native 24/32px font cells  */
+#define EXPECT_VERSION 0x4D503319u   /* rev 25: the RTC is readable        */
 
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.7.0"
+#define APP_VER "1.8.0"
 /* Dev builds say so ON SCREEN. The default is DEV, and a release has to
  * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
  * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
@@ -759,6 +762,7 @@ static uint32_t file_pos;       /* next byte offset to fetch from the file   */
 static uint32_t ring_fill;      /* valid bytes currently in the ring         */
 static uint32_t ring_rd;        /* read cursor within the ring               */ /* stream format, known only once decoding starts */
 static uint32_t ui_info_y;            /* where chrome left room for the format line */
+static uint32_t ui_badge_w;           /* codec chip's width, so the row clips short */
 static uint32_t ui_last_info, ui_last_prog, ui_pause_next, ui_breath, ui_icon_next;
 static uint32_t ui_arr_t, ui_wave_force, ui_accent_changed;
 
@@ -1227,6 +1231,8 @@ static uint8_t  pl_ui_closing;     /* fading out, then restore the player     */
 static uint32_t pl_ui_fade_t0;     /* when the current ramp started            */
 static uint8_t  pl_ui_fade_from;   /* value it started from, for a mid-ramp turn */
 static uint8_t  pl_ui_restore;     /* overlay closed: repaint the player      */
+static uint8_t  ctl_open;          /* controls cheatsheet is up               */
+static uint8_t  ctl_dirty;         /* ... and has not been painted yet        */
 static uint16_t pl_ui_drawn_pos = 0xFFFFu;  /* pl_pos as last drawn           */
 static uint16_t pl_ui_mq_off;      /* bytes scrolled off, on a char boundary  */
 static uint8_t  pl_ui_mq_back;     /* 1 = returning to the start              */
@@ -1462,6 +1468,7 @@ static uint8_t pl_restore_pending = 1u;
  * load_track() ends with paused = 0, so a successful switch clears it; the
  * completion branch clears it too, for the paths that never get that far. */
 #define PAUSE_LOAD 4u
+#define PAUSE_QR   8u     /* the scrobble code is being built or shown */
 static uint8_t  menu_was;         /* the OS menu was open on the last poll      */
 static uint32_t menu_at;          /* cycles() when the OS menu was last open    */
 
@@ -1936,6 +1943,24 @@ static uint8_t  dg_n, dg_samp, dg_fe, dg_live;
  *     EXTRA_CFLAGS=-DUI_SHOW_LOAD_TIMES=1 bash fw/build.sh
  * which is the whole point of a measurement flag -- an investigation should
  * not need a source edit that then has to be remembered and reverted. */
+/* Microseconds the last lyrics repaint took, end to end. Added to settle
+ * whether moving lrc_text into PSRAM is perceptible: the staging is modelled
+ * at ~0.3 ms, which should be invisible, and a model is not a measurement.
+ *     EXTRA_CFLAGS="-DLRC_TRACE=1 -Os" bash fw/build.sh */
+/* Watch the scrobble threshold on hardware. Shows how many plays the session
+ * holds, how many seconds of this track have been DECODED, and what it needs.
+ *     EXTRA_CFLAGS="-DSCROBBLE_TRACE=1 -Os" bash fw/build.sh */
+#ifndef SCROBBLE_TRACE
+#define SCROBBLE_TRACE 0
+#endif
+
+#ifndef LRC_TRACE
+#define LRC_TRACE 0
+#endif
+#if LRC_TRACE
+static uint32_t lrc_us, lrc_us_max;
+#endif
+
 #ifndef UI_SHOW_LOAD_TIMES
 #define UI_SHOW_LOAD_TIMES 0
 #endif
@@ -1984,7 +2009,12 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
  *   toast     UI_TOAST_Y
  *   progress  UI_PROG_Y
  */
-#define UI_WAVE_N   36u
+/* 24, down from 36. At 36 a bar is ww/36 minus the gap -- 8 px at full
+ * width and only 4 beside the album art, which reads as a comb rather
+ * than a bar meter. 24 gives 13 px and 8. The array is the scroll
+ * history too, so this is also how much of the recent past the meter
+ * shows. */
+#define UI_WAVE_N   24u
 #define UI_WAVE_Y   173u
 #define UI_WAVE_H   72u
 /* Rows ABOVE the meter box that a meter is allowed to use.
@@ -2001,6 +2031,19 @@ static uint32_t io_bench_bytes;   /* ...and how much it managed to read      */
  * erased nor restored -- the restore copies horizontally from a stash column
  * on the SAME row, and those rows had never been painted. */
 #define UI_WAVE_TOP 24u
+/* The FULL meter box: the band plus the rows reserved above it.
+ *
+ * 149..245, 96 tall, against the short box's 173..245. Every meter
+ * should be drawing into this; the cassette and the lyrics view always
+ * did, and the other ten were squeezed into 72 px for no reason beyond
+ * never having been changed.
+ *
+ * UI_WAVE_Y and UI_WAVE_H are deliberately NOT redefined. ART_Y is
+ * derived from them, so moving them would drag the album art up with
+ * the meters, and the clear, the stash and ui_bg_restore are already
+ * written in terms of UI_WAVE_TOP. */
+#define UI_WAVE_FY  (UI_WAVE_Y - UI_WAVE_TOP)   /* 149 */
+#define UI_WAVE_FH  (UI_WAVE_H + UI_WAVE_TOP)   /* 96  */
 #define UI_WAVE_GAP 2u
 #define UI_TRANSPORT_Y 262u
 #define UI_TIME_Y   288u
@@ -2022,6 +2065,12 @@ static uint32_t ui_last_vu    = 0xFFFFFFFFu;
 static uint32_t ui_last_pause = 0xFFFFFFFFu;
 static uint32_t ui_last_stall;
 static uint32_t ui_last_spd = 0xFFFFFFFFu;   /* speed-branch diag row */
+#if SCROBBLE_TRACE
+static uint32_t ui_last_scr = 0xFFFFFFFFu;
+#endif
+#if LRC_TRACE
+static uint32_t ui_last_lrc = 0xFFFFFFFFu;
+#endif
 #if FIFO_DEFICIT
 static uint32_t ui_last_def = 0xFFFFFFFFu;   /* FIFO deficit row, 1 Hz */
 #endif
@@ -2089,13 +2138,206 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
 #define LRC_WRAP_MAX  3u
 #define LRC_NOTIME    0xFFFFu
 
-static char     lrc_text[LRC_TEXT_MAX];
+/* lrc_text LIVES IN PSRAM, like pl_text and for the same reason: it is 3,584
+ * bytes of a 256 KB RAM that can never grow. 87% of this device's block RAM is
+ * already that one array, and the next size up needs 64 more M10K against the
+ * 14 that are free.
+ *
+ * Safe because it is COLD, which is the only thing that makes a 21.7-cycle
+ * access affordable. lrc_drawn gates the lyrics repaint, so the text is read
+ * when the SUNG LINE changes -- a few times a minute, not at frame rate. The
+ * parse at load touches every byte a couple of times, about 3.5 ms against a
+ * load already north of a second.
+ *
+ * ONE BYTE PER 16-BIT WORD, as pl_text does. The parse NUL-terminates lines in
+ * place, so packing two to a word would put a read-modify-write under every
+ * one of those stores for no gain this part's size makes necessary.
+ *
+ * Based above pl_text's 12,288 words. */
+#define LRC_PSR_BASE 16384u
+static inline char lrc_get(uint32_t i)
+{
+    return (char)(uint8_t)psr_read16(LRC_PSR_BASE + i);
+}
+static inline void lrc_set(uint32_t i, char c)
+{
+    psr_write16(LRC_PSR_BASE + i, (uint16_t)(uint8_t)c);
+}
+
 static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
 static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
 static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
 static uint16_t lrc_n;                  /* lines parsed                       */
+
+/* ===================================================== SCROBBLE LOG (phase A)
+ *
+ * A session's worth of plays, kept in PSRAM, for export later. Capture only:
+ * nothing is shown and nothing leaves the device yet.
+ *
+ * WHAT QUALIFIES is Last.fm's rule, not one of our own -- a track longer than
+ * 30 seconds, played to at least half its length or four minutes, whichever
+ * comes first. Logged AT the threshold rather than at the end, so a track
+ * abandoned after it still counts, which is what the rule means.
+ *
+ * MEASURED IN DECODED SECONDS, not position. ui_sec is the obvious candidate
+ * and the wrong one: a seek sets it, so seeking to 80% of a track would
+ * qualify it instantly without a note being heard. scr_played only ever
+ * advances where a frame was actually decoded.
+ *
+ * IN PSRAM because it is cold -- one record written per track, read once at
+ * export -- and because the CPU's 256 KB cannot grow. One byte per 16-bit
+ * word, as pl_text and lrc_text do.
+ *
+ * The timestamp is seconds since boot for now. Last.fm wants UTC epoch and
+ * rtc_epoch_seconds is already wired into core_top, unused; exposing it is
+ * one MMIO register and an interlock bump, and that is phase B. The field is
+ * 32 bits either way, so nothing here changes when it lands.
+ *
+ * Volatile by nature: PSRAM does not survive a power cycle, which is why this
+ * is a SESSION log and the UI will have to say so. */
+#define SCR_PSR_BASE 24576u     /* words, clear of lrc_text's 16,384..19,967 */
+#define SCR_MAX      128u       /* records -- a long session, not a library  */
+#define SCR_REC      176u       /* words per record, one byte per word       */
+#define SCR_TI_OFF   4u
+#define SCR_TI_LEN   64u
+#define SCR_AR_OFF   68u
+#define SCR_AR_LEN   56u
+#define SCR_AL_OFF   124u
+#define SCR_AL_LEN   52u
+
+static uint16_t scr_n;          /* records held this session       */
+static uint16_t scr_seen;       /* scr_n when the code was last shown */
+/* Seconds since boot, ticked once a second by ui_clock_pump() whatever else
+ * is going on. It used to be incremented inside ui_blank_pump(), which
+ * returns early unless the screen-blank timeout is switched on -- and that
+ * defaults to off and is not persisted. So the "only free-running second in
+ * the core" was, for almost every user, permanently zero. */
+static uint32_t scr_uptime;     /* seconds since boot, 1 Hz        */
+
+/* APF sends the real-time clock ONCE, as bridge command 0x0090 --
+ * core_bridge_cmd.v says so in as many words: "it is not continuously
+ * updated". R_RTC therefore reads back the instant the core was LAUNCHED and
+ * never moves again.
+ *
+ * Reading it per track, which is what the first version of this did, stamped
+ * every play in a session with the launch time: all identical, and drifting
+ * further from the truth the longer you listened. The wall clock has to be
+ * that one fixed anchor PLUS the seconds elapsed since it was taken.
+ *
+ * The anchor is latched on the first read that returns non-zero rather than
+ * at boot, because 0x0090 arrives as a bridge command some time after the
+ * core starts and reads before it land as zero. */
+static uint32_t rtc_base;       /* epoch seconds at the anchor     */
+static uint32_t rtc_base_up;    /* scr_uptime when it was taken    */
+static uint8_t  rtc_have;
+/* Epoch seconds now, or 0 when the Pocket has no clock set. */
+static uint32_t rtc_now(void)
+{
+    if (!rtc_have) {
+        uint32_t t = REG(R_RTC);
+        if (!t) return 0;               /* not delivered yet, or unset */
+        rtc_have    = 1u;
+        rtc_base    = t;
+        rtc_base_up = scr_uptime;
+    }
+    return rtc_base + (scr_uptime - rtc_base_up);
+}
+static uint32_t scr_played;     /* seconds of THIS track decoded   */
+static uint32_t scr_start;      /* scr_uptime when it started      */
+static uint8_t  scr_done;       /* this track already logged       */
+static uint8_t  scr_epoch;      /* scr_start is UTC, not uptime    */
+
+/* Copy a C string into a fixed field, NUL-terminated and never overrunning. */
+static void scr_field(uint32_t w, const char *t, uint32_t cap)
+{
+    psr_seek(w);
+    uint32_t i = 0;
+    while (i + 1u < cap && t[i]) { psr_put((uint16_t)(uint8_t)t[i]); i++; }
+    psr_put(0);
+}
+
+static void scr_log(void)
+{
+    if (scr_n >= SCR_MAX) return;        /* full: keep the FIRST of a session */
+    uint32_t b = SCR_PSR_BASE + (uint32_t)scr_n * SCR_REC;
+    psr_seek(b);
+    psr_put((uint16_t)( scr_start        & 0xFFu));
+    psr_put((uint16_t)((scr_start >>  8) & 0xFFu));
+    psr_put((uint16_t)((scr_start >> 16) & 0xFFu));
+    psr_put((uint16_t)((scr_start >> 24) & 0xFFu));
+    scr_field(b + SCR_TI_OFF, track_title,  SCR_TI_LEN);
+    scr_field(b + SCR_AR_OFF, track_artist, SCR_AR_LEN);
+    scr_field(b + SCR_AL_OFF, track_album,  SCR_AL_LEN);
+    scr_n++;
+}
+
+/* One decoded second of the current track. */
+static void scr_second(void)
+{
+    scr_played++;
+    if (scr_done || track_secs < 30u) return;
+    uint32_t want = track_secs / 2u;
+    if (want > 240u) want = 240u;        /* four minutes caps it */
+    if (scr_played >= want) { scr_log(); scr_done = 1u; }
+}
+
+/* Real time where the Pocket has it, uptime where it does not.
+ *
+ * What R_RTC carries is the owner's LOCAL time as an epoch -- APF passes the
+ * Pocket's own clock through with no zone attached. It is NOT UTC, and
+ * nothing down here can make it UTC: the core has no idea what zone it is
+ * in. Last.fm reads every timestamp as UTC, so the conversion has to happen
+ * where the zone is known, which is the phone; docs/scrobble/ does it with
+ * the browser's own offset. Said plainly because the obvious reading of
+ * "epoch seconds" is UTC, and acting on that put every scrobble four hours
+ * early.
+ *
+ * R_RTC reads 0 when APF says the clock is unset, which is the only case the
+ * uptime fallback is for; the export then anchors those against when they
+ * were scanned, and says so.
+ *
+ * scr_epoch distinguishes the two for whatever reads the log. */
+static void scr_track_start(void)
+{
+    scr_played = 0;
+    scr_done   = 0;
+    uint32_t t = rtc_now();
+    scr_epoch  = t ? 1u : 0u;
+    scr_start  = t ? t : scr_uptime;
+}
+
+
+/* A staging copy of the one line a caller needs RIGHT NOW: PSRAM cannot hand
+ * out a char *, and the wrap and row code both want one. 256 bytes to free
+ * 3,584 of them, and the same device plt_name uses.
+ *
+ * Sized against what can actually be shown: LRC_WRAP_MAX is 3 rows and a row
+ * holds 80 characters, so nothing beyond 240 reaches the screen however long
+ * the line is. The buffer is SHARED and overwritten per call -- both callers
+ * consume it immediately. */
+static char lrc_line[256];
+/* The index currently staged. lrc_rows() and lrc_emit() are called back to
+ * back on the SAME line by the backward layout loop, so without this every
+ * line above the sung one is fetched from PSRAM twice. 0xFFFF on any change
+ * that invalidates the text. */
+static uint16_t lrc_line_idx = 0xFFFFu;
+static const char *lrc_line_at(uint32_t idx)
+{
+    if (idx == lrc_line_idx) return lrc_line;
+    lrc_line_idx = (uint16_t)idx;
+    psr_seek(LRC_PSR_BASE + lrc_off[idx]);
+    uint32_t j = 0;
+    while (j + 1u < sizeof(lrc_line)) {
+        char c = (char)(uint8_t)psr_next();
+        lrc_line[j] = c;
+        if (!c) return lrc_line;
+        j++;
+    }
+    lrc_line[j] = 0;
+    return lrc_line;
+}
 static uint8_t  lrc_synced;             /* at least one real timestamp        */
 static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
 static void     lrc_load(void);
@@ -2229,7 +2471,10 @@ static uint8_t  vu_shown_l, vu_shown_r;   /* deflection currently drawn   */
 /* Sized to the last pixel of the meter box: pip on row 0, plinth ending on
  * row 71 of 72. Growing either dimension again means taking it from the
  * plinth or the dome, not from spare space -- there is none. */
-#define EYE_TUBE_H  62u
+/* 76, up from 62. The box is 96 now and the tube is anchored to its
+ * BASE rather than its top, so the extra height is glass rather than a gap
+ * above the plinth. */
+#define EYE_TUBE_H  76u
 /* The plinth. Overlaps the tube's last row on purpose -- those rows are socket
  * shadow, so the glass reads as seated IN the base rather than balanced on it,
  * which is how the photographed pair sits. Wider than the tubes now that the
@@ -2265,7 +2510,7 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * keep the rect count down; the ramp moves well under one level across four
  * rows, so stepping it there is not visible where a flat fill was. */
 #define EYE_GLOW_RX    72u        /* how far the light reaches outward    */
-#define EYE_GLOW_RY    20u        /* ...and half how tall the pool is     */
+#define EYE_GLOW_RY    25u        /* ...and half how tall the pool is     */
 #define EYE_GLOW_NB     9u        /* bands across that reach -- 8px each  */
 #define EYE_GLOW_S      4u        /* rows per quantised strip             */
 #define EYE_GLOW_STEPS  6u        /* intensity steps                      */
@@ -2276,13 +2521,17 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * span left up to 54 rows of the previous position on screen -- seen as a
  * faint line above the light. Self-erasing only works if the repainted area
  * does not move, so the area is the union and the rest is painted bed. */
-#define EYE_GLOW_TOP   16u        /* first row of that band, from the box  */
+/* From the TUBE, not from the box. It was measured off the box top back
+ * when the tube sat three rows below it; now the tube is anchored to the
+ * base instead, so a box-relative band leaves the light floating above the
+ * glass it is supposed to be coming from. */
+#define EYE_GLOW_TOP   13u        /* first row of that band, from the TUBE */
 /* Spans the whole box. Shortening it to clear the plinth was tried and looked
  * worse: the pools reach 72px past each tube while the base is 102px wide, so
  * the light was chopped flat in mid-air either side of it rather than stopping
  * at anything. On the base's OWN rows the pools skip its 8px of overhang
  * instead, which is the only part they would otherwise paint over. */
-#define EYE_GLOW_ROWS  56u        /* rows 16..71                            */
+#define EYE_GLOW_ROWS  (EYE_TUBE_H - 14u)   /* down to the base plate     */
 /* The GAP between the tubes is lit by BOTH of them, and leaving it dark was
  * the one place the illusion broke: two lamps 10px apart cannot leave the
  * space between them the darkest thing on the panel.
@@ -2295,7 +2544,7 @@ static uint8_t  eye_shown_l, eye_shown_r;  /* strip height currently lit   */
  * It stops ABOVE the plinth. The gap sits over the middle of the base plate,
  * and painting the bed there would chew a notch out of it -- the same fault
  * the overhanging plinth had at its ends. */
-#define EYE_GAP_ROWS   48u        /* rows of the gap that are lit          */
+#define EYE_GAP_ROWS   (EYE_GLOW_ROWS - 8u) /* stops above the plinth     */
 /* POSITION and BRIGHTNESS come from different places, and that split is the
  * point.
  *
@@ -2329,6 +2578,11 @@ static uint32_t eye_glow_rx(uint32_t dy)
 }
 
 
+
+/* Cold code: runs once, and link.ld places .coldtext after everything the
+ * decode path touches. Always pair it with noinline -- the section attribute
+ * on its own does not stop GCC inlining the body back into a hot caller. */
+#define UI_COLD __attribute__((section(".coldtext"), noinline))
 
 /* Needle angle, -50 to +50 degrees from vertical in 16 steps: a 100 degree
  * sweep, which is what a real VU movement travels. The first attempt built one
@@ -2391,7 +2645,11 @@ static unsigned char lvl_l, lvl_r, lvl_pl, lvl_pr;
  * 9 and never pegs. */
 #define LED_ROWS 12u
 #define LED_GAPV 1u
-#define LED_BLKH (UI_WAVE_H / LED_ROWS - LED_GAPV)     /* 5 px */
+/* Derived from the FULL box, so twelve rows fill it exactly: 96/12 - 1
+ * is 7 px against the 5 it was at 72. Left on UI_WAVE_H the ladder
+ * would have stayed 72 px tall and sat in the taller box with a gap
+ * above it. */
+#define LED_BLKH (UI_WAVE_FH / LED_ROWS - LED_GAPV)    /* 7 px */
 #define SPEC_GAPX 3u                                   /* between columns */
 
 /* ---- OCTAVE FILTER BANK -----------------------------------------------
@@ -2661,6 +2919,25 @@ static uint16_t ui_mix(uint16_t a, uint16_t b, uint32_t t, uint32_t n)
     return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
+/* Age shading, confined to the TRAILING EDGE.
+ *
+ * The scrolling meters used to ramp their colour linearly across every
+ * column -- ui_mix(UI_TRACK, lit, i + 1, UI_WAVE_N) -- so a column was only
+ * at full strength at the very right and the dimming was obvious from the
+ * middle of the meter outward. That reads as half the display being darker
+ * than the other half rather than as decay.
+ *
+ * Full strength everywhere except the last few columns before a bar leaves
+ * the screen, which is where fading actually means something.
+ *
+ * i counts from the LEFT, so i == 0 is the column about to scroll off. */
+#define UI_WAVE_FADE 3u
+static uint16_t ui_age_mix(uint16_t lit, uint32_t i)
+{
+    if (i >= UI_WAVE_FADE) return lit;
+    return ui_mix(UI_TRACK, lit, i + 1u, UI_WAVE_FADE + 1u);
+}
+
 /* Top of the background ramp, tinted toward the user's accent. Recomputed
  * whenever the accent changes; the bottom stays black. */
 static uint16_t ui_grad_top_c = UI_GRAD_TOP;
@@ -2826,7 +3103,7 @@ static void ui_bg_restore(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     if (!w || !h) return;
     if (!ui_bg_ready) {
-        for (uint32_t yy = UI_WAVE_Y - UI_WAVE_TOP;
+        for (uint32_t yy = UI_WAVE_FY;
              yy < UI_WAVE_Y + UI_WAVE_H; yy++)
             fb_rect(UI_BG_X, yy, UI_BG_W, 1, ui_grad_at(yy));
         ui_bg_ready = 1;
@@ -3038,6 +3315,422 @@ static char *ui_hex2(char *p, uint8_t v)
     return p;
 }
 
+#include "qrcodegen.h"
+
+/* ===================================================== SCROBBLE EXPORT ====
+ *
+ * Hold BOTH triggers to put the session on screen as one QR code. A phone
+ * reads it and opens a page that submits the plays to Last.fm. The Pocket has
+ * no network, so a camera is the lightest thing that can carry the data to
+ * something that has one.
+ *
+ * VERSION 23 is the ceiling and the SCREEN sets it: 109 modules plus the
+ * mandatory four-module quiet zone each side is 117, and 117 x 3 px = 351,
+ * the largest that fits in 360. Three pixels a module is about 0.55 mm on the
+ * panel, which is what a phone camera needs -- proven by scanning the PNG
+ * that tools/host/qr_check.py renders at exactly this scale from exactly this
+ * encoder. Two px/module would buy a bigger payload and has never been shown
+ * to scan.
+ *
+ * That holds 1,091 bytes. Measured against real tag lengths by
+ * tools/host/qr_check.py, that is 23 plays at ~45 bytes each -- 1,046 of
+ * the 1,091 -- and a 24th does not fit. Past that the
+ * OLDEST are dropped rather than the version being raised: a denser code
+ * scans worse, and a code that will not scan carries nothing at all.
+ *
+ * Both buffers are sized by the library's own macro rather than a literal, so
+ * a change of QR_VER cannot silently under-allocate them.
+ */
+#define QR_VER   19u
+#define QR_CAP   792u           /* byte-mode payload at version 19, ECC L */
+#define QR_PX    3u             /* pixels per module */
+#define QR_MODS  (4u * QR_VER + 17u)            /* 93 */
+#define QR_SIDE  (QR_MODS * QR_PX)              /* 279 px of code  */
+#define QR_QUIET (4u * QR_PX)                   /* 12 px, four modules */
+#define QR_FIELD (QR_SIDE + 2u * QR_QUIET)      /* 303 px of white */
+/* Equal to SCR_MAX on purpose, so the record cap is the ONLY limit.
+ *
+ * How many plays a code carries is a BYTE budget, not a song count: 727
+ * bytes after the URL and header. Short ASCII tags pack 23; a worst-case
+ * record is 367 bytes -- both PSRAM fields full of characters that
+ * percent-encode to three bytes each -- which is one per code. A library
+ * tagged in a non-Latin script sits near that end, and at 16 pages the tail
+ * of a long session would simply be unreachable, which is the defect paging
+ * was added to remove. The walk is O(scr_n) however many pages it finds, so
+ * the generous bound is free. */
+#define QR_PAGES_MAX 128u
+
+/* VERSION 19, and the screen chose it.
+ *
+ * At 3 px a module -- the density a phone camera needs, proven by scanning
+ * the PNG tools/host/qr_check.py renders -- a version-23 code plus its quiet
+ * zone is 351 px of a 360 px panel. That left nine pixels, and the smallest
+ * text cell is sixteen, so the first version of this screen could say
+ * nothing at all: no page number, no count, nothing.
+ *
+ * Paging is what made a smaller code possible, and a smaller code is what
+ * made room to describe it. Version 19 is 93 modules, 303 px with its quiet
+ * zone, and carries 792 bytes -- about 16 plays. Eight pages covers the 128
+ * a session can hold, where one version-23 code reached 23 and the rest were
+ * simply unreachable.
+ *
+ * Both buffers are sized by the library's own macro rather than a literal,
+ * so a change of QR_VER cannot silently under-allocate them.
+ */
+
+/* Every byte of the export lives in its own sections, which link.ld places
+ * AFTER everything else. This is not tidiness, it is the fix for a measured
+ * regression: the caches are 4 KB DIRECT-MAPPED, so where code sits decides
+ * what evicts what, and dropping ten kilobytes into the middle of .text moved
+ * the whole FLAC path onto a layout that thrashed. FLAC went from 15% idle to
+ * 0 and the audio broke up; MP3, with a tighter working set, barely moved.
+ *
+ * Anything added here must carry QR_COLD, or it lands in the middle of .text
+ * again and the next person gets to re-bisect this. */
+#define QR_COLD __attribute__((section(".qrtext")))
+
+/* Ordinary .bss. A named section here would come out PROGBITS -- GCC only
+ * treats .bss* as NOBITS -- and the zeroes would be baked into the ROM, which
+ * put the image up at 220 KB when this was first written. Measured: .bss
+ * position does not affect the decode path anyway; it was the CODE ahead of
+ * it that mattered. */
+static uint8_t  qr_out[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
+static uint8_t  qr_dat[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
+
+static uint8_t  qr_ui_open, qr_ui_dirty;
+static uint8_t  qr_page, qr_pages;      /* 0-based index, total       */
+static uint16_t qr_first, qr_shown;     /* first record and count     */
+
+/* Where the scan lands. The payload rides in the FRAGMENT, so it is never
+ * sent to the server -- the page decodes it in the browser, and the listening
+ * history does not touch anyone's logs on the way past.
+ *
+ * A PROJECT pages URL, because that is the one that can exist: GitHub serves
+ * harpmudd.github.io/<repo>/ from a repo that is already public, where a bare
+ * harpmudd.github.io needs a user-pages repo of that exact name which there
+ * is none of. */
+#define QR_URL "https://harpmudd.github.io/HarpMudd.mp3player/scrobble/#"
+
+QR_COLD static uint32_t qr_puts(uint32_t o, const char *s)
+{
+    while (*s && o < QR_CAP) qr_dat[o++] = (uint8_t)*s++;
+    return o;
+}
+
+/* Percent-encoding, and it is not optional.
+ *
+ * The first version of this separated fields with a tab and records with a
+ * newline, which is unambiguous and completely wrong for the medium: a QR
+ * scanner hands the phone a STRING and the phone has to recognise a URL in
+ * it. Whitespace ends a URL. A tab or a newline truncates the payload at the
+ * first record, and so does the space in "The Only One I Know" -- which is to
+ * say, on the very first track anybody would test with. */
+QR_COLD static uint32_t qr_putenc(uint32_t o, uint8_t c)
+{
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+        c == '~' || c == '!' || c == '(' || c == ')' || c == ',') {
+        if (o < QR_CAP) qr_dat[o++] = c;
+    } else if (c == ' ') {
+        if (o < QR_CAP) qr_dat[o++] = '+';
+    } else {
+        static const char hx[] = "0123456789ABCDEF";
+        if (o + 2u < QR_CAP) {
+            qr_dat[o++] = '%';
+            qr_dat[o++] = (uint8_t)hx[c >> 4];
+            qr_dat[o++] = (uint8_t)hx[c & 15u];
+        } else {
+            o = QR_CAP;          /* no room: force the caller to roll back */
+        }
+    }
+    return o;
+}
+
+QR_COLD static uint32_t qr_putu(uint32_t o, uint32_t v)
+{
+    char t[12];
+    uint32_t n = 0;
+    do { t[n++] = (char)('0' + v % 10u); v /= 10u; } while (v);
+    while (n && o < QR_CAP) qr_dat[o++] = (uint8_t)t[--n];
+    return o;
+}
+
+/* One PSRAM string field. Tab and newline were the separators once and are
+ * now impossible by construction -- qr_putenc escapes everything that is not
+ * plainly safe in a URL fragment, the '*' and ';' separators included. */
+QR_COLD static uint32_t qr_putf(uint32_t o, uint32_t w, uint32_t cap)
+{
+    psr_seek(w);
+    for (uint32_t i = 0; i + 1u < cap && o < QR_CAP; i++) {
+        uint8_t c = (uint8_t)psr_next();
+        if (!c) break;
+        o = qr_putenc(o, c);
+    }
+    return o;
+}
+
+/* Fill qr_dat with as many records as fit, starting at `from`. Returns the
+ * index of the first record that did NOT fit, and writes the payload length
+ * through `len`.
+ *
+ * Packing runs OLDEST first, so page 1 is the start of the session and the
+ * pages read in the order the music was played. The old single-code build
+ * did the opposite -- it kept the newest and dropped the oldest, which meant
+ * anything beyond the last 23 plays could never be got off the device at
+ * all. */
+QR_COLD static uint32_t qr_pack(uint32_t from, uint32_t *len)
+{
+    uint32_t o = qr_puts(0, QR_URL);
+    o = qr_puts(o, "1*");
+    o = qr_putu(o, scr_n);
+    o = qr_puts(o, scr_epoch ? "*1;" : "*0;");
+
+    uint32_t i = from;
+    for (; i < scr_n; i++) {
+        uint32_t b = SCR_PSR_BASE + (uint32_t)i * SCR_REC;
+        uint32_t mark = o;
+        psr_seek(b);
+        uint32_t t =  (uint32_t)(psr_next() & 0xFFu);
+        t |= (uint32_t)(psr_next() & 0xFFu) << 8;
+        t |= (uint32_t)(psr_next() & 0xFFu) << 16;
+        t |= (uint32_t)(psr_next() & 0xFFu) << 24;
+        o = qr_putu(o, t);
+        o = qr_puts(o, "*");
+        o = qr_putf(o, b + SCR_TI_OFF, SCR_TI_LEN);
+        o = qr_puts(o, "*");
+        o = qr_putf(o, b + SCR_AR_OFF, SCR_AR_LEN);
+        o = qr_puts(o, ";");
+        if (o >= QR_CAP) { o = mark; break; }   /* this one did not fit */
+    }
+    *len = o;
+    return i;
+}
+
+/* How many codes the session needs. Cheap: PSRAM reads and byte copies, no
+ * encoding, and at most 128 records. */
+QR_COLD static void qr_count_pages(void)
+{
+    uint32_t i = 0, len;
+    qr_pages = 0;
+    while (i < scr_n && qr_pages < QR_PAGES_MAX) {
+        uint32_t next = qr_pack(i, &len);
+        if (next == i) break;          /* one record too big to ever fit */
+        i = next;
+        qr_pages++;
+    }
+    if (!qr_pages) qr_pages = 1u;
+}
+
+/* ---- the panel ------------------------------------------------------- */
+#define QRP_X   UI_MARGIN                        /* 20  */
+#define QRP_W   UI_INNER_W                       /* 360 */
+#define QRP_Y   5u
+#define QRP_PAD 10u
+#define QRP_GAP 8u
+#define QRP_CAP_H FB_CELL(TS_1X)                 /* 16 */
+#define QRP_H   (QRP_PAD + QR_FIELD + QRP_GAP + QRP_CAP_H + QRP_PAD)
+#define QRF_X   (QRP_X + (QRP_W - QR_FIELD) / 2u)
+#define QRF_Y   (QRP_Y + QRP_PAD)
+#define QRC_Y   (QRF_Y + QR_FIELD + QRP_GAP)     /* caption row */
+
+/* A page arrow: a solid triangle, the same shape language as the playlist's
+ * play marker. Dimmed rather than hidden at the ends of the range, so the
+ * caption never changes width and the page number never moves. */
+QR_COLD static void qr_arrow(uint32_t x, uint32_t y, int right, uint16_t c)
+{
+    const uint32_t h = 9u;                       /* odd, so it has a point */
+    for (uint32_t i = 0; i < h; i++) {
+        uint32_t w = (i < h / 2u ? i : h - 1u - i) + 1u;
+        uint32_t px = right ? x : x + (h / 2u + 1u) - w;
+        fb_rect(px, y + i, w, 1u, c);
+    }
+}
+
+/* Runs of dark modules become ONE rect each. A version-19 code is 8,649
+ * modules; a rect per module is 8,649 draw commands, where runs bring a
+ * typical code to roughly fifteen hundred. */
+QR_COLD static void qr_ui_draw(void)
+{
+    ui_gradient();
+
+    /* The card, on the gradient, with the same corner radius the rest of the
+     * core uses for panels -- fb_round_rect cuts its corners back to the
+     * ramp, so it sits on the background instead of punching a hole in it. */
+    fb_round_rect(QRP_X, QRP_Y, QRP_W, QRP_H, 10u, UI_PANEL);
+
+    /* The white field, with softer corners, cut to the PANEL rather than the
+     * gradient. Radius 6 against a 12 px quiet zone: the cut never reaches
+     * within 6 px of where a finder pattern starts, so the code stays
+     * readable and only the white border is rounded. */
+    fb_round_rect_on(QRF_X, QRF_Y, QR_FIELD, QR_FIELD, 6u, UI_WHITE, UI_PANEL);
+
+    int n = qrcodegen_getSize(qr_out);
+    uint32_t x0 = QRF_X + QR_QUIET, y0 = QRF_Y + QR_QUIET;
+    for (int y = 0; y < n; y++) {
+        int x = 0;
+        while (x < n) {
+            if (!qrcodegen_getModule(qr_out, x, y)) { x++; continue; }
+            int run = 1;
+            while (x + run < n && qrcodegen_getModule(qr_out, x + run, y)) run++;
+            fb_rect(x0 + (uint32_t)x * QR_PX, y0 + (uint32_t)y * QR_PX,
+                    (uint32_t)run * QR_PX, QR_PX, 0x0000u);
+            x += run;
+        }
+    }
+
+    /* Caption: page position, then what is actually in this code. The total
+     * is only worth the width when there is more than one page. */
+    char b[48], *q = b;
+    q = ui_dec(q, (uint32_t)qr_page + 1u);
+    *q++ = '/';
+    q = ui_dec(q, qr_pages);
+    /* Plain spaces. A middot sat here first, and it is NOT in the base
+     * font -- 0x20..0x7E -- so it would have come from the extended
+     * font, which is an optional asset: without mp3font.bin fb_resolve
+     * falls back to '?' and the chrome reads as a bug. */
+    *q++ = ' '; *q++ = ' '; *q++ = ' '; *q++ = ' ';
+    q = ui_dec(q, qr_shown);
+    if (qr_pages > 1u) {
+        const char *p = " OF ";
+        while (*p) *q++ = *p++;
+        q = ui_dec(q, scr_n);
+    }
+    {
+        const char *p = (qr_shown == 1u && qr_pages == 1u) ? " PLAY" : " PLAYS";
+        while (*p) *q++ = *p++;
+    }
+    *q = 0;
+
+    uint32_t w = fb_text_width(b, TS_1X);
+    fb_set_color(UI_DIM, UI_PANEL);
+    fb_text_clipped(QRP_X + ((QRP_W > w) ? (QRP_W - w) / 2u : 0u),
+                    QRC_Y, b, TS_1X, TS_1X, QRP_W);
+
+    /* Arrows at the panel edges, so Left and Right read as the way to move
+     * between codes. Accent when there is somewhere to go, UI_TRACK when
+     * there is not -- the same "available / unavailable" pair the transport
+     * row uses. */
+    qr_arrow(QRP_X + 16u, QRC_Y + 4u, 0,
+             qr_page ? ui_accent : UI_TRACK);
+    qr_arrow(QRP_X + QRP_W - 16u - 5u, QRC_Y + 4u, 1,
+             (qr_page + 1u < qr_pages) ? ui_accent : UI_TRACK);
+}
+
+/* Closing repaints the player through the playlist's own restore path, which
+ * already exists to put back everything an overlay covered. The two display
+ * caches have to be invalidated by hand: both hold the value last DRAWN, and
+ * the clock in particular would otherwise wait up to a second to reappear. */
+/* A QR finder pattern in miniature -- the square-in-square that sits in
+ * three corners of every code. It is the most recognisable eight pixels in
+ * the whole format, so the badge looks like the thing it is pointing at
+ * rather than like a generic dot. 1 px ring, 2 px gap, 3 px centre.
+ *
+ * QR_COLD even though this draws once a second on the player, and
+ * deliberately: the hot decode path is laid out around a 4 KB direct-mapped
+ * cache, and putting 150 bytes of new code in the middle of .text is exactly
+ * what cost FLAC its headroom last time. One call a second into the cold
+ * section costs at most a cache miss nobody can hear. */
+QR_COLD __attribute__((noinline))
+static void scr_badge(uint16_t cbg)
+{
+    char sb[8], *q = sb;
+    q = ui_dec(q, scr_n);
+    *q = 0;
+
+    uint16_t c  = (scr_n > scr_seen) ? ui_accent : UI_FAINT;
+    uint32_t tw = fb_text_width(sb, TS_1X);
+    uint32_t rt = FB_W - UI_MARGIN
+                - (speed_fast ? fb_text_width("1.2x", TS_1X) + 12u : 0u);
+    uint32_t x  = rt - tw - 3u - 9u;
+    uint32_t y  = UI_TIME_Y + (FB_CELL(TS_24) - 9u) / 2u;
+
+    fb_rect(x - 3u, UI_TIME_Y, tw + 18u, FB_CELL(TS_24), cbg);
+
+    /* The square-in-square from three corners of every QR code: 1 px ring,
+     * 2 px gap, 3 px centre. The most recognisable eight pixels in the
+     * format, so the badge looks like the thing it points at. */
+    fb_rect(x,      y,      9u, 9u, c);
+    fb_rect(x + 1u, y + 1u, 7u, 7u, cbg);
+    fb_rect(x + 3u, y + 3u, 3u, 3u, c);
+
+    fb_set_color(c, cbg);
+    fb_text_clipped(x + 12u,
+                    UI_TIME_Y + (FB_CELL(TS_24) > FB_CELL(TS_1X)
+                               ? (FB_CELL(TS_24) - FB_CELL(TS_1X)) / 2u : 0u),
+                    sb, TS_1X, TS_1X, tw + 2u);
+}
+
+QR_COLD static void qr_ui_close(void)
+{
+    /* Everything logged so far has now been on screen. The badge goes quiet
+     * until something new is played, which is what makes it mean "there is
+     * something to scan" rather than merely "this feature exists". */
+    scr_seen      = scr_n;
+    qr_ui_open    = 0u;
+    paused &= ~(uint32_t)PAUSE_QR;
+    ui_last_sec   = 0xFFFFFFFFu;
+    ui_last_info  = 0xFFFFFFFFu;
+    pl_ui_restore = 1u;
+}
+
+/* Encode one page. The slow half, and slow enough to need handling rather
+ * than a comment. MEASURED on the target toolchain under tools/rv32sim.py,
+ * a full version-23 code:
+ *
+ *     qrcodegen_Mask_AUTO   51,782,147 instr   1282 ms
+ *     qrcodegen_Mask_0       5,850,520 instr    145 ms
+ *
+ * AUTO is 89% mask trials: it applies all eight, scores each over the whole
+ * grid, and unapplies them. Pinning the mask skips the scoring entirely. Any
+ * mask is spec-legal -- the score only picks the most robust of eight -- and
+ * tools/host/qr_check.py renders the sample PNG through this same fixed
+ * mask, so what the user scanned is what the Pocket draws. Version 19 is
+ * smaller again, roughly two thirds of the modules.
+ *
+ * It still cannot run with the audio going: pcm_fifo is AW(11), 2048
+ * samples, which is 46 ms at 44.1 kHz. A blocking encode would drain it
+ * several times over and underrun. So playback takes its own pause bit for
+ * as long as the code is up, which also covers paging -- every Left and
+ * Right re-encodes, and none of it is audible. The bit is separate from the
+ * user's, so closing the code cannot start music that was already paused
+ * when they opened it. */
+QR_COLD static int qr_show_page(uint8_t page)
+{
+    uint32_t i = 0, len = 0;
+    for (uint8_t k = 0; k < page; k++) i = qr_pack(i, &len);
+    uint32_t next = qr_pack(i, &len);
+
+    qr_first = (uint16_t)i;
+    qr_shown = (uint16_t)(next - i);
+    if (!len || !qr_shown) return 0;
+
+    if (!qrcodegen_encodeBinary(qr_dat, (size_t)len, qr_out,
+                                qrcodegen_Ecc_LOW,
+                                (int)QR_VER, (int)QR_VER,
+                                qrcodegen_Mask_0, false))
+        return 0;
+
+    qr_page     = page;
+    qr_ui_dirty = 1u;
+    return 1;
+}
+
+QR_COLD static void qr_ui_toggle(void)
+{
+    if (qr_ui_open) { qr_ui_close(); return; }
+    if (!scr_n) { ui_toast_msg("NOTHING TO SCROBBLE YET"); return; }
+
+    paused |= PAUSE_QR;
+    qr_count_pages();
+    if (!qr_show_page(0)) {
+        paused &= ~(uint32_t)PAUSE_QR;
+        ui_toast_msg("COULD NOT BUILD THE CODE");
+        return;
+    }
+    qr_ui_open  = 1u;
+    ui_toast_t0 = 0;            /* 0 means inactive; a toast would sit on it */
+}
+
 /* Drawn ONCE per track load (from load_track(), after title/artist are
  * parsed) -- static chrome, never touched again until the next track. */
 /* Fill the stash with a placeholder until real cover art is decoded into it.
@@ -3128,7 +3821,7 @@ static void ui_wave_clear(void)
      * that. */
     ui_meter_faces_invalidate();
 
-    for (uint32_t y = UI_WAVE_Y - UI_WAVE_TOP;
+    for (uint32_t y = UI_WAVE_FY;
          y < UI_WAVE_Y + UI_WAVE_H && y < FB_H; y++)
         fb_rect(UI_MARGIN, y, UI_INNER_W, 1, ui_grad_at(y));
     for (uint32_t i = 0; i < UI_WAVE_N; i++) { wave_drawn[i] = 0xFFu; wave_pk_drawn[i] = 0xFFu;
@@ -3396,6 +4089,125 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 
 static void pl_ui_draw(void);   /* defined with the overlay, below */
 
+/* The codec name as a chip in the card's bottom-right corner.
+ *
+ * The format row reads "1016 kbps - 44.1 kHz - FLAC 16-bit". Of those three
+ * fields the codec is the only one that is a CATEGORY rather than a
+ * measurement, and a chip says that at a glance where a third dash-separated
+ * clause has to be read to the end. So the name comes out of the row and the
+ * numbers stay. On an MP3 the row never carried the word at all -- it carries
+ * the LAME version -- so there the badge is new information rather than a
+ * move.
+ *
+ * ANCHORED TO THE CARD, not to ui_info_y. The title auto-fits between 1.5x
+ * and 2x, so the format row's y moves from track to track; the card's corner
+ * does not, and the corner is what the eye uses to place a thing like this.
+ * Anchoring to the row would make the badge jump a line between one track and
+ * the next.
+ *
+ * An OUTLINE, not a filled block: the fill is the card's own colour and only
+ * the 1 px edge and the text carry it. A filled chip at this size reads as a
+ * button -- as something to press -- which on a screen with no pointer is a
+ * lie. Drawn with fb_round_rect_on rather than fb_round_rect because it sits
+ * ON the panel: fb_round_rect cuts its corners to ui_grad_at() and would put
+ * four holes of background gradient inside the card.
+ *
+ * Returns its width, so the format row can clip short of it. */
+/* A ONE-PIXEL rounded outline.
+ *
+ * Not two nested fb_round_rect_on calls, which is what this was and why the
+ * chip came out as four disconnected segments. fb_round_rect fills the whole
+ * rectangle and only then repaints the corner cuts, so an inner call is a
+ * plain square as far as the corners are concerned: it erased the outer arc
+ * and left holes exactly where a box needs to turn. Four straight lines with
+ * nothing joining them is what reads as "drawn out of ASCII".
+ *
+ * So the ring is walked directly. Same integer corner search fb_round_rect
+ * uses, so the curve matches the card's; `run` carries the horizontal step
+ * between one row's inset and the row above it, which is what keeps the arc
+ * connected instead of dotted. */
+static void ui_chip_outline(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t r, uint16_t col)
+{
+    uint32_t cut0 = 0, prev;
+    {
+        uint32_t inner = 0;
+        while ((inner + 1u) * (inner + 1u) + r * r <= r * r) inner++;
+        cut0 = r - inner;
+    }
+    fb_rect(x + cut0, y, w - 2u * cut0, 1, col);
+    fb_rect(x + cut0, y + h - 1u, w - 2u * cut0, 1, col);
+
+    prev = cut0;
+    for (uint32_t i = 1u; i < r; i++) {
+        uint32_t dy = r - i, inner = 0, cut, run;
+        while ((inner + 1u) * (inner + 1u) + dy * dy <= r * r) inner++;
+        cut = r - inner;
+        run = (prev > cut) ? prev - cut : 1u;
+        fb_rect(x + cut,             y + i,             run, 1, col);
+        fb_rect(x + w - cut - run,   y + i,             run, 1, col);
+        fb_rect(x + cut,             y + h - 1u - i,    run, 1, col);
+        fb_rect(x + w - cut - run,   y + h - 1u - i,    run, 1, col);
+        prev = cut;
+    }
+    fb_rect(x,          y + r, 1, h - 2u * r, col);
+    fb_rect(x + w - 1u, y + r, 1, h - 2u * r, col);
+}
+
+#define BADGE_PADX  3u               /* text inset, left and right          */
+#define BADGE_GAP   8u               /* clear space the format row leaves   */
+#define BADGE_INSET 8u               /* from the card's right edge          */
+#define BADGE_DROP  8u               /* from the card's bottom edge         */
+
+/* The chip itself, placed by its BOTTOM-RIGHT corner.
+ *
+ * Right-and-bottom rather than top-left because that corner is the one that
+ * stays put: the label is 52 px for FLAC and 41 for MP3, and anchoring by the
+ * left edge would make the box grow leftward out of its corner. Two callers
+ * now -- the ID3 card and the playlist browser -- and they agree on
+ * everything but where that corner is and what colour to use. */
+static uint32_t ui_chip_draw(const char *lbl, uint32_t right, uint32_t bottom,
+                             uint16_t col)
+{
+    uint32_t tw = fb_text_width(lbl, TS_1X);
+    uint32_t h  = FB_CELL(TS_1X) + 1u;      /* 11 rows of ink, 3 clear each side */
+    /* -1 because fb_text_width sums ADVANCES, and the last glyph's advance
+     * carries its right side bearing -- 2 px on both C and 3, measured off a
+     * 1:1 capture. Without it the chip sits a pixel wider on the right than
+     * on the left for no reason the eye can account for. */
+    uint32_t w  = tw + 2u * BADGE_PADX - 1u;
+    uint32_t x  = right - w;
+    uint32_t y  = bottom - h;
+
+    /* TEXT FIRST, outline over it. fb_text_clipped paints the whole 16 px cell
+     * as background, and the cell has to sit 3 px down to centre the ink in an
+     * 18 px chip -- far enough that its last row would land on the bottom
+     * edge. Drawing the edge afterwards settles that, and the row the cell
+     * spills below the chip is card-coloured anyway, so it is invisible. */
+    fb_set_color(col, UI_PANEL);
+    fb_text_clipped(x + BADGE_PADX, y + 2u, lbl, TS_1X, TS_1X, tw);
+    ui_chip_outline(x, y, w, h, 3u, col);
+    return w;
+}
+
+/* The card's chip: the format the DECODER reported, in the colour of the
+ * format row directly above it. UI_FAINT rather than UI_DIM because the chip
+ * restates that row's last field and belongs at that row's weight -- a step
+ * brighter made it the loudest thing in the card.
+ *
+ * The card is drawn at (UI_MARGIN - 8, UI_TITLE_Y - 14) and is ui_text_w + 16
+ * by UI_CARD_H; derived from those rather than restated, so moving the card
+ * moves the chip with it. Anchored to the CARD and not to ui_info_y: the
+ * title auto-fits between 1.5x and 2x, so the format row's y moves from track
+ * to track while the corner does not. */
+static uint32_t ui_codec_badge(void)
+{
+    uint32_t card_r = (UI_MARGIN - 8u) + ui_text_w + 16u;
+    uint32_t card_b = (UI_TITLE_Y - 14u) + UI_CARD_H;
+    return ui_chip_draw((track_fmt == FMT_FLAC) ? "FLAC" : "MP3",
+                        card_r - BADGE_INSET, card_b - BADGE_DROP, UI_FAINT);
+}
+
 static void ui_draw_chrome(void)
 {
     /* Draw nothing at all while blanked -- a track change must not light the
@@ -3539,6 +4351,10 @@ static void ui_draw_chrome(void)
     }
 
     ui_info_y    = y;
+    /* After the rows, so it paints over the card rather than under whatever
+     * the last row left -- and after track_fmt is known, which it is:
+     * load_track() calls read_track_head() before it calls this. */
+    ui_badge_w   = ui_codec_badge();
     ui_last_info = 0xFFFFFFFFu;
     und1_sec     = 0xFFFFFFFFu;   /* the latch is per TRACK, not per boot */
     und2_sec     = 0xFFFFFFFFu;
@@ -3700,6 +4516,57 @@ static void ui_splash_title(uint32_t f, uint32_t den)
     fb_text_clipped(UI_MARGIN, UI_TITLE_Y, "MP3 PLAYER", sc, sc, UI_INNER_W);
 }
 
+/* ---- title shine -------------------------------------------------------
+ *
+ * A highlight that travels along "MP3 PLAYER" while the card is being read.
+ *
+ * Per GLYPH, not per pixel. Text goes through fb_text_clipped and there is
+ * no way to vary colour inside a cell, so each character is drawn on its
+ * own at an accumulated x and tinted by its distance from the highlight.
+ * Ten characters is coarse, but with the highlight three wide and falling
+ * off either side the eye reads a sweep rather than letters taking turns.
+ *
+ * No erase pass, for the reason the loading dots give: a glyph cell paints
+ * its own background, so redrawing a character over itself leaves no gap
+ * for scanout to catch. The boot fade had to be capped at 33 steps because
+ * it refilled the whole CARD first; this touches only the glyphs.
+ *
+ * Free: it runs on the splash, where nothing is decoding, and it rides the
+ * 30 Hz tick the dots already use rather than adding a timer.
+ *
+ * The pass is longer than the title so there is a pause between sweeps --
+ * once `pos` walks past the end every character is plain accent again, and
+ * no special case is needed to hold it there. */
+#define SHINE_TXT   "MP3 PLAYER"
+#define SHINE_LEN   10            /* characters in it                      */
+#define SHINE_SPAN   3            /* how many each side the highlight lits  */
+/* ONE pass, not a loop. A highlight that keeps going reads as a busy
+ * indicator; one that crosses once and stops reads as the title arriving.
+ * At SHINE_END the highlight has cleared the last character -- every glyph
+ * is back to plain accent -- so stopping there needs no final repaint. */
+#define SHINE_END   (SHINE_LEN + 2 * SHINE_SPAN)
+
+static uint32_t shine_t;
+
+static void ui_splash_shine(int32_t pos)
+{
+    uint32_t sc = fb_text_fit_native(SHINE_TXT, UI_INNER_W);
+    uint32_t x  = UI_MARGIN;
+    for (int32_t i = 0; i < SHINE_LEN; i++) {
+        char one[2]; one[0] = SHINE_TXT[i]; one[1] = 0;
+        uint32_t w = fb_text_width(one, sc);
+        int32_t d = i - pos;
+        if (d < 0) d = -d;
+        uint16_t c = (d >= SHINE_SPAN)
+                   ? ui_accent
+                   : ui_mix(ui_accent, UI_WHITE,
+                            (uint32_t)(SHINE_SPAN - d), (uint32_t)SHINE_SPAN);
+        fb_set_color(c, UI_PANEL);
+        fb_text_clipped(x, UI_TITLE_Y, one, sc, sc, w + 2u);
+        x += w;
+    }
+}
+
 static void ui_splash_card(uint32_t f, uint32_t den)
 {
     ui_splash_bg();
@@ -3764,7 +4631,14 @@ static void ui_splash(void)
  * came to 16 bytes over the link guard and was set aside rather than shrink a
  * memory guard to fit an animation. The work is on the branch; revisit it when
  * there is room. */
-#define WV_STEP    3u
+/* ONE column a frame, down from three.
+ *
+ * Three was chosen against 36 bars, where it swept in over 12 frames. The
+ * bar count is 24 now, so the same step finished in 8 -- about a fifth of a
+ * second, which is faster than the eye reads as a sweep at all. At one
+ * column a frame the fill takes 24 frames, two thirds of a second, and the
+ * ongoing scroll is sedate rather than frantic. */
+#define WV_STEP    1u
 
 #define WV_BODY   53u    /* percent of full height the body settles around */
 #define WV_PULL   18u    /* body is pulled back toward it by /this per frame */
@@ -3791,7 +4665,7 @@ static void ui_wave_gen(void)
 
     /* Body. One RNG draw, mean-reverting toward WV_BODY. */
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
-    int32_t body = (int32_t)((UI_WAVE_H * WV_BODY) / 100u);
+    int32_t body = (int32_t)((UI_WAVE_FH * WV_BODY) / 100u);
     /* Multiply-shift instead of modulo. A 0..N range from the top bits of the
      * RNG is as uniform as the remainder for this purpose, and it drops a
      * __umodsi3 call from a loop that runs 64 times a frame. */
@@ -3800,7 +4674,7 @@ static void ui_wave_gen(void)
                  - (int32_t)WV_DRIFT
                  - ((int32_t)wv_level - body) / (int32_t)WV_PULL;
     if (lv < (int32_t)WV_FLOOR)   lv = (int32_t)WV_FLOOR;
-    if (lv > (int32_t)UI_WAVE_H)  lv = (int32_t)UI_WAVE_H;
+    if (lv > (int32_t)UI_WAVE_FH)  lv = (int32_t)UI_WAVE_FH;
     wv_level = (uint8_t)lv;
 
     /* Transient. Decays first, then may be re-struck anywhere in the headroom
@@ -3809,7 +4683,7 @@ static void ui_wave_gen(void)
     wv_tr = (uint8_t)(((uint32_t)wv_tr * WV_DECAY) / 4u);
     wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
     if (wv_rng % WV_HIT == 0u) {
-        uint32_t head = (uint32_t)(UI_WAVE_H - wv_level);
+        uint32_t head = (uint32_t)(UI_WAVE_FH - wv_level);
         if (head) {
             wv_rng ^= wv_rng << 13; wv_rng ^= wv_rng >> 17; wv_rng ^= wv_rng << 5;
             uint32_t hit = ((wv_rng & 0x7FFFu) * (head + 1u)) >> 15;
@@ -3818,7 +4692,7 @@ static void ui_wave_gen(void)
     }
 
     uint32_t smp = (uint32_t)wv_level + wv_tr;
-    if (smp > UI_WAVE_H) smp = UI_WAVE_H;
+    if (smp > UI_WAVE_FH) smp = UI_WAVE_FH;
     wv_h[UI_WAVE_N - 1u] = (unsigned char)smp;
 }
 
@@ -3826,7 +4700,7 @@ static void ui_wave_gen(void)
  * settle: winding env down pulls the whole meter with it. */
 static void ui_wave_frame(void)
 {
-    uint16_t bed = ui_grad_at(UI_WAVE_Y);
+    uint16_t bed = ui_grad_at(UI_WAVE_FY);
     /* Full width, NOT ui_wave_w(). That reports the narrow meter whenever
      * art_shown is set, and art_shown is initialised to 1 -- so the boot meter
      * was leaving a gap for an album-art panel that does not exist yet and
@@ -3841,9 +4715,9 @@ static void ui_wave_frame(void)
         uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
         uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
 
-        fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h,
-                ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N));
-        if (UI_WAVE_H > h) fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+        fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - h, lit, h,
+                ui_age_mix(ui_accent, i));
+        if (UI_WAVE_FH > h) fb_rect(x, UI_WAVE_FY, lit, UI_WAVE_FH - h, bed);
     }
 }
 
@@ -3854,7 +4728,7 @@ static void ui_wave_anim_start(void)
      * the counter, so this animation was dead for the same half of every
      * 64.4 s wrap as the loading dots beside it. */
     wv_on = 1u; wv_next = cycles(); wv_rng = cycles() | 1u;
-    wv_level = (uint8_t)((UI_WAVE_H * WV_BODY) / 100u);
+    wv_level = (uint8_t)((UI_WAVE_FH * WV_BODY) / 100u);
     wv_tr    = 0;
 
     /* EMPTY, deliberately -- the sweep in from the right IS the animation, and
@@ -3898,19 +4772,51 @@ static void ui_splash_anim(void)
      * buys no animation at all; it is dead time in front of work that already
      * animates itself, and it only has to outlast a flicker. */
     ui_wave_anim_start();
-    const uint32_t INTRO_MS = 150u;
-    uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * (INTRO_MS / 2u);
+
+    /* 900, up from 150.
+     *
+     * 150 was right when the splash was followed by a slow card: the comment
+     * that set it argued, correctly, that a floor is dead time in front of
+     * work which already animates itself. That reasoning depends on the work
+     * taking a while. On a fast card the playlist read, the track open and
+     * the art decode are over in a few hundred milliseconds, and the whole
+     * boot screen goes by before the meter has swept in or the title has
+     * caught the light once -- which is exactly what it looked like.
+     *
+     * So this IS dead time, deliberately, and it is the cost of having a
+     * boot screen worth looking at: up to 0.9 s on a launch where the card
+     * is quick, and nothing at all on one where it is not, because the
+     * loading that follows overlaps it. One shine pass is 0.53 s and the
+     * meter sweeps in over 0.22; 900 fits both with room to breathe. */
+    const uint32_t INTRO_MS = 900u;
+    const uint32_t FADE_MS  = 220u;
+    uint32_t t0 = cycles(), fade_end = CLK_HZ / 1000u * FADE_MS;
     /* Redraw the card only when the fade STEP changes -- 33 times, not once per
      * spin of an unpaced loop. Repainting the title thousands of times a second
      * is what made it flash: each repaint erases its own cell before writing
      * the glyph, and scanout catches the gap. */
     uint32_t last_f = 0xFFFFFFFFu;
+    uint32_t sh_next = 0;
+    uint8_t  sh_armed = 0;
     ui_splash_bg();                  /* ONCE -- see ui_splash_bg() */
     for (;;) {
         uint32_t el = cycles() - t0;
         if (el >= CLK_HZ / 1000u * INTRO_MS) break;
-        uint32_t f = (el < fade_end) ? (el * STEP_DEN / fade_end) : STEP_DEN;
-        if (f != last_f) { last_f = f; ui_splash_title(f, STEP_DEN); }
+        if (el < fade_end) {
+            uint32_t f = el * STEP_DEN / fade_end;
+            if (f != last_f) { last_f = f; ui_splash_title(f, STEP_DEN); }
+        } else {
+            /* The title has arrived; now it catches the light. Armed from
+             * cycles() rather than left at 0 -- a zero deadline reads as due
+             * 35 seconds ago or due shortly depending on where the free
+             * running counter is, which has cost this project a day. */
+            if (!sh_armed) { sh_armed = 1u; sh_next = cycles(); last_f = STEP_DEN; }
+            if ((int32_t)(cycles() - sh_next) >= 0) {
+                sh_next = cycles() + CLK_HZ / 30u;
+                if (shine_t <= SHINE_END)
+                    ui_splash_shine((int32_t)shine_t++ - SHINE_SPAN);
+            }
+        }
         ui_wave_anim_tick();
     }
 
@@ -3970,6 +4876,7 @@ static uint16_t ui_boot_bg(void)
 {
     return ui_grad_at(UI_BOOT_Y);
 }
+
 
 /* A 7x7 disc, one rect per row -- the way every other icon here is built,
  * because BRAM is at 97% and a glyph would cost a whole atlas cell. */
@@ -4031,6 +4938,13 @@ static void ui_boot_tick(void)
     uint16_t bg = ui_boot_bg();
     uint32_t dy = UI_BOOT_Y + (FB_CELL(TS_1X) - 7u) / 2u;   /* centred on the text */
     uint32_t t  = ui_boot_t++ % UI_DOT_TICKS;
+
+    /* The title catches the light on the same tick as the dots. */
+    /* Carries on from wherever the intro loop left it, and stops for good
+     * once the pass is done -- so a slow card does not get the title
+     * flashing at it for the whole load. */
+    if (shine_t <= SHINE_END)
+        ui_splash_shine((int32_t)shine_t++ - SHINE_SPAN);
 
     /* No erase pass: every dot is redrawn every tick at a fixed position, so
      * each one covers its own footprint. Erase-then-draw on a single-buffered
@@ -4584,6 +5498,39 @@ static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
     out[u8_trim(out, n)] = 0;
 }
 
+/* The codec of a browser entry, from its EXTENSION.
+ *
+ * Which is all the browser can afford to know. The player detects format from
+ * the file's first four bytes precisely because the extension can lie, but
+ * doing that here would be a far read per row on a slot that is not the
+ * stream -- the fragment-cache stutter, once per cursor move. So a
+ * mislabelled file shows one thing in the list and another once it plays.
+ * That is the honest price of the browser costing nothing, and it is the same
+ * trade pl_ui_label() already makes when it strips ".mp3" off a name.
+ *
+ * Returns 0 for anything else, and nothing is drawn. */
+static int pl_ext_is(const char *e, const char *want)
+{
+    for (; *want; e++, want++) {
+        uint32_t c = (uint8_t)*e;
+        if (c >= 'A' && c <= 'Z') c += 32u;
+        if (c != (uint32_t)*want) return 0;
+    }
+    return !*e;
+}
+
+static const char *pl_ui_codec(uint16_t pos)
+{
+    if (pos >= pl_count) return 0;
+    const char *nm = plt_name_at(pl_off[pl_order[pos]]);
+    uint32_t dot = 0;
+    for (uint32_t i = 0; nm[i]; i++) if (nm[i] == '.') dot = i;
+    if (!dot) return 0;
+    if (pl_ext_is(nm + dot + 1u, "flac")) return "FLAC";
+    if (pl_ext_is(nm + dot + 1u, "mp3"))  return "MP3";
+    return 0;
+}
+
 /* Keeps the selection on screen after any move. */
 static void pl_ui_follow(void)
 {
@@ -4763,8 +5710,125 @@ static void pl_ui_draw(void)
     }
 
     for (uint32_t i = 0; i < PL_UI_ROWS; i++) pl_ui_row(i);
+
+    /* Codec chip, bottom-right -- the same furniture as the card's, sitting in
+     * the padding the list already leaves below its last row (PL_UI_PAD_B is
+     * 22, the chip is 17).
+     *
+     * UI_DIM, not the card's UI_FAINT. The rule both follow is "match the
+     * weight of the text around you": on the card that is the format row, in
+     * here it is the list, and UI_FAINT would make the chip the dimmest thing
+     * in a panel otherwise full of UI_DIM. Through pl_fade() like everything
+     * else inside the overlay, or it would be left at full strength while the
+     * rest of the panel is still coming up.
+     *
+     * No clearing needed on a selection change: every move sets pl_ui_dirty,
+     * which repaints the whole panel from the round rect up, so a 52 px FLAC
+     * cannot leave a tail behind a 41 px MP3. */
+    {
+        const char *cz = pl_ui_codec(pl_ui_sel);
+        if (cz) ui_chip_draw(cz, PL_UI_X + PL_UI_W - 8u,
+                             PL_UI_Y + h - 3u, pl_fade(UI_DIM));
+    }
 }
 
+
+/* The controls cheatsheet, on a HOLD of Start.
+ *
+ * Nineteen rows on ONE page -- no cursor, no paging, no scroll position. That
+ * is the whole reason it is worth having, and it was measured before it was
+ * written rather than discovered afterwards: against this font the widest key
+ * label is 155 px and the widest action 156, so two columns at a 15 px pitch
+ * land inside 376x343 with room on every side. A list that needed scrolling
+ * would need state, and state is how an overlay goes wrong.
+ *
+ * The 15 px pitch is one less than the 16 px cell, so each row's background
+ * paints over the row above's last cell line. Harmless: the ink occupies
+ * lines 1..11 of the cell, so nothing visible is ever touched.
+ *
+ * COLD. It is drawn once, when it opens, and has no business competing for
+ * the 4 KB instruction cache the decoders are fighting over.
+ *
+ * Start's own hold is deliberately NOT one of the rows. A line telling you
+ * how to reach the screen you are already looking at helps nobody; the README
+ * and the release notes are where that has to be said. */
+#define CTL_X     12u
+#define CTL_W     376u
+#define CTL_PAD   14u
+#define CTL_PITCH 15u
+#define CTL_TOP   44u                      /* header band above the first row */
+#define CTL_KEYX  (CTL_X + CTL_PAD)
+#define CTL_ACTX  (CTL_KEYX + 167u)        /* 155 px of key plus a 12 px gutter */
+
+static const char *const ctl_rows[] = {
+    "A",               "Play / pause",
+    "A HOLD",          "1.2x speed",
+    "B",               "Restart track",
+    "START",           "Stop",
+    "LEFT / RIGHT",    "Prev / next track",
+    "LEFT/RIGHT HOLD", "Seek",
+    "SELECT + L/R",    "Seek one second",
+    "UP / DOWN",       "Volume",
+    "X",               "Meter",
+    "Y",               "EQ preset",
+    "L / R",           "Accent colour",
+    "SELECT",          "Playlist browser",
+    "SELECT HOLD",     "Album art panel",
+    "SELECT + L",      "Repeat",
+    "SELECT + R",      "Shuffle",
+    "SELECT + UP",     "Sleep timer",
+    "SELECT + DOWN",   "Screen blank",
+    "SELECT + Y",      "Crossfeed / mono",
+    "L + R HOLD",      "Scrobble code",
+};
+#define CTL_N (sizeof(ctl_rows) / sizeof(ctl_rows[0]) / 2u)
+
+UI_COLD static void ctl_draw(void)
+{
+    uint32_t h  = CTL_TOP + CTL_N * CTL_PITCH + 14u;
+    uint32_t y0 = (FB_H - h) / 2u;
+
+    fb_round_rect(CTL_X, y0, CTL_W, h, 8u, UI_PANEL);
+
+    fb_set_color(ui_accent, UI_PANEL);
+    fb_text_clipped(CTL_KEYX, y0 + 14u, "CONTROLS", TS_1X, TS_1X,
+                    CTL_W - 2u * CTL_PAD);
+    {
+        /* Right-aligned, because a reader who does not know how to get OUT of
+         * a screen they opened by accident is the one failure this must not
+         * have. */
+        const char *hint = "B CLOSES";
+        uint32_t hw = fb_text_width(hint, TS_1X);
+        fb_set_color(UI_FAINT, UI_PANEL);
+        fb_text_clipped(CTL_X + CTL_W - CTL_PAD - hw, y0 + 14u, hint,
+                        TS_1X, TS_1X, hw);
+    }
+    /* A rule under the header, so the rows read as a table rather than as
+     * nineteen loose lines under a title. */
+    fb_rect(CTL_KEYX, y0 + 34u, CTL_W - 2u * CTL_PAD, 1u,
+            ui_mix(UI_PANEL, UI_DIM, 1u, 3u));
+
+    for (uint32_t i = 0; i < CTL_N; i++) {
+        uint32_t y = y0 + CTL_TOP + i * CTL_PITCH;
+        fb_set_color(UI_WHITE, UI_PANEL);
+        fb_text_clipped(CTL_KEYX, y, ctl_rows[i * 2u], TS_1X, TS_1X,
+                        CTL_ACTX - CTL_KEYX - 4u);
+        fb_set_color(UI_DIM, UI_PANEL);
+        fb_text_clipped(CTL_ACTX, y, ctl_rows[i * 2u + 1u], TS_1X, TS_1X,
+                        CTL_X + CTL_W - CTL_PAD - CTL_ACTX);
+    }
+}
+
+/* Playback is NOT paused while this is up, unlike the QR code -- that one has
+ * to pause, because scanning takes both hands and a while. A cheatsheet is
+ * glanced at mid-track and the music should carry on behind it. */
+UI_COLD static void ctl_close(void)
+{
+    ctl_open      = 0u;
+    ui_last_sec   = 0xFFFFFFFFu;    /* force the clock and format rows back */
+    ui_last_info  = 0xFFFFFFFFu;
+    pl_ui_restore = 1u;             /* the repaint path the QR overlay uses */
+}
 
 /* Where a line must be split so its first row fits `maxw`, or 0 if it fits
  * whole. Breaks at the last SPACE before the limit so words stay intact --
@@ -4850,7 +5914,7 @@ static uint32_t lrc_wrap(const char *s, uint32_t ww, uint16_t *st)
 static uint32_t lrc_rows(uint32_t idx, uint32_t ww)
 {
     uint16_t st[LRC_WRAP_MAX];
-    return lrc_wrap(lrc_text + lrc_off[idx], ww, st);
+    return lrc_wrap(lrc_line_at(idx), ww, st);
 }
 
 /* One row of text, CENTRED. Lyrics are centred where the rest of the UI is
@@ -4885,7 +5949,7 @@ static void lrc_row(uint32_t y, uint32_t ww, const char *s,
 static uint32_t lrc_emit(uint32_t top, uint32_t ww, uint32_t idx,
                          int32_t row, int is_cur)
 {
-    const char *s = lrc_text + lrc_off[idx];
+    const char *s = lrc_line_at(idx);
     uint32_t len = 0;
     while (s[len]) len++;
 
@@ -4976,8 +6040,130 @@ static void pl_ui_tick(void)
     }
 }
 
+/* Elapsed time by running accumulator rather than (frames*1152)/samprate.
+ * That is a 64-bit divide -- __udivdi3, hundreds of cycles in software on
+ * RV32 -- and it ran EVERY frame inside the same budget that keeps the PCM
+ * FIFO fed. Adds and compares give the identical answer.
+ *
+ * Called BEFORE the screen_blank return, which is the whole point of it being
+ * a function. It used to sit at ui_tail, past that return, so with the screen
+ * blanked the clock simply stopped: frames kept decoding, ui_last_frames was
+ * never caught up, and on wake the accumulator took ONE frame's worth however
+ * long the screen had been off. Every blanked minute was lost from the
+ * elapsed time -- and from scr_second(), so a track listened to with the
+ * screen off never reached the halfway mark and never scrobbled. Both
+ * symptoms, one cause, and only visible to someone who had turned the blank
+ * timeout on. */
+static void ui_advance_time(void)
+{
+    if (!samprate || frames == ui_last_frames) return;
+    ui_last_frames = frames;
+    ui_sec_acc += samp_per_frame;
+    while (ui_sec_acc >= samprate) {
+        ui_sec_acc -= samprate;
+        ui_sec++;
+        scr_second();          /* decoded, so it was heard -- unlike a seek */
+    }
+}
+
+/* ---- VU gauge face -----------------------------------------------------
+ *
+ * One analogue movement, at whatever size the caller has room for: the
+ * player draws two of these 180 px wide inside the meter band, and the boot
+ * screen can draw the same thing larger. Everything here is FACE -- panel,
+ * scale, label -- so it is drawn once and the needle is the only thing that
+ * moves afterwards.
+ *
+ * UI_COLD, and noinline with it. This runs once per track, so it has no
+ * business sitting in the middle of .text where it would shift the decode
+ * path; the caches are 4 KB direct-mapped and that is how FLAC lost its
+ * headroom last time. A section attribute alone does not stop GCC inlining
+ * a single-call-site function, which is what noinline is for.
+ *
+ * Nothing is drawn INSIDE the needle's sweep. The needle is erased by
+ * repainting its own footprint, so anything under it would be rubbed out on
+ * the first frame -- which is why there are no numerals on the scale at this
+ * size, and why the label sits in the panel's corner. */
+#define VU_PANEL  0x1061u   /* near-black instrument face, a touch above pure */
+#define VU_EDGE   0x2965u   /* its bezel */
+#define VU_SCALE  0x8C71u   /* warm grey: the quiet two-thirds of the arc   */
+#define VU_NEEDLE 0xFFFFu
+#define VU_HUB    0xCE59u
+
+UI_COLD static void vu_draw_face(uint32_t ox, uint32_t oy, uint32_t w,
+                                 uint32_t h, uint32_t pivx, uint32_t pivy,
+                                 uint32_t len, const char *label)
+{
+    /* The recessed panel. This is what turns a floating arc into an
+     * instrument, and it is the one change that does most of the work. */
+    fb_round_rect(ox, oy, w, h, 4u, VU_PANEL);
+    fb_rect(ox, oy, w, 1u, VU_EDGE);
+
+    /* 21 ticks, every fifth one long.
+     *
+     * Each one is a LINE between two radii, stepped along its longest axis.
+     * Walking the radius a pixel at a time instead -- which is what this did
+     * first -- plots through the same rounded cell twice near the top of the
+     * sweep and skips cells near the sides, so every tick came out as a
+     * ragged dotted trail. Simulated before it ever reached hardware; see
+     * docs/splash/.
+     *
+     * 21 rather than 41 for the same reason the ticks have to be lines: at
+     * this radius the arc is about 90 px, so 41 of them sit two pixels apart
+     * and merge into a smear. */
+    for (uint32_t i = 0; i <= 20u; i++) {
+        uint32_t q = (i * 16u) / 20u, f = (i * 16u) % 20u;
+        uint32_t q1 = (q < 16u) ? q + 1u : 16u;
+        int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 20;
+        int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 20;
+
+        uint32_t major = (i % 5u == 0u);
+        int32_t  t0 = (int32_t)len - (major ? 9 : 5);
+        uint16_t col = (i >= 15u) ? ui_accent : VU_SCALE;   /* peak zone */
+
+        int32_t x0 = (int32_t)pivx + (t0 * sn) / 4096;
+        int32_t y0 = (int32_t)pivy - (t0 * cs) / 4096;
+        int32_t x1 = (int32_t)pivx + ((int32_t)len * sn) / 4096;
+        int32_t y1 = (int32_t)pivy - ((int32_t)len * cs) / 4096;
+        int32_t dx = x1 - x0, dy = y1 - y0;
+        int32_t adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+        int32_t n = (adx > ady ? adx : ady);
+        if (n < 1) n = 1;
+        for (int32_t k = 0; k <= n; k++) {
+            int32_t ax = x0 + dx * k / n;
+            int32_t ay = y0 + dy * k / n;
+            if (ay < (int32_t)oy + 1 || ay >= (int32_t)(oy + h)) continue;
+            if (ax < (int32_t)ox + 1 || ax >= (int32_t)(ox + w) - 1) continue;
+            fb_rect((uint32_t)ax, (uint32_t)ay, major ? 2u : 1u, 1u, col);
+        }
+    }
+
+    /* Channel label, recessed into the corner rather than shouting in the
+     * accent -- it competed with the needle before. */
+    if (label) {
+        /* Accent, like every other active indicator in the core. Neutral grey
+         * made the gauge the one element that ignored the chosen palette. */
+        fb_set_color(ui_accent, VU_PANEL);
+        fb_text_clipped(ox + 5u, oy + 3u, label, TS_1X, TS_1X, 20u);
+    }
+}
+
+/* The hub, drawn per frame with the needle. A disc rather than the old 5x5
+ * square: at this size four clipped corners are the whole difference between
+ * a machined pivot and a block. */
+UI_COLD static void vu_draw_hub(uint32_t pivx, uint32_t pivy)
+{
+    /* Row widths 3-5-7-7-5-3 around the pivot: a 7 px disc rather than the
+     * slab the first attempt drew, which read as a square at this size. */
+    static const uint8_t wsq[6] = { 3u, 5u, 7u, 7u, 5u, 3u };
+    for (uint32_t r = 0; r < 6u; r++)
+        fb_rect(pivx - wsq[r] / 2u, pivy - 3u + r, wsq[r], 1u, VU_HUB);
+    fb_rect(pivx - 1u, pivy - 1u, 3u, 2u, VU_EDGE);
+}
+
 static void ui_draw_dynamic(void)
 {
+    ui_advance_time();
     if (screen_blank) return;
     /* The overlay covers the meters, the card and the transport row. Letting
      * the player keep drawing underneath would punch holes straight through
@@ -4996,6 +6182,23 @@ static void ui_draw_dynamic(void)
      * precedent. */
     /* Before the jump, so a fade that COMPLETES a dismissal this frame falls
      * through to the normal path instead of skipping it for one more. */
+    /* A full-screen takeover: unlike the playlist, this one covers the clock
+     * and the progress bar too, so it returns outright instead of jumping to
+     * ui_tail -- everything down there would draw straight through it.
+     *
+     * Safe to skip ui_tail only because ui_advance_time() runs ABOVE the
+     * blank check now. The elapsed clock and scr_second() keep going under
+     * the overlay; all that stops is drawing.
+     *
+     * Drawn once, on the flag, not per frame. */
+    if (ctl_open) {
+        if (ctl_dirty) { ctl_dirty = 0u; ctl_draw(); }
+        return;
+    }
+    if (qr_ui_open) {
+        if (qr_ui_dirty) { qr_ui_dirty = 0u; qr_ui_draw(); }
+        return;
+    }
     pl_ui_tick();
     if (pl_ui_open) goto ui_tail;
 
@@ -5140,8 +6343,8 @@ static void ui_draw_dynamic(void)
          * covers two display frames and both should count. */
         uint32_t src = wave_pend ? wave_pend : peak_amp;
         wave_pend = 0;
-        uint32_t amp = (src * UI_WAVE_H) / 32768u;
-        if (amp > UI_WAVE_H) amp = UI_WAVE_H;
+        uint32_t amp = (src * UI_WAVE_FH) / 32768u;
+        if (amp > UI_WAVE_FH) amp = UI_WAVE_FH;
         /* Frozen while paused: the forced pass exists only to recolour. */
         if (!paused) {
             for (uint32_t i = 0; i < UI_WAVE_N - 1u; i++) {
@@ -5159,7 +6362,7 @@ static void ui_draw_dynamic(void)
             if (wave_pk[i] > wave[i]) wave_pk[i]--;
 
         uint32_t ww  = ui_wave_w();
-        uint16_t bed = ui_grad_at(UI_WAVE_Y);
+        uint16_t bed = ui_grad_at(UI_WAVE_FY);
 
         /* ---- WATERFALL ----------------------------------------------------
          * Scroll the whole strip one pixel left with a single COPY, then draw
@@ -5183,8 +6386,8 @@ static void ui_draw_dynamic(void)
              * than displacing the line being sung.
              *
              * Redrawn only when the LINE changes, a few times a minute. */
-            const uint32_t top  = UI_WAVE_Y - UI_WAVE_TOP;
-            const uint32_t boxh = UI_WAVE_H + UI_WAVE_TOP;
+            const uint32_t top  = UI_WAVE_FY;
+            const uint32_t boxh = UI_WAVE_FH;
 
             uint32_t t10 = lrc_now10();
             uint32_t cur = (lrc_synced && lrc_n) ? lrc_index_for(t10) : 0u;
@@ -5209,6 +6412,9 @@ static void ui_draw_dynamic(void)
             lrc_last_t10 = t10;
 
             if (cur != lrc_drawn) {
+#if LRC_TRACE
+                uint32_t lrc_t0 = cycles();
+#endif
                 lrc_drawn = (uint16_t)cur;
                 ui_bg_restore(UI_MARGIN, top, ww, boxh);
 
@@ -5234,24 +6440,32 @@ static void ui_draw_dynamic(void)
                         lrc_emit(top, ww, cur - k, r, 0);
                     }
                 }
+#if LRC_TRACE
+                lrc_us = (cycles() - lrc_t0) / (CLK_HZ / 1000000u);
+                if (lrc_us > lrc_us_max) lrc_us_max = lrc_us;
+#endif
             }
             goto viz_done;
         }
 
         if (viz_mode == VIZ_SCROLL) {
             const uint32_t x0 = UI_MARGIN, w = ww;
-            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
-            const uint32_t half = UI_WAVE_H / 2u - 1u;
+            const uint32_t cy = UI_WAVE_FY + UI_WAVE_FH / 2u;
+            const uint32_t half = UI_WAVE_FH / 2u - 1u;
             if (!paused) {
-                fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
+                fb_copy(x0 + 1u, UI_WAVE_FY, x0, UI_WAVE_FY, w - 1u, UI_WAVE_FH);
 
                 uint32_t a = (peak_amp * half) / 32768u;
                 if (a > half) a = half;
 
                 uint32_t cx = x0 + w - 1u;
-                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H);     /* clear column */
-                if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u,
-                               ui_mix(UI_TRACK, ui_accent, a, half));
+                ui_bg_restore(cx, UI_WAVE_FY, 1, UI_WAVE_FH);     /* clear column */
+                /* One colour at every level. The brightness used to track
+                 * the amplitude, so quiet passages drew toward UI_TRACK and
+                 * the strip appeared to fade out as it scrolled away. Height
+                 * already encodes level; dimming it as well just loses the
+                 * quiet detail. */
+                if (a) fb_rect(cx, cy - a, 1, a * 2u + 1u, ui_accent);
                 else   fb_rect(cx, cy, 1, 1, UI_TRACK);         /* silence line */
             }
             goto viz_done;
@@ -5278,7 +6492,7 @@ static void ui_draw_dynamic(void)
              * a per-row ramp -- a flat fill is the mistake the magic eye made.
              * Only on a repaint: the gaps never move. */
             int repaint = (spec_drawn[0] == 0xFFu);
-            if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            if (repaint) ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
 
             uint32_t colw  = ww / SPEC_BANDS;
             uint32_t bw    = (colw > SPEC_GAPX) ? colw - SPEC_GAPX : 1u;
@@ -5299,7 +6513,7 @@ static void ui_draw_dynamic(void)
 
                 uint32_t x0 = UI_MARGIN + b * colw;
                 for (uint32_t r = lo; r < hi; r++) {
-                    uint32_t y = UI_WAVE_Y + UI_WAVE_H - (r + 1u) * pitch;
+                    uint32_t y = UI_WAVE_FY + UI_WAVE_FH - (r + 1u) * pitch;
                     uint16_t c;
                     if (r < lit) {
                         uint32_t half = LED_ROWS / 2u;
@@ -5363,7 +6577,7 @@ static void ui_draw_dynamic(void)
 
             uint32_t shw = (ww > TAPE_SHELL_W + 16u) ? TAPE_SHELL_W : (ww - 16u);
             uint32_t sx  = UI_MARGIN + (ww - shw) / 2u;
-            uint32_t y0  = UI_WAVE_Y + UI_WAVE_H - TAPE_SHELL_H;   /* 96 tall */
+            uint32_t y0  = UI_WAVE_FY + UI_WAVE_FH - TAPE_SHELL_H;   /* 96 tall */
             uint32_t cx0 = sx + shw / 2u;
             uint32_t bw  = (shw * 62u) / 100u;           /* window bezel width */
             uint32_t hdx = (bw * 28u) / 100u;            /* hub offset         */
@@ -5387,20 +6601,24 @@ static void ui_draw_dynamic(void)
                  * name alone gives the same value either way, tape_face is
                  * never cleared, and the stale label stays painted however the
                  * guard reads. */
+                /* Hashed over whatever the label will SHOW, which is now
+                 * the artist wherever there is one. Hashing the playlist name
+                 * while drawing the artist would leave the face cached across
+                 * a track change and the label would never update. */
                 uint32_t nh = 0;
-                if (track_from_pl)
-                    for (uint32_t i = 0; pl_name_full[i] && i < 24u; i++)
-                        nh = nh * 31u + (uint32_t)(unsigned char)pl_name_full[i];
+                const char *lbl = track_artist[0] ? track_artist
+                                : (track_from_pl ? pl_name_full : "");
+                for (uint32_t i = 0; lbl[i] && i < 24u; i++)
+                    nh = nh * 31u + (uint32_t)(unsigned char)lbl[i];
                 if (nh != tape_name_h) { tape_name_h = nh; tape_face = 0; }
             }
             if (wf || ww != tape_face_w) tape_face = 0;
 
             if (!tape_face) {
-                /* Per ROW, and over the TALLER band -- this is the only meter
-                 * that draws above UI_WAVE_Y, so it is the only one that needs
+                /* Per ROW, and over the TALLER band -- every meter draws
+                 * into the full box now, so each one needs
                  * UI_WAVE_TOP restored. */
-                ui_bg_restore(UI_MARGIN, UI_WAVE_Y - UI_WAVE_TOP, ww,
-                              UI_WAVE_H + UI_WAVE_TOP);
+                ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
 
                 fb_round_rect(sx, y0, shw, TAPE_SHELL_H, 3u, c_shell);
                 /* All FOUR sides. Only top and bottom were outlined before, so
@@ -5437,13 +6655,18 @@ static void ui_draw_dynamic(void)
                  * had nothing to do with it. track_from_pl is already the
                  * flag for "the playlist started this track"; resume uses it
                  * the same way. */
-                if (track_from_pl && pl_count && pl_name_full[0]) {
+                /* The artist, always, because that is what is written on a
+                 * cassette's label. Falls back to the playlist name when the
+                 * tag has no artist. */
+                const char *src = track_artist[0] ? track_artist
+                                : ((track_from_pl && pl_count) ? pl_name_full : "");
+                if (src[0]) {
                     /* Without the extension. Nobody writes ".m3u" on a
                      * cassette label. */
                     char nm[PL_FULL_MAX + 1u];
                     uint32_t n = 0;
-                    while (pl_name_full[n] && n < PL_FULL_MAX) {
-                        nm[n] = pl_name_full[n]; n++;
+                    while (src[n] && n < PL_FULL_MAX) {
+                        nm[n] = src[n]; n++;
                     }
                     nm[n] = 0;
                     while (n && nm[n - 1u] != '.') n--;
@@ -5658,13 +6881,13 @@ static void ui_draw_dynamic(void)
         }
 
         if (viz_mode == VIZ_MIRROR) {
-            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
-            const uint32_t half = UI_WAVE_H / 2u - 1u;
+            const uint32_t cy = UI_WAVE_FY + UI_WAVE_FH / 2u;
+            const uint32_t half = UI_WAVE_FH / 2u - 1u;
             for (uint32_t i = 0; i < UI_WAVE_N; i++) {
                 uint32_t x   = UI_MARGIN + (i * ww) / UI_WAVE_N;
                 uint32_t xn  = UI_MARGIN + ((i + 1u) * ww) / UI_WAVE_N;
                 uint32_t lit = (xn - x > UI_WAVE_GAP) ? (xn - x - UI_WAVE_GAP) : 1u;
-                uint32_t h   = (wave[i] * half) / UI_WAVE_H;
+                uint32_t h   = (wave[i] * half) / UI_WAVE_FH;
                 if (!h) h = 1u;
 
                 /* Skip a column whose height has not moved, exactly as the
@@ -5675,7 +6898,7 @@ static void ui_draw_dynamic(void)
                 wave_drawn[i] = (unsigned char)h;
 
                 uint16_t lc  = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
-                uint16_t c   = ui_mix(UI_TRACK, lc, i + 1u, UI_WAVE_N);
+                uint16_t c   = ui_age_mix(lc, i);
 
                 /* Restore ONLY around the bar, never underneath it.
                  *
@@ -5686,13 +6909,13 @@ static void ui_draw_dynamic(void)
                  * a side effect of moving these meters onto the gradient
                  * (a flat `bed` fill used to double as the erase).
                  *
-                 * The two spans plus the bar always sum to exactly UI_WAVE_H,
+                 * The two spans plus the bar always sum to exactly UI_WAVE_FH,
                  * and the bar's own pixels are now written once, not twice. */
                 uint32_t top = cy - h;                      /* first bar row */
                 uint32_t bot = cy + h;                      /* last bar row  */
-                uint32_t end = UI_WAVE_Y + UI_WAVE_H;       /* one past box   */
-                if (top > UI_WAVE_Y)
-                    ui_bg_restore(x, UI_WAVE_Y, lit, top - UI_WAVE_Y);
+                uint32_t end = UI_WAVE_FY + UI_WAVE_FH;       /* one past box   */
+                if (top > UI_WAVE_FY)
+                    ui_bg_restore(x, UI_WAVE_FY, lit, top - UI_WAVE_FY);
                 if (bot + 1u < end)
                     ui_bg_restore(x, bot + 1u, lit, end - (bot + 1u));
                 fb_rect(x, top, lit, h * 2u + 1u, c);
@@ -5717,11 +6940,11 @@ static void ui_draw_dynamic(void)
                 if (pk == wave_pk_drawn[i]) continue;
                 wave_pk_drawn[i] = (unsigned char)pk;
 
-                uint16_t c   = ui_mix(UI_TRACK, ui_accent, i + 1u, UI_WAVE_N);
-                uint32_t top = UI_WAVE_Y + UI_WAVE_H - pk;   /* first dot row */
-                uint32_t end = UI_WAVE_Y + UI_WAVE_H;        /* one past box  */
-                if (top > UI_WAVE_Y)
-                    ui_bg_restore(x, UI_WAVE_Y, lit, top - UI_WAVE_Y);
+                uint16_t c   = ui_age_mix(ui_accent, i);
+                uint32_t top = UI_WAVE_FY + UI_WAVE_FH - pk;   /* first dot row */
+                uint32_t end = UI_WAVE_FY + UI_WAVE_FH;        /* one past box  */
+                if (top > UI_WAVE_FY)
+                    ui_bg_restore(x, UI_WAVE_FY, lit, top - UI_WAVE_FY);
                 if (top + 2u < end)
                     ui_bg_restore(x, top + 2u, lit, end - (top + 2u));
                 fb_rect(x, top, lit, 2u, c);
@@ -5732,19 +6955,19 @@ static void ui_draw_dynamic(void)
         if (viz_mode == VIZ_WATER) {
             const uint32_t x0 = UI_MARGIN, w = ww;
             if (!paused) {
-                fb_copy(x0 + 1u, UI_WAVE_Y, x0, UI_WAVE_Y, w - 1u, UI_WAVE_H);
+                fb_copy(x0 + 1u, UI_WAVE_FY, x0, UI_WAVE_FY, w - 1u, UI_WAVE_FH);
 
-                uint32_t a = (peak_amp * UI_WAVE_H) / 32768u;
-                if (a > UI_WAVE_H) a = UI_WAVE_H;
+                uint32_t a = (peak_amp * UI_WAVE_FH) / 32768u;
+                if (a > UI_WAVE_FH) a = UI_WAVE_FH;
 
                 /* Column drawn as three bands -- quiet bed, body, hot tip --
                  * so loud passages read as brighter AND taller. */
                 uint32_t cx = x0 + w - 1u;
-                ui_bg_restore(cx, UI_WAVE_Y, 1, UI_WAVE_H - a);
+                ui_bg_restore(cx, UI_WAVE_FY, 1, UI_WAVE_FH - a);
                 if (a) {
-                    uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_H);
-                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, a, c);
-                    fb_rect(cx, UI_WAVE_Y + UI_WAVE_H - a, 1, 1, UI_WHITE);
+                    uint16_t c = ui_mix(UI_TRACK, ui_accent, a, UI_WAVE_FH);
+                    fb_rect(cx, UI_WAVE_FY + UI_WAVE_FH - a, 1, a, c);
+                    fb_rect(cx, UI_WAVE_FY + UI_WAVE_FH - a, 1, 1, UI_WHITE);
                 }
             }
             goto viz_done;
@@ -5770,16 +6993,19 @@ static void ui_draw_dynamic(void)
              * with `bed`, the gradient sampled once at its top row, which is a
              * flat slab on a ramp that falls to 62% of that value by the
              * bottom. The needles leave most of the box empty, so it shows. */
+            /* Clear to the ramp first: the two panels do not cover the
+             * whole band, and the gutter between and around them has to be
+             * background rather than whatever the last meter left. */
             if (!vu_face)
-                for (uint32_t yy = UI_WAVE_Y; yy < UI_WAVE_Y + UI_WAVE_H; yy++)
+                for (uint32_t yy = UI_WAVE_FY; yy < UI_WAVE_FY + UI_WAVE_FH; yy++)
                     fb_rect(UI_MARGIN, yy, ww, 1, ui_grad_at(yy));
 
             for (int ch = 0; ch < 2; ch++) {
                 uint32_t half = ww / 2u;
                 uint32_t ox   = UI_MARGIN + (uint32_t)ch * half;
                 uint32_t pivx = ox + half / 2u;
-                uint32_t pivy = UI_WAVE_Y + UI_WAVE_H - 4u;
-                uint32_t len  = UI_WAVE_H - 18u;
+                uint32_t pivy = UI_WAVE_FY + UI_WAVE_FH - 7u;
+                uint32_t len  = UI_WAVE_FH - 20u;
                 /* Needle stops short of the ticks, so erasing it can never rub
                  * them out and they never need repainting. */
                 uint32_t nlen = len - 6u;
@@ -5793,45 +7019,10 @@ static void ui_draw_dynamic(void)
                 else          { *v = (*v > VU_DEC) ? (*v - VU_DEC) : 0u;
                                 if (*v < tgt) *v = tgt; }
 
-                if (!vu_face) {
-                    for (uint32_t t = 0; t <= 80u; t++) {
-                        uint32_t q = (t * 16u) / 80u, f = (t * 16u) % 80u;
-                        uint32_t q1 = (q < 16u) ? q + 1u : 16u;
-                        int32_t sn = vu_sn[q] + (int32_t)((vu_sn[q1] - vu_sn[q]) * (int32_t)f) / 80;
-                        int32_t cs = vu_cs[q] + (int32_t)((vu_cs[q1] - vu_cs[q]) * (int32_t)f) / 80;
-                        int32_t ar = (int32_t)len + 4;
-                        int32_t ax = (int32_t)pivx + (ar * sn) / 4096;
-                        int32_t ay = (int32_t)pivy - (ar * cs) / 4096;
-                        if (ay < (int32_t)UI_WAVE_Y) continue;
-                        if (ax < (int32_t)ox || ax + 1 >= (int32_t)(ox + half)) continue;
-                        /* Everything on the face is a TONE OF THE ACCENT.
-                         * Fixed grey and red meant changing colour only moved
-                         * the needle and the labels, and the meter looked
-                         * unchanged. The peak zone is the accent at full
-                         * strength against a dimmed scale, so it still reads as
-                         * "the loud end" in any palette. */
-                        fb_rect((uint32_t)ax, (uint32_t)ay, 2, 2,
-                                (t >= 60u) ? ui_accent
-                                           : ui_mix(ui_grad_at((uint32_t)ay),
-                                                    ui_accent, 2u, 5u));
-                    }
-                    for (uint32_t t = 0; t <= 4u; t++) {
-                        uint32_t i = t * 4u;
-                        for (uint32_t d = 0; d < 4u; d++) {
-                            int32_t ar = (int32_t)len - 1 - (int32_t)d;
-                            int32_t ax = (int32_t)pivx + (ar * vu_sn[i]) / 4096;
-                            int32_t ay = (int32_t)pivy - (ar * vu_cs[i]) / 4096;
-                            if (ay < (int32_t)UI_WAVE_Y) continue;
-                            fb_rect((uint32_t)ax, (uint32_t)ay, 1, 1,
-                                    (t >= 3u) ? ui_accent
-                                              : ui_mix(ui_grad_at((uint32_t)ay),
-                                                       ui_accent, 3u, 5u));
-                        }
-                    }
-                    fb_set_color(ui_accent, ui_grad_at(UI_WAVE_Y + 2u));
-                    fb_text_clipped(ox + 6u, UI_WAVE_Y + 2u, ch ? "R" : "L",
-                                    TS_1X, TS_1X, 16u);
-                }
+                if (!vu_face)
+                    vu_draw_face(ox + 3u, UI_WAVE_FY + 1u, half - 6u,
+                                 UI_WAVE_FH - 2u, pivx, pivy, len,
+                                 ch ? "R" : "L");
 
                 uint8_t shown = ch ? vu_shown_r : vu_shown_l;
                 uint8_t now   = (uint8_t)*v;
@@ -5858,17 +7049,17 @@ static void ui_draw_dynamic(void)
                         int32_t nx = (int32_t)pivx + (rr * sn) / 4096;
                         int32_t ny = (int32_t)pivy - (rr * cs) / 4096;
                         if (nx < (int32_t)ox || nx >= (int32_t)(ox + half)) continue;
-                        if (ny < (int32_t)UI_WAVE_Y) continue;
+                        if (ny < (int32_t)UI_WAVE_FY) continue;
                         uint32_t th = (k > VU_STEPS - 6u) ? 1u : 2u;
+                        /* Erases to the PANEL, not the gradient. The needle
+                         * sweeps inside the instrument now, so repainting its
+                         * footprint with the background ramp would cut a pale
+                         * wedge through the face wherever it had been. */
                         fb_rect((uint32_t)nx, (uint32_t)ny, th, th,
-                                pass ? ui_accent
-                                     : ui_grad_at((uint32_t)ny));
+                                pass ? VU_NEEDLE : VU_PANEL);
                     }
                 }
-                fb_rect(pivx - 2u, pivy - 2u, 5, 5, ui_accent);
-                for (uint32_t r = 0; r < 3u; r++)
-                    fb_rect(pivx - 1u, pivy - 1u + r, 3, 1,
-                            ui_grad_at(pivy - 1u + r));
+                vu_draw_hub(pivx, pivy);
 
                 if (ch) vu_shown_r = now; else vu_shown_l = now;
             }
@@ -5884,7 +7075,15 @@ static void ui_draw_dynamic(void)
             if (wf || ww != eye_face_w) eye_face = 0;
 
             uint32_t pair = 2u * EYE_TUBE_W + EYE_TUBE_G;
-            uint32_t ty   = UI_WAVE_Y + 3u;
+            /* Anchored to the BOTTOM of the box. Left at FY + 3 the tube
+             * floated at the top of the taller band with its plinth in mid
+             * air; it has always read as standing on the base. */
+            /* The BASE PLATE is what has to fit, not the envelope. It is
+             * drawn from basy for EYE_BASE_H rows, so anchoring the tube
+             * flush with the bottom pushed the plate past the box and those
+             * rows are outside everything that clears -- which is why the
+             * base stayed on screen after switching meters. */
+            uint32_t ty   = UI_WAVE_FY + UI_WAVE_FH - EYE_TUBE_H - EYE_BASE_H;
             uint32_t x0   = UI_MARGIN + ((ww > pair) ? (ww - pair) / 2u : 0u);
             uint32_t by   = ty + EYE_DOME + 7u;      /* strip window top    */
             /* Grew with the envelope, so the taller tube is also a longer
@@ -5908,7 +7107,7 @@ static void ui_draw_dynamic(void)
                  * Painting the real ramp means the meter has no background of
                  * its own -- it sits on the screen's, and the glow fans into
                  * it with nothing to fan against. */
-                for (uint32_t y = UI_WAVE_Y; y < UI_WAVE_Y + UI_WAVE_H; y++)
+                for (uint32_t y = UI_WAVE_FY; y < UI_WAVE_FY + UI_WAVE_FH; y++)
                     fb_rect(UI_MARGIN, y, ww, 1, ui_grad_at(y));
 
                 for (uint32_t ch = 0; ch < 2u; ch++) {
@@ -6062,7 +7261,7 @@ static void ui_draw_dynamic(void)
                  * its repaint band. Computed whether or not the pool is
                  * redrawn -- the gap pass needs it either way. */
                 uint32_t gcy = by + bh - (pos * bh) / (2u * EYE_GLOW_POS);
-                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                uint32_t top = ty + EYE_GLOW_TOP;
                 /* Both ends. The upper clamp was dropped while the band was
                  * temporarily shortened and not restored with it, which let
                  * the pool sit five rows lower than intended and run into the
@@ -6151,7 +7350,7 @@ static void ui_draw_dynamic(void)
             if (!eye_face || key_of[0] != eye_gap_l
                           || key_of[1] != eye_gap_r) {
                 uint32_t gx  = x0 + EYE_TUBE_W;
-                uint32_t top = UI_WAVE_Y + EYE_GLOW_TOP;
+                uint32_t top = ty + EYE_GLOW_TOP;
                 /* Distance from each tube's inner face to the middle of the
                  * gap -- the same for both, which is why the sum is flat. */
                 uint32_t d = EYE_TUBE_G / 2u;
@@ -6193,10 +7392,10 @@ static void ui_draw_dynamic(void)
          * One clear, then one vertical rect per column: ~65 commands, fewer
          * than the bars. */
         if (viz_mode == VIZ_WAVE) {
-            const int32_t ey = (int32_t)(UI_WAVE_H / 2u) - 1;
-            const uint32_t cy = UI_WAVE_Y + UI_WAVE_H / 2u;
+            const int32_t ey = (int32_t)(UI_WAVE_FH / 2u) - 1;
+            const uint32_t cy = UI_WAVE_FY + UI_WAVE_FH / 2u;
 
-            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);      /* zero line */
 
             if (!paused) {
@@ -6221,8 +7420,14 @@ static void ui_draw_dynamic(void)
 
                     uint32_t top = (uint32_t)((int32_t)cy - hi);
                     uint32_t h   = (uint32_t)(hi - lo) + 2u;   /* min 2 px line */
-                    if (top + h > UI_WAVE_Y + UI_WAVE_H) h = UI_WAVE_Y + UI_WAVE_H - top;
-                    uint16_t col = ui_mix(UI_TRACK, ui_accent, c + 1u, WAVE_COLS);
+                    if (top + h > UI_WAVE_FY + UI_WAVE_FH) h = UI_WAVE_FY + UI_WAVE_FH - top;
+                    /* Flat accent across the whole trace. The colour used
+                     * to ramp with the column index -- column 0 was UI_TRACK,
+                     * i.e. near-black -- so the left end of the trace faded
+                     * out. On a scrolling strip that would read as age; this
+                     * window is a single snapshot, where it just loses the
+                     * left third of the waveform. */
+                    uint16_t col = ui_accent;
                     fb_rect(x, top, w, h, col);
                 }
             }
@@ -6234,15 +7439,15 @@ static void ui_draw_dynamic(void)
          * bars. The whole trace is redrawn each pass rather than erased point
          * by point, which would double the count for no gain. */
         if (viz_mode == VIZ_SCOPE) {
-            const uint32_t r  = UI_WAVE_H / 2u;          /* usable radius */
+            const uint32_t r  = UI_WAVE_FH / 2u;          /* usable radius */
             const uint32_t cx = UI_MARGIN + ww / 2u;
-            const uint32_t cy = UI_WAVE_Y + r;
+            const uint32_t cy = UI_WAVE_FY + r;
 
-            ui_bg_restore(UI_MARGIN, UI_WAVE_Y, ww, UI_WAVE_H);
+            ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ww, UI_WAVE_FH);
 
             /* Centre cross: without it a quiet passage is an empty box, and
              * there is no way to tell "silent" from "not working". */
-            fb_rect(cx, UI_WAVE_Y, 1, UI_WAVE_H, UI_TRACK);
+            fb_rect(cx, UI_WAVE_FY, 1, UI_WAVE_FH, UI_TRACK);
             fb_rect(UI_MARGIN, cy, ww, 1, UI_TRACK);
 
             if (!paused) {
@@ -6265,8 +7470,8 @@ static void ui_draw_dynamic(void)
                         int32_t py = (int32_t)cy - (sy[k] * ey) / SCOPE_UNIT;
                         if (px < (int32_t)UI_MARGIN ||
                             px + (int32_t)sz > (int32_t)(UI_MARGIN + ww)) continue;
-                        if (py < (int32_t)UI_WAVE_Y ||
-                            py + (int32_t)sz > (int32_t)(UI_WAVE_Y + UI_WAVE_H)) continue;
+                        if (py < (int32_t)UI_WAVE_FY ||
+                            py + (int32_t)sz > (int32_t)(UI_WAVE_FY + UI_WAVE_FH)) continue;
                         fb_rect((uint32_t)px, (uint32_t)py, sz, sz, c);
 
                         /* Newest trace only: drop a point midway to the next
@@ -6279,8 +7484,8 @@ static void ui_draw_dynamic(void)
                             int32_t qy = (int32_t)cy - (((sy[k] + sy[k+1]) / 2) * ey) / SCOPE_UNIT;
                             if (qx >= (int32_t)UI_MARGIN &&
                                 qx + 1 < (int32_t)(UI_MARGIN + ww) &&
-                                qy >= (int32_t)UI_WAVE_Y &&
-                                qy + 1 < (int32_t)(UI_WAVE_Y + UI_WAVE_H))
+                                qy >= (int32_t)UI_WAVE_FY &&
+                                qy + 1 < (int32_t)(UI_WAVE_FY + UI_WAVE_FH))
                                 fb_rect((uint32_t)qx, (uint32_t)qy, 1, 1, c);
                         }
                     }
@@ -6300,11 +7505,19 @@ static void ui_draw_dynamic(void)
             if (lvl_l > lvl_pl) lvl_pl = lvl_l; else if (lvl_pl) lvl_pl--;
             if (lvl_r > lvl_pr) lvl_pr = lvl_r; else if (lvl_pr) lvl_pr--;
 
-            const uint32_t bh = UI_WAVE_H / 3u;          /* bar height */
-            const uint32_t gap = UI_WAVE_H - 2u * bh;    /* space between */
+            /* A third each left a third of the box as dead space between
+             * the two bars -- 32 px of gap for 32 px of bar. Fix the gap at
+             * 12 and give the rest to the bars: 42 px each, closer together
+             * and taller. */
+            /* Inset top and bottom as well as the gap between: at 42 px
+             * each the pair filled the box edge to edge and read as a slab.
+             * 8 off each outer edge leaves 34 px bars. */
+            const uint32_t gap = 12u;
+            const uint32_t pad = 8u;
+            const uint32_t bh  = (UI_WAVE_FH - gap - 2u * pad) / 2u;
             uint16_t lit = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u) : ui_accent;
             for (int ch = 0; ch < 2; ch++) {
-                uint32_t y  = UI_WAVE_Y + (ch ? bh + gap : 0u);
+                uint32_t y  = UI_WAVE_FY + pad + (ch ? bh + gap : 0u);
                 uint32_t v  = ch ? lvl_r : lvl_l;
                 uint32_t pk = ch ? lvl_pr : lvl_pl;
                 uint32_t bw = (v  * ww) / 255u;
@@ -6341,12 +7554,12 @@ static void ui_draw_dynamic(void)
              * reads as a state change across the UI rather than one word. */
             uint16_t lit_c = paused ? ui_mix(UI_TRACK, ui_accent, 1u, 3u)
                                     : ui_accent;
-            uint16_t c = ui_mix(UI_TRACK, lit_c, i + 1u, UI_WAVE_N);
-            fb_rect(x, UI_WAVE_Y + UI_WAVE_H - h, lit, h, c);
-            if (UI_WAVE_H > h)
-                fb_rect(x, UI_WAVE_Y, lit, UI_WAVE_H - h, bed);
+            uint16_t c = ui_age_mix(lit_c, i);
+            fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - h, lit, h, c);
+            if (UI_WAVE_FH > h)
+                fb_rect(x, UI_WAVE_FY, lit, UI_WAVE_FH - h, bed);
             if (pk > h + 1u)                       /* 1 px peak-hold marker */
-                fb_rect(x, UI_WAVE_Y + UI_WAVE_H - pk, lit, 1, UI_WHITE);
+                fb_rect(x, UI_WAVE_FY + UI_WAVE_FH - pk, lit, 1, UI_WHITE);
         }
     viz_done: ;
     }
@@ -6372,11 +7585,6 @@ ui_tail:
      * That is a 64-bit divide -- __udivdi3, hundreds of cycles in software on
      * RV32 -- and it ran EVERY frame inside the same budget that keeps the PCM
      * FIFO fed. Adds and compares give the identical answer. */
-    if (samprate && frames != ui_last_frames) {
-        ui_last_frames = frames;
-        ui_sec_acc += samp_per_frame;
-        while (ui_sec_acc >= samprate) { ui_sec_acc -= samprate; ui_sec++; }
-    }
     uint32_t sec = ui_sec;
 
     /* Measured average: bytes actually consumed divided by elapsed time. Only
@@ -6440,6 +7648,22 @@ ui_tail:
             fb_set_color(ui_accent, cbg);
             fb_text_clipped(sx, sy, sp, TS_1X, TS_1X, sw + 2u);
         }
+
+        /* Plays waiting to be scanned, on the same row and for the same
+         * reason the speed badge is here: the clear above spans the full
+         * inner width every second, so anything drawn elsewhere on this row
+         * is wiped within a second of appearing.
+         *
+         * ACCENT while there is something new, UI_FAINT once the code has
+         * been shown -- the "on / off but still visible" pair the repeat and
+         * shuffle icons use. Faint rather than hidden, because a session that
+         * has already been scanned is still a session: quitting the core
+         * throws it away either way, and the count is the only warning of
+         * that there is.
+         *
+         * Sits left of the speed badge when both are up, so neither moves
+         * depending on the other's width. */
+        if (scr_n) scr_badge(cbg);
     }
 
     /* Slide the art panel toward its target. Each step is a background repaint
@@ -6552,7 +7776,14 @@ ui_tail:
          * belongs here with the other format facts rather than in a screen of
          * its own -- and putting it here is what stops the bitrate being
          * repeated, which it was when this had its own view. */
-        if (track_encoder[0]) {
+        /* The name itself is on the badge now, so a FLAC contributes only its
+         * bit depth here -- "FLAC 16-bit" becomes "16-bit". An MP3's string is
+         * the LAME version and has no name in it to strip. */
+        const char *enc = track_encoder;
+        if (enc[0] == 'F' && enc[1] == 'L' && enc[2] == 'A' && enc[3] == 'C'
+            && enc[4] == ' ')
+            enc += 5;
+        if (enc[0]) {
             *q++ = ' '; *q++ = '-'; *q++ = ' ';
             /* Bound by the BUFFER, not by a number that happened to work.
              * This was `q - b < 30`, and the prefix "430 kbps - 44.1 kHz - "
@@ -6561,12 +7792,17 @@ ui_tail:
              * looked wrong. FLAC writes "FLAC 16-bit" and it showed as
              * "FLAC 16-" on every lossless track. b is char[40] and the whole
              * line is 34, so the space was always there. */
-            for (const char *t = track_encoder;
+            for (const char *t = enc;
                  *t && q < b + sizeof(b) - 1u; ) *q++ = *t++;
         }
         *q = 0;
         fb_set_color(UI_FAINT, UI_PANEL);
-        fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X, ui_text_w);
+        /* Clip short of the badge. Today's longest row ends well left of it,
+         * but the engine does not bounds-check and a future LAME string would
+         * run straight under the chip. */
+        fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X,
+                        (ui_text_w > ui_badge_w + BADGE_GAP)
+                        ? ui_text_w - ui_badge_w - BADGE_GAP : ui_text_w);
     }
 
     /* Thin progress bar. Total length comes from the file size APF reports
@@ -7002,6 +8238,42 @@ ui_tail:
         uint16_t sbg = ui_grad_at((FB_H - 24u));
         fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg);
         fb_set_color(UI_RED, sbg);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+#if SCROBBLE_TRACE
+    if (scr_uptime != ui_last_scr) {
+        ui_last_scr = scr_uptime;
+        uint32_t want = track_secs / 2u;
+        if (want > 240u) want = 240u;
+        char b[48], *q = b;
+        *q++ = 'S'; *q++ = 'C'; *q++ = 'R'; *q++ = ' ';
+        q = ui_dec(q, scr_n);
+        *q++ = ' '; *q++ = 'P'; q = ui_dec(q, scr_played);
+        *q++ = '/'; q = ui_dec(q, track_secs < 30u ? 0u : want);
+        if (scr_done) { *q++ = ' '; *q++ = 'O'; *q++ = 'K'; }
+        *q = 0;
+        uint16_t sbg2 = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), sbg2);
+        fb_set_color(UI_RED, sbg2);
+        fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
+    }
+#endif
+
+#if LRC_TRACE
+    if (ui_sec != ui_last_lrc) {
+        ui_last_lrc = ui_sec;
+        char b[48], *q = b;
+        const char *p0 = "LRC ";
+        while (*p0) *q++ = *p0++;
+        q = ui_dec(q, lrc_us);
+        *q++ = 'u'; *q++ = 's'; *q++ = ' '; *q++ = 'M'; *q++ = 'A'; *q++ = 'X';
+        q = ui_dec(q, lrc_us_max);
+        *q = 0;
+        uint16_t lbg = ui_grad_at((FB_H - 24u));
+        fb_rect(UI_MARGIN, FB_H - 24u, UI_INNER_W, FB_CELL(TS_1X), lbg);
+        fb_set_color(UI_RED, lbg);
         fb_text_clipped(UI_MARGIN, FB_H - 24u, b, TS_1X, TS_1X, UI_INNER_W);
     }
 #endif
@@ -7470,14 +8742,20 @@ static void sleep_pump(void)
     }
 }
 
-static void ui_blank_pump(void)
+/* One second, unconditionally. The blank countdown is a CONSUMER of this
+ * tick now rather than the thing that drives it -- that coupling is what left
+ * the wall clock stopped whenever the blank timeout was off. */
+static void ui_clock_pump(void)
 {
-    if (screen_blank || !blank_min) return;
     if ((int32_t)(cycles() - blank_tick) < 0) return;
     blank_tick = cycles() + CLK_HZ;
+    scr_uptime++;
+
+    if (screen_blank || !blank_min) return;
     if (blank_sec < 0xFFFFu) blank_sec++;
     if (blank_sec >= blank_min * 60u) ui_blank_enter();
 }
+
 
 /* Black the whole frame. Only the framebuffer -- there is no way to switch the
  * panel itself off from a core, so "blank" means every pixel black. The
@@ -7517,6 +8795,29 @@ static void poll_input(void)
      * so nothing downstream also acts on them. Select is deliberately left in
      * `keys`/`fall`: its tap-to-close is the same code that opened it, and its
      * hold timer reads `keys` directly. */
+    /* The cheatsheet owns the whole pad while it is up: B closes it and
+     * everything else is swallowed, so reading the controls cannot change a
+     * setting. `keys` is cleared too, which also disarms the Start hold that
+     * opened it -- see the disarm in the Start block. */
+    if (ctl_open) {
+        if (edge & KEY_B) ctl_close();
+        edge = 0; fall = 0; keys = 0;
+    }
+
+    /* The code owns the WHOLE pad while it is up -- a user holding a phone at
+     * the screen must not be able to skip a track by fumbling the d-pad. The
+     * triggers are left in `keys` so the hold that closes it can be seen; B
+     * closes it outright. */
+    if (qr_ui_open) {
+        if (edge & KEY_B) qr_ui_close();
+        else if ((edge & KEY_LEFT) && qr_page)
+            qr_show_page((uint8_t)(qr_page - 1u));
+        else if ((edge & KEY_RIGHT) && (uint32_t)qr_page + 1u < qr_pages)
+            qr_show_page((uint8_t)(qr_page + 1u));
+        edge = 0; fall = 0;
+        keys &= (KEY_L1 | KEY_R1);
+    }
+
     if (pl_ui_open && !pl_count) {      /* list emptied underneath it */
         pl_ui_open = 0u; pl_ui_restore = 1u;
     }
@@ -7727,6 +9028,28 @@ static void poll_input(void)
             eq_apply = 1u;
         }
     }
+    /* Start: TAP stops, HOLD brings up the controls cheatsheet.
+     *
+     * The stop moved from the press to the RELEASE, and it had to: the press
+     * is also the start of the hold, so leaving the stop there would halt the
+     * music every time someone reached for the cheatsheet. This is the
+     * discipline A and Left/Right already use -- the tap resolves on release
+     * and is suppressed when the hold has already fired.
+     *
+     * SPEED_HOLD_MS (1 s) rather than PL_HOLD_MS (400 ms). 400 is short
+     * enough that an unhurried press meaning "stop" would open the sheet
+     * instead, and getting a screenful of text when you wanted silence is a
+     * worse miss than having to hold a beat longer.
+     *
+     * The DEBUG_DIAG readouts stay on the PRESS and deliberately do not arm
+     * the hold: they are Select combos, they never ship, and a developer
+     * poking at a diagnostic is not about to hold the button for a second
+     * first. */
+    {
+    static uint32_t st_t0;
+    static uint8_t  st_fired, st_armed;
+    const uint32_t  st_hold_cy = CLK_HZ / 1000u * SPEED_HOLD_MS;
+
     if (edge & KEY_START) {
 #if DEBUG_DIAG
         /* Seek state, live. Kept after the hold-to-seek fault: that took five
@@ -7796,10 +9119,26 @@ static void poll_input(void)
             ui_toast_set(b, 0xFFFFFFFFu, 0);
         } else
 #endif
-        if (!stopped) {
-            stopped = 1u; paused |= 1u; stop_req = 1u;
-        }
+        { st_t0 = cycles(); st_fired = 0; st_armed = 1u; }
     }
+
+    if ((keys & KEY_START) && st_armed && !st_fired &&
+        (int32_t)(cycles() - st_t0) >= (int32_t)st_hold_cy) {
+        st_fired  = 1;
+        ctl_open  = 1u;
+        ctl_dirty = 1u;
+    }
+
+    if ((fall & KEY_START) && st_armed && !st_fired && !stopped) {
+        stopped = 1u; paused |= 1u; stop_req = 1u;
+    }
+
+    /* AFTER both actions, for the reason the A block spells out: on the
+     * release pass `keys` has already lost START while `fall` still carries
+     * it, so disarming first would eat every ordinary tap. */
+    if (!(keys & KEY_START)) st_armed = 0u;
+    }
+
     if (edge & KEY_B) {
 #if DEBUG_DIAG
         if (keys & KEY_SELECT) { sel_used = 1; pl_dump_req = 1u; }
@@ -7909,6 +9248,33 @@ static void poll_input(void)
         ui_blank_touch();               /* restart the countdown from now */
         if (blank_min) ui_toast_set("SCREEN BLANK", blank_min, " MIN");
         else           ui_toast_msg("SCREEN BLANK OFF");
+    }
+
+    /* ---- Both triggers held: the scrobble code ----------------------------
+     * Every Select combination was already taken, and L and R are the one
+     * pair that can be claimed TOGETHER for free: pressing them changes the
+     * accent one step back and one step forward, which cancels, so the user
+     * ends on the colour they started with and only then does the code
+     * appear. A hold rather than a press, so neither colour step is lost.
+     *
+     * lr2_t0 is only read while lr2_armed is set -- a bare 0 deadline reads
+     * as "due 35 seconds ago" or "due shortly" depending on where the free
+     * running counter happens to be, which has cost this project a day. */
+    {
+        static uint32_t lr2_t0;
+        static uint8_t  lr2_armed, lr2_fired;
+        if ((keys & (KEY_L1 | KEY_R1)) == (KEY_L1 | KEY_R1)) {
+            if (!lr2_armed) { lr2_armed = 1u; lr2_fired = 0u; lr2_t0 = cycles(); }
+            else if (!lr2_fired &&
+                     (int32_t)(cycles() - lr2_t0) >=
+                     (int32_t)(CLK_HZ / 1000u * PL_HOLD_MS)) {
+                lr2_fired = 1u;
+                sel_used  = 1;          /* not a Select tap, if one is down */
+                qr_ui_toggle();
+            }
+        } else {
+            lr2_armed = 0u;
+        }
     }
 
     /* ---- Select as a modifier for L/R ---- */
@@ -10145,6 +11511,7 @@ static int load_track(void)
     /* A NEW track starts at 0:00, and this is the one place that knows one
      * started. ui_draw_chrome used to do it, which caught every repaint too. */
     ui_sec = 0; ui_sec_acc = 0; ui_last_frames = 0xFFFFFFFFu;
+    scr_track_start();
     track_kbps = 0; track_hz = 0; samp_per_frame = 1152u;
     /* FLAC-only, and it LEAKED. Nothing cleared it on an MP3 load, so an
      * MP3 played after a FLAC inherited that FLAC's first-frame offset --
@@ -10910,7 +12277,7 @@ int main(void)
          * is the whole reason this feature exists and was exactly the case it
          * missed. poll_input() resets the counter on a press just above, so the
          * ordering here is right. */
-        ui_blank_pump();
+        ui_clock_pump();
         sleep_pump();
 #if SEEK_TRACE
         seek_trace_dump();

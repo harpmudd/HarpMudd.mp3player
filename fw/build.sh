@@ -59,12 +59,24 @@ player)
       $HELIX/real/hufftabs.c $HELIX/real/imdct.c $HELIX/real/polyphase.c \
       $HELIX/real/scalfact.c $HELIX/real/stproc.c $HELIX/real/subband.c \
       $HELIX/real/trigtabs.c \
-      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $FW/picojpeg.o $FW/flac.o"
-    INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg"
+      $FW/start.S $FW/player.c $FW/sysio.c $FW/alloc.c $FW/picojpeg.o $FW/flac.o $FW/qrcodegen.o"
+    INC="-I $HELIX/pub -I $HELIX/real -I $ROOT/third_party/picojpeg -I $ROOT/third_party/qrcodegen"
     ;;
 *)
     echo "usage: $0 {player|bringup}"; exit 1 ;;
 esac
+
+# The QR encoder is -Os and -DNDEBUG. NDEBUG is not a nicety here: the
+# library asserts liberally, and every assert drags in __assert_func plus the
+# file-name and expression strings, which is kilobytes of .rodata for checks
+# that can only fire on a programming error in a call site we control.
+# It runs once, when the user asks for the code, so size beats speed outright.
+rm -f "$FW/qrcodegen.o"
+if ! "$GCC" -march=rv32im -mabi=ilp32 -mno-relax -Os -DNDEBUG -ffreestanding         -I "$ROOT/third_party/qrcodegen" -c         -o "$FW/qrcodegen.o" "$ROOT/third_party/qrcodegen/qrcodegen.c"         > "$FW/build.log" 2>&1; then
+    cat "$FW/build.log" >&2
+    echo "*** qrcodegen.c FAILED TO COMPILE ***" >&2
+    exit 1
+fi
 
 # Compile status is checked EXPLICITLY. This used to be
 #   "$GCC" ... 2>&1 | grep -v "LOAD segment with RWX" || true

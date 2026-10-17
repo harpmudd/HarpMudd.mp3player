@@ -168,6 +168,38 @@ static int art_find_apic(uint32_t tag_len)
             }
             if (i >= win) return 0;
 
+            /* The field walk is a HINT. Verify it landed on SOI, and go
+             * looking if it did not.
+             *
+             * The description is a NUL-terminated string and the spec makes
+             * it mandatory even when empty, but Widespread Panic's
+             * "Goodpeople" carries an APIC body of
+             *
+             *     00 'J' 'P' 'G' 00 00 FF D8 FF E0 ...
+             *
+             * -- encoding, a three-letter FORMAT where a MIME type belongs
+             * (that is ID3v2.2's PIC layout, inside a v2.3 APIC frame), the
+             * picture type, and then straight into the image with no
+             * description and no terminator. Walking a description that is
+             * not there consumes the first five bytes of the JPEG: SOI, the
+             * APP0 marker and the high byte of its length. picojpeg is then
+             * handed a stream beginning 10 4A 46 49 and reports a file it
+             * cannot read, on a cover that is perfectly good.
+             *
+             * Searching the window we already hold costs nothing when the
+             * fields are right -- the test passes first time -- and rescues
+             * every layout that puts SOI somewhere else in the header. */
+            if (i + 1u >= win ||
+                !(tagbuf[i] == 0xFFu && tagbuf[i + 1u] == 0xD8u)) {
+                uint32_t k = 1u;
+                while (k + 2u < win &&
+                       !(tagbuf[k] == 0xFFu && tagbuf[k + 1u] == 0xD8u &&
+                         tagbuf[k + 2u] == 0xFFu))
+                    k++;
+                if (k + 2u >= win) return 0;    /* no image in the header window */
+                i = k;
+            }
+
             art_jpg_pos = body + i;
             art_jpg_end = p + 10u + fsize;
             art_win_len = 0;
