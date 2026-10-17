@@ -1018,7 +1018,7 @@ exactly as before. Bit 31 must stay clear -- APF stores these signed.
 would catch the next raise too.
 
 
-## A track change paints over the controls overlay — FOUND 2026-10-17, for the next bugfix
+## A track change paints over the controls overlay — SHIPPED in v1.8.1
 
 Reported against v1.8.0: hold Start for the cheatsheet, leave it up, and when
 the playing track ends and the next one loads, the overlay is overpainted. It
@@ -1064,7 +1064,34 @@ only runs on close.
 Worth re-reading that comment before adding any future overlay. It is the
 second time it has been right.
 
-## Close the controls overlay with Start as well as B — usability, same release
+### What it actually took: THREE passes, and the middle one was worse
+
+The one-line fix above is correct and insufficient, and the reason is worth
+keeping. **There is no back buffer.** Anything that paints while an overlay
+is up is on the glass, and there are three painters outside the per-frame
+path that a blocking track load reaches:
+
+1. `ui_draw_chrome()` itself. Redrawing the overlay after it still flashed --
+   scanout catches the middle of the repaint, seen as black boxes through the
+   panel. Fixed by returning early from `ui_draw_chrome()` while `ctl_open`,
+   the same shape as the `screen_blank` guard two lines above it, and letting
+   the close repaint. The tail `ctl_draw()` then became unreachable and went.
+2. `ui_boot_note()`, which arms "LOADING TRACK" on every track change and
+   paints THREE times: the transport-row wipe, the toast-band wipe, and the
+   label. Guarding only the first left the label and a cleared toast band
+   painting through -- and once (1) stopped chrome repainting, they PERSISTED.
+   That combination was worse than the original bug. One guard now covers
+   every paint in the function; the toast retirement stays ahead of it,
+   because that is state and skipping it leaves a stale toast to flash on
+   close.
+3. `ui_splash()`, which the idle branch of the load calls unconditionally.
+   Probably unreachable with the overlay up, guarded anyway.
+
+**The lesson for the next overlay: enumerate every painter that can fire
+during a blocking load BEFORE writing the first guard.** Fixing them one at a
+time means each fix exposes the next, and costs a hardware round each.
+
+## Close the controls overlay with Start as well as B — SHIPPED in v1.8.1
 
 Requested 2026-10-17. Start opens it; Start should close it too, rather than
 only B.
@@ -1081,10 +1108,13 @@ the very next pass. The press that closes the overlay therefore cannot also
 fire the tap-stop on its release -- `st_armed` is 0 until a fresh press arms
 it. Re-check that when touching either piece.
 
-The on-screen hint reads `B CLOSES` and has to change with it; measure the
-new string against `CTL_W - 2 * CTL_PAD` before assuming it fits.
+The on-screen hint became `B / START CLOSES` and was then **removed
+entirely** at the user's call: B backing out is the convention everywhere
+else in this core, and spelling it out on the one screen whose whole job is
+to list the controls reads as condescending. The header carries the title
+alone.
 
-## The previous track's lyrics stay up during a track change — MOVED to 1.8.1
+## The previous track's lyrics stay up during a track change — STILL OPEN after 1.8.1
 
 Reported 2026-10-16, against the lyrics meter: skip forward while the lyrics
 view is showing and the OUTGOING track's words stay on screen until the new
@@ -1106,8 +1136,9 @@ function (line 10484 there), with the same comment above it. The lyrics-name
 fix in 1.8.0 changed only where `lrc_load()` gets the filename and nothing
 about when lyrics are cleared.
 
-Deferred at the 1.8.0 signoff on 2026-10-17, then pulled into **1.8.1** as a
-bugfix release was opened for it anyway.
+Deferred at the 1.8.0 signoff on 2026-10-17, pulled into 1.8.1 when a bugfix
+release opened, then held back again: 1.8.1 shipped the two controls-overlay
+items alone, to get them out fast. Still open.
 
 ### THE CAUSE ABOVE IS WRONG. Corrected 2026-10-17.
 
@@ -3027,7 +3058,17 @@ cheapest first -- a longer threshold for A alone (say 800 ms, since nothing
 about speed needs to be quick); require Select+A; or drop the gesture and put
 speed in Core Settings, which costs a slot but cannot be hit by accident.
 
-## Scrobble log (.scrobbler.log) — requested by a user 2026-08-11
+## Scrobble log (.scrobbler.log) — SHIPPED DIFFERENTLY in v1.8.0
+
+**Answered, but not by writing a file.** Scrobbling ships as a QR code the
+phone scans (hold both shoulder buttons), with a GitHub Pages page submitting
+the plays. No `.scrobbler.log` is written, because `0184` file-writing is OFF
+PERMANENTLY -- it extended the user's own .mp3 files threefold. The timestamp
+research below was still the thing that made it possible: `R_RTC` landed in
+interlock rev 25 and the QR payload carries real epoch seconds.
+
+The original request, for the record:
+
 
 "Could the core write played tracks to a log file like Rockbox does, so I can
 feed it to a last.fm scrobbler?" Rockbox writes `.scrobbler.log`: a header plus
