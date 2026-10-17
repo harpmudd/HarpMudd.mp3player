@@ -1036,7 +1036,7 @@ it. Re-check that when touching either piece.
 The on-screen hint reads `B CLOSES` and has to change with it; measure the
 new string against `CTL_W - 2 * CTL_PAD` before assuming it fits.
 
-## The previous track's lyrics stay up during a track change — DEFERRED to 1.9.0
+## The previous track's lyrics stay up during a track change — MOVED to 1.8.1
 
 Reported 2026-10-16, against the lyrics meter: skip forward while the lyrics
 view is showing and the OUTGOING track's words stay on screen until the new
@@ -1058,18 +1058,50 @@ function (line 10484 there), with the same comment above it. The lyrics-name
 fix in 1.8.0 changed only where `lrc_load()` gets the filename and nothing
 about when lyrics are cleared.
 
-Deferred deliberately at signoff on 2026-10-17: cosmetic, bounded by the cover
-decode, and present in the shipped product since v1.7.0 without a report until
-now.
+Deferred at the 1.8.0 signoff on 2026-10-17, then pulled into **1.8.1** as a
+bugfix release was opened for it anyway.
 
-### The fix, when it is taken
+### THE CAUSE ABOVE IS WRONG. Corrected 2026-10-17.
 
-Clear at the START of the track change rather than at the end of the load.
-A bare `lrc_clear()` at the top of `load_track()` is not enough on its own:
-it sets `lrc_n = 0`, so the box would flash **NO LYRICS** for the length of
-the load and trade a stale-text bug for a false-negative one. Pair it with
-suppressing that message while a load is in flight -- the same shape as
-`art_ready` -- so the box is simply empty until the real lines arrive.
+The write-up said `lrc_n` still holds the old lines "and the meter keeps
+drawing them". It does not, because **nothing repaints during a track load at
+all**. Checked rather than assumed:
+
+- `load_track()` is blocking, called from the main loop, so `ui_draw_dynamic()`
+  -- which is what draws the meter -- cannot run while it is in progress.
+- The only two things that do draw from inside the load are `ui_boot_tick()`
+  and `ui_wave_anim_tick()`, reached through `target_read_slot()`'s spin. Both
+  return immediately unless armed (`ui_boot_msg`, `wv_on`), and both are armed
+  only at boot. Mid-session they are no-ops.
+- `lrc_load()` runs at player.c:11851 and `ui_draw_chrome()` at :11860, so the
+  lyrics DATA is already correct before the first repaint of the new track.
+
+So the previous track's words are not being redrawn -- they are simply the
+**previous frame, still on the glass**, because nothing erases it until
+`ui_draw_chrome()` wipes the screen near the end of the load. The bug is stale
+PIXELS, not stale data.
+
+**This matters, because the fix written here first would have done nothing.**
+Clearing `lrc_n` at the top of `load_track()` changes no pixels: there is no
+draw between that clear and the repaint that was going to fix it anyway. It
+would have been shipped, tested, and found to change nothing.
+
+### The fix
+
+Erase the lyrics box at the START of `load_track()`, so the old words go the
+moment the track changes and the box sits empty until the new ones arrive.
+The geometry is the one the lyrics branch of `ui_draw_dynamic()` already uses
+for its own `ui_bg_restore(UI_MARGIN, top, ww, boxh)`; lift it rather than
+restating it.
+
+No NO-LYRICS suppression is needed -- that concern came from the wrong model.
+The meter does not draw during the load, so there is nothing to flash; and a
+track that genuinely has no lyrics should say so once the load finishes, which
+is what will happen.
+
+Every other meter has the same stale-frame window. Only lyrics is noticeable,
+because text reads as wrong where a frozen waveform reads as paused. Fix
+lyrics; do not widen this.
 
 ## Resume only works with the DEFAULT playlist — SHIPPED in v1.2.0
 
