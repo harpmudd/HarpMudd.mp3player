@@ -1,7 +1,8 @@
 # MP3 Player — Analogue Pocket
 
 A music player for the Analogue Pocket. It plays MP3 and FLAC straight off the
-SD card, with album art, tags and meters.
+SD card, with album art, synced lyrics, an equalizer, thirteen meters and
+scrobbling to Last.fm.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
