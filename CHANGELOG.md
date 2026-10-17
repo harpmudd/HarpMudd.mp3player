@@ -16,6 +16,10 @@ What changed in each release, newest first.
   need. Nothing changes in use.
 - **Meter refinements.** The meters are taller, the bars are wider, and the
   VU meter has been rebuilt to look like a real instrument.
+- **The file format shows as a badge** — **MP3** or **FLAC** — in the corner
+  of the track card and of the playlist browser, where the browser's follows
+  the cursor. It used to be spelled out in the format row; a FLAC's row now
+  gives its bit depth on its own.
 - Fixed: **elapsed time stopped while the screen was blanked**, and did not
   catch up when the screen came back. Blanking is off unless you switch it on
   with **Select** + **Down**, so most people will never have seen it.

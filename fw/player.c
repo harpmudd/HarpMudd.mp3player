@@ -762,6 +762,7 @@ static uint32_t file_pos;       /* next byte offset to fetch from the file   */
 static uint32_t ring_fill;      /* valid bytes currently in the ring         */
 static uint32_t ring_rd;        /* read cursor within the ring               */ /* stream format, known only once decoding starts */
 static uint32_t ui_info_y;            /* where chrome left room for the format line */
+static uint32_t ui_badge_w;           /* codec chip's width, so the row clips short */
 static uint32_t ui_last_info, ui_last_prog, ui_pause_next, ui_breath, ui_icon_next;
 static uint32_t ui_arr_t, ui_wave_force, ui_accent_changed;
 
@@ -4086,6 +4087,125 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 
 static void pl_ui_draw(void);   /* defined with the overlay, below */
 
+/* The codec name as a chip in the card's bottom-right corner.
+ *
+ * The format row reads "1016 kbps - 44.1 kHz - FLAC 16-bit". Of those three
+ * fields the codec is the only one that is a CATEGORY rather than a
+ * measurement, and a chip says that at a glance where a third dash-separated
+ * clause has to be read to the end. So the name comes out of the row and the
+ * numbers stay. On an MP3 the row never carried the word at all -- it carries
+ * the LAME version -- so there the badge is new information rather than a
+ * move.
+ *
+ * ANCHORED TO THE CARD, not to ui_info_y. The title auto-fits between 1.5x
+ * and 2x, so the format row's y moves from track to track; the card's corner
+ * does not, and the corner is what the eye uses to place a thing like this.
+ * Anchoring to the row would make the badge jump a line between one track and
+ * the next.
+ *
+ * An OUTLINE, not a filled block: the fill is the card's own colour and only
+ * the 1 px edge and the text carry it. A filled chip at this size reads as a
+ * button -- as something to press -- which on a screen with no pointer is a
+ * lie. Drawn with fb_round_rect_on rather than fb_round_rect because it sits
+ * ON the panel: fb_round_rect cuts its corners to ui_grad_at() and would put
+ * four holes of background gradient inside the card.
+ *
+ * Returns its width, so the format row can clip short of it. */
+/* A ONE-PIXEL rounded outline.
+ *
+ * Not two nested fb_round_rect_on calls, which is what this was and why the
+ * chip came out as four disconnected segments. fb_round_rect fills the whole
+ * rectangle and only then repaints the corner cuts, so an inner call is a
+ * plain square as far as the corners are concerned: it erased the outer arc
+ * and left holes exactly where a box needs to turn. Four straight lines with
+ * nothing joining them is what reads as "drawn out of ASCII".
+ *
+ * So the ring is walked directly. Same integer corner search fb_round_rect
+ * uses, so the curve matches the card's; `run` carries the horizontal step
+ * between one row's inset and the row above it, which is what keeps the arc
+ * connected instead of dotted. */
+static void ui_chip_outline(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t r, uint16_t col)
+{
+    uint32_t cut0 = 0, prev;
+    {
+        uint32_t inner = 0;
+        while ((inner + 1u) * (inner + 1u) + r * r <= r * r) inner++;
+        cut0 = r - inner;
+    }
+    fb_rect(x + cut0, y, w - 2u * cut0, 1, col);
+    fb_rect(x + cut0, y + h - 1u, w - 2u * cut0, 1, col);
+
+    prev = cut0;
+    for (uint32_t i = 1u; i < r; i++) {
+        uint32_t dy = r - i, inner = 0, cut, run;
+        while ((inner + 1u) * (inner + 1u) + dy * dy <= r * r) inner++;
+        cut = r - inner;
+        run = (prev > cut) ? prev - cut : 1u;
+        fb_rect(x + cut,             y + i,             run, 1, col);
+        fb_rect(x + w - cut - run,   y + i,             run, 1, col);
+        fb_rect(x + cut,             y + h - 1u - i,    run, 1, col);
+        fb_rect(x + w - cut - run,   y + h - 1u - i,    run, 1, col);
+        prev = cut;
+    }
+    fb_rect(x,          y + r, 1, h - 2u * r, col);
+    fb_rect(x + w - 1u, y + r, 1, h - 2u * r, col);
+}
+
+#define BADGE_PADX  3u               /* text inset, left and right          */
+#define BADGE_GAP   8u               /* clear space the format row leaves   */
+#define BADGE_INSET 8u               /* from the card's right edge          */
+#define BADGE_DROP  8u               /* from the card's bottom edge         */
+
+/* The chip itself, placed by its BOTTOM-RIGHT corner.
+ *
+ * Right-and-bottom rather than top-left because that corner is the one that
+ * stays put: the label is 52 px for FLAC and 41 for MP3, and anchoring by the
+ * left edge would make the box grow leftward out of its corner. Two callers
+ * now -- the ID3 card and the playlist browser -- and they agree on
+ * everything but where that corner is and what colour to use. */
+static uint32_t ui_chip_draw(const char *lbl, uint32_t right, uint32_t bottom,
+                             uint16_t col)
+{
+    uint32_t tw = fb_text_width(lbl, TS_1X);
+    uint32_t h  = FB_CELL(TS_1X) + 1u;      /* 11 rows of ink, 3 clear each side */
+    /* -1 because fb_text_width sums ADVANCES, and the last glyph's advance
+     * carries its right side bearing -- 2 px on both C and 3, measured off a
+     * 1:1 capture. Without it the chip sits a pixel wider on the right than
+     * on the left for no reason the eye can account for. */
+    uint32_t w  = tw + 2u * BADGE_PADX - 1u;
+    uint32_t x  = right - w;
+    uint32_t y  = bottom - h;
+
+    /* TEXT FIRST, outline over it. fb_text_clipped paints the whole 16 px cell
+     * as background, and the cell has to sit 3 px down to centre the ink in an
+     * 18 px chip -- far enough that its last row would land on the bottom
+     * edge. Drawing the edge afterwards settles that, and the row the cell
+     * spills below the chip is card-coloured anyway, so it is invisible. */
+    fb_set_color(col, UI_PANEL);
+    fb_text_clipped(x + BADGE_PADX, y + 2u, lbl, TS_1X, TS_1X, tw);
+    ui_chip_outline(x, y, w, h, 3u, col);
+    return w;
+}
+
+/* The card's chip: the format the DECODER reported, in the colour of the
+ * format row directly above it. UI_FAINT rather than UI_DIM because the chip
+ * restates that row's last field and belongs at that row's weight -- a step
+ * brighter made it the loudest thing in the card.
+ *
+ * The card is drawn at (UI_MARGIN - 8, UI_TITLE_Y - 14) and is ui_text_w + 16
+ * by UI_CARD_H; derived from those rather than restated, so moving the card
+ * moves the chip with it. Anchored to the CARD and not to ui_info_y: the
+ * title auto-fits between 1.5x and 2x, so the format row's y moves from track
+ * to track while the corner does not. */
+static uint32_t ui_codec_badge(void)
+{
+    uint32_t card_r = (UI_MARGIN - 8u) + ui_text_w + 16u;
+    uint32_t card_b = (UI_TITLE_Y - 14u) + UI_CARD_H;
+    return ui_chip_draw((track_fmt == FMT_FLAC) ? "FLAC" : "MP3",
+                        card_r - BADGE_INSET, card_b - BADGE_DROP, UI_FAINT);
+}
+
 static void ui_draw_chrome(void)
 {
     /* Draw nothing at all while blanked -- a track change must not light the
@@ -4229,6 +4349,10 @@ static void ui_draw_chrome(void)
     }
 
     ui_info_y    = y;
+    /* After the rows, so it paints over the card rather than under whatever
+     * the last row left -- and after track_fmt is known, which it is:
+     * load_track() calls read_track_head() before it calls this. */
+    ui_badge_w   = ui_codec_badge();
     ui_last_info = 0xFFFFFFFFu;
     und1_sec     = 0xFFFFFFFFu;   /* the latch is per TRACK, not per boot */
     und2_sec     = 0xFFFFFFFFu;
@@ -5372,6 +5496,39 @@ static void pl_ui_label(uint16_t pos, char *out, uint32_t cap)
     out[u8_trim(out, n)] = 0;
 }
 
+/* The codec of a browser entry, from its EXTENSION.
+ *
+ * Which is all the browser can afford to know. The player detects format from
+ * the file's first four bytes precisely because the extension can lie, but
+ * doing that here would be a far read per row on a slot that is not the
+ * stream -- the fragment-cache stutter, once per cursor move. So a
+ * mislabelled file shows one thing in the list and another once it plays.
+ * That is the honest price of the browser costing nothing, and it is the same
+ * trade pl_ui_label() already makes when it strips ".mp3" off a name.
+ *
+ * Returns 0 for anything else, and nothing is drawn. */
+static int pl_ext_is(const char *e, const char *want)
+{
+    for (; *want; e++, want++) {
+        uint32_t c = (uint8_t)*e;
+        if (c >= 'A' && c <= 'Z') c += 32u;
+        if (c != (uint32_t)*want) return 0;
+    }
+    return !*e;
+}
+
+static const char *pl_ui_codec(uint16_t pos)
+{
+    if (pos >= pl_count) return 0;
+    const char *nm = plt_name_at(pl_off[pl_order[pos]]);
+    uint32_t dot = 0;
+    for (uint32_t i = 0; nm[i]; i++) if (nm[i] == '.') dot = i;
+    if (!dot) return 0;
+    if (pl_ext_is(nm + dot + 1u, "flac")) return "FLAC";
+    if (pl_ext_is(nm + dot + 1u, "mp3"))  return "MP3";
+    return 0;
+}
+
 /* Keeps the selection on screen after any move. */
 static void pl_ui_follow(void)
 {
@@ -5551,6 +5708,26 @@ static void pl_ui_draw(void)
     }
 
     for (uint32_t i = 0; i < PL_UI_ROWS; i++) pl_ui_row(i);
+
+    /* Codec chip, bottom-right -- the same furniture as the card's, sitting in
+     * the padding the list already leaves below its last row (PL_UI_PAD_B is
+     * 22, the chip is 17).
+     *
+     * UI_DIM, not the card's UI_FAINT. The rule both follow is "match the
+     * weight of the text around you": on the card that is the format row, in
+     * here it is the list, and UI_FAINT would make the chip the dimmest thing
+     * in a panel otherwise full of UI_DIM. Through pl_fade() like everything
+     * else inside the overlay, or it would be left at full strength while the
+     * rest of the panel is still coming up.
+     *
+     * No clearing needed on a selection change: every move sets pl_ui_dirty,
+     * which repaints the whole panel from the round rect up, so a 52 px FLAC
+     * cannot leave a tail behind a 41 px MP3. */
+    {
+        const char *cz = pl_ui_codec(pl_ui_sel);
+        if (cz) ui_chip_draw(cz, PL_UI_X + PL_UI_W - 8u,
+                             PL_UI_Y + h - 3u, pl_fade(UI_DIM));
+    }
 }
 
 
@@ -7496,7 +7673,14 @@ ui_tail:
          * belongs here with the other format facts rather than in a screen of
          * its own -- and putting it here is what stops the bitrate being
          * repeated, which it was when this had its own view. */
-        if (track_encoder[0]) {
+        /* The name itself is on the badge now, so a FLAC contributes only its
+         * bit depth here -- "FLAC 16-bit" becomes "16-bit". An MP3's string is
+         * the LAME version and has no name in it to strip. */
+        const char *enc = track_encoder;
+        if (enc[0] == 'F' && enc[1] == 'L' && enc[2] == 'A' && enc[3] == 'C'
+            && enc[4] == ' ')
+            enc += 5;
+        if (enc[0]) {
             *q++ = ' '; *q++ = '-'; *q++ = ' ';
             /* Bound by the BUFFER, not by a number that happened to work.
              * This was `q - b < 30`, and the prefix "430 kbps - 44.1 kHz - "
@@ -7505,12 +7689,17 @@ ui_tail:
              * looked wrong. FLAC writes "FLAC 16-bit" and it showed as
              * "FLAC 16-" on every lossless track. b is char[40] and the whole
              * line is 34, so the space was always there. */
-            for (const char *t = track_encoder;
+            for (const char *t = enc;
                  *t && q < b + sizeof(b) - 1u; ) *q++ = *t++;
         }
         *q = 0;
         fb_set_color(UI_FAINT, UI_PANEL);
-        fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X, ui_text_w);
+        /* Clip short of the badge. Today's longest row ends well left of it,
+         * but the engine does not bounds-check and a future LAME string would
+         * run straight under the chip. */
+        fb_text_clipped(UI_MARGIN, ui_info_y, b, TS_1X, TS_1X,
+                        (ui_text_w > ui_badge_w + BADGE_GAP)
+                        ? ui_text_w - ui_badge_w - BADGE_GAP : ui_text_w);
     }
 
     /* Thin progress bar. Total length comes from the file size APF reports

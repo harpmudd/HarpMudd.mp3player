@@ -51,7 +51,7 @@ The controls:
 | **L** + **R** | *Hold* — the scrobble code; **Left** / **Right** page, **B** closes |
 | **Up** / **Down** | Volume, in 5% steps |
 | **B** | Restart the current track from the beginning |
-| **X** | Cycle the meter (twelve styles) |
+| **X** | Cycle the meter (thirteen styles) |
 | **Y** | Cycle the EQ preset (eight) |
 | **Select** | *Tap* — playlist browser; *Hold* — show / hide the album art panel |
 | **L** / **R** | Cycle the accent color (12 shades) |
@@ -115,6 +115,8 @@ characters come from `mp3font.bin`, which the core loads at startup.
   **EQ preset name**, and the position in the playlist.
 - **Bitrate and sample rate**, with the encoder that made the file where it
   says so — `128 kbps - 44.1 kHz - LAME3.100`.
+- **The file format**, as an **MP3** or **FLAC** badge in the card's corner. A
+  FLAC's row gives its bit depth in place of the name.
 
 Tapping **Select** replaces this screen with the
 [playlist browser](#the-playlist-browser) until you close it.
@@ -179,7 +181,10 @@ hidden while you look.
 | **Select** or **B** | Close without changing anything |
 
 Rows show filenames rather than tags — a tag lives inside its file, so naming
-every row would mean opening all 256 of them. With shuffle on, the list is the
+every row would mean opening all 256 of them. A badge in the corner gives the
+format of whatever the cursor is on, taken from the filename for that same
+reason, so a file with a misleading extension is labelled by its name here and
+by its contents once it plays. With shuffle on, the list is the
 play queue, so scrolling down shows what's actually coming rather than the file
 order.<br clear="right">
 
