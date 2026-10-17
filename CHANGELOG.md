@@ -2,6 +2,13 @@
 
 What changed in each release, newest first.
 
+## v1.8.1 — unreleased
+
+- **The controls cheatsheet closes with Start as well as B.** Start is what
+  opens it, so it is the button you reach for to put it away.
+- Fixed: **a track change painted over the controls cheatsheet** while it was
+  open. It stays in front now until you close it.
+
 ## v1.8.0 — 17 October 2026
 
 - **Scrobbling to Last.fm.** The player now keeps track of what you have

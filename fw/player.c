@@ -4909,11 +4909,31 @@ static void ui_boot_note(const char *msg)
      * for the whole of roughly every other load, which is why they were
      * "rarely seen". Same fault as fl_ui_next and pl_poll_at in c501764. */
     ui_boot_next = cycles();                /* first tick paints immediately */
-    /* WIPE FIRST. On the splash this row is empty so it never mattered, but in
-     * the player it is the transport row -- PLAYING, the repeat and shuffle
-     * arrows, the EQ name -- and writing over it left the old glyphs showing
-     * around the shorter new text. */
-    fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
+    /* NOT UNDER THE CONTROLS OVERLAY.
+     *
+     * UI_BOOT_Y is 262 and the cheatsheet covers y 8..350, so arming the note
+     * here puts "LOADING TRACK" and its animated dots straight through it --
+     * which is exactly what a track change did, seen as glyphs peeking out of
+     * the panel. ui_boot_tick() is reached from target_read_slot()'s spin, so
+     * it keeps painting for the whole blocking load.
+     *
+     * Dropped rather than deferred: it is progress feedback for a screen
+     * nobody is looking at, and closing the overlay repaints the real
+     * transport row anyway. Clearing ui_boot_msg also makes the tick inert,
+     * so one guard covers both the wipe and the dots.
+     *
+     * The toast retirement below still runs. That is state, not paint, and
+     * skipping it would leave the previous load's toast to flash when the
+     * overlay closes -- the very thing its own comment is about. */
+    if (ctl_open) {
+        ui_boot_msg = 0;
+    } else {
+        /* WIPE FIRST. On the splash this row is empty so it never mattered,
+         * but in the player it is the transport row -- PLAYING, the repeat and
+         * shuffle arrows, the EQ name -- and writing over it left the old
+         * glyphs showing around the shorter new text. */
+        fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
+    }
 
     /* Retire any live toast. This row and the toast band are both "what is
      * happening", and they must not disagree.
@@ -5804,16 +5824,10 @@ UI_COLD static void ctl_draw(void)
     fb_set_color(ui_accent, UI_PANEL);
     fb_text_clipped(CTL_KEYX, y0 + 14u, "CONTROLS", TS_1X, TS_1X,
                     CTL_W - 2u * CTL_PAD);
-    {
-        /* Right-aligned, because a reader who does not know how to get OUT of
-         * a screen they opened by accident is the one failure this must not
-         * have. */
-        const char *hint = "B / START CLOSES";
-        uint32_t hw = fb_text_width(hint, TS_1X);
-        fb_set_color(UI_FAINT, UI_PANEL);
-        fb_text_clipped(CTL_X + CTL_W - CTL_PAD - hw, y0 + 14u, hint,
-                        TS_1X, TS_1X, hw);
-    }
+    /* No "how to close" hint. It said B / START CLOSES, and B backing out of
+     * a screen is the convention everywhere else in this core -- spelling it
+     * out on the one screen whose whole job is to list the controls reads as
+     * condescending. The header carries the title alone. */
     /* A rule under the header, so the rows read as a table rather than as
      * nineteen loose lines under a title. */
     fb_rect(CTL_KEYX, y0 + 34u, CTL_W - 2u * CTL_PAD, 1u,
