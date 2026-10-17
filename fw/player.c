@@ -4602,6 +4602,13 @@ static void ui_splash_card(uint32_t f, uint32_t den)
 
 static void ui_splash(void)
 {
+    /* Belt and braces against the cheatsheet. The idle path at the track
+     * load calls this, and a full-screen splash over an open overlay would
+     * be the loudest version of the bleed-through this release is fixing.
+     * Probably unreachable -- input is swallowed while the overlay is up, so
+     * a load cannot be started from idle -- but the guard is one line and
+     * being wrong costs a hardware round. */
+    if (ctl_open) return;
     ui_gradient();
     ui_splash_card(1u, 1u);
 }
@@ -4941,16 +4948,6 @@ static void ui_boot_note(const char *msg)
      * The toast retirement below still runs. That is state, not paint, and
      * skipping it would leave the previous load's toast to flash when the
      * overlay closes -- the very thing its own comment is about. */
-    if (ctl_open) {
-        ui_boot_msg = 0;
-    } else {
-        /* WIPE FIRST. On the splash this row is empty so it never mattered,
-         * but in the player it is the transport row -- PLAYING, the repeat and
-         * shuffle arrows, the EQ name -- and writing over it left the old
-         * glyphs showing around the shorter new text. */
-        fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
-    }
-
     /* Retire any live toast. This row and the toast band are both "what is
      * happening", and they must not disagree.
      *
@@ -4958,9 +4955,34 @@ static void ui_boot_note(const char *msg)
      * survives a repaint, which also means the PREVIOUS load's toast gets
      * redrawn for a frame as the next load completes -- seen as a quick flash
      * of stale text on the toast line. Killing it here means the newer message
-     * is the only one making a claim. */
+     * is the only one making a claim.
+     *
+     * STATE, so it runs even under the overlay -- otherwise a stale toast
+     * would be waiting to flash the moment the overlay closes. */
     ui_toast_t0   = 0;
     ui_toast_step = 0;
+
+    /* NOTHING PAINTS UNDER THE CONTROLS CHEATSHEET, and that means every
+     * paint below this line, not just the first one.
+     *
+     * UI_BOOT_Y is 262 and UI_TOAST_Y is above it; the panel covers y 8..350,
+     * so all three paints here land inside it -- the transport-row wipe, the
+     * toast-band wipe, and the label itself. Guarding only the first left
+     * "LOADING TRACK" and a cleared toast band painting straight through the
+     * panel, and they then PERSISTED, because ui_draw_chrome() no longer
+     * repaints over them while the overlay is up. Worse than the bug it was
+     * meant to fix.
+     *
+     * Clearing ui_boot_msg also makes ui_boot_tick() inert, so the dots that
+     * follow the label stay away too. ui_boot_x is left unset, which is safe
+     * for the same reason: only the tick reads it. */
+    if (ctl_open) { ui_boot_msg = 0; return; }
+
+    /* WIPE FIRST. On the splash this row is empty so it never mattered, but in
+     * the player it is the transport row -- PLAYING, the repeat and shuffle
+     * arrows, the EQ name -- and writing over it left the old glyphs showing
+     * around the shorter new text. */
+    fb_rect(UI_MARGIN, UI_BOOT_Y, UI_INNER_W, FB_CELL(TS_1X), ui_boot_bg());
     fb_rect(UI_MARGIN, UI_TOAST_Y, UI_INNER_W, UI_TOAST_H, ui_grad_at(UI_TOAST_Y));
 
     fb_set_color(UI_WHITE, ui_boot_bg());
