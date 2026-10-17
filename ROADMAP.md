@@ -970,6 +970,41 @@ until a version is actually tagged, and set `date_release` to the same day.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
+## The previous track's lyrics stay up during a track change — DEFERRED to 1.9.0
+
+Reported 2026-10-16, against the lyrics meter: skip forward while the lyrics
+view is showing and the OUTGOING track's words stay on screen until the new
+track actually starts, then snap to the right ones.
+
+Diagnosed, not fixed. `load_track()` does its lyrics work at
+
+```c
+if (viz_mode == VIZ_LYRICS) lrc_load(); else lrc_clear();
+```
+
+which sits about 390 lines in, AFTER the artwork decode -- 43 to 207 reads for
+a typical cover. Until that line runs, `lrc_n` still holds the previous
+track's lines and the meter keeps drawing them, so the stale window is however
+long the cover takes.
+
+NOT a 1.8.0 regression: v1.7.0 has the same call at the same point in the same
+function (line 10484 there), with the same comment above it. The lyrics-name
+fix in 1.8.0 changed only where `lrc_load()` gets the filename and nothing
+about when lyrics are cleared.
+
+Deferred deliberately at signoff on 2026-10-17: cosmetic, bounded by the cover
+decode, and present in the shipped product since v1.7.0 without a report until
+now.
+
+### The fix, when it is taken
+
+Clear at the START of the track change rather than at the end of the load.
+A bare `lrc_clear()` at the top of `load_track()` is not enough on its own:
+it sets `lrc_n = 0`, so the box would flash **NO LYRICS** for the length of
+the load and trade a stale-text bug for a false-negative one. Pair it with
+suppressing that message while a load is in flight -- the same shape as
+`art_ready` -- so the box is simply empty until the real lines arrive.
+
 ## Resume only works with the DEFAULT playlist — SHIPPED in v1.2.0
 
 Reported against v1.1.0: resume restored track and position with

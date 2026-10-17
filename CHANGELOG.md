@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.8.0 — unreleased
+## v1.8.0 — 17 October 2026
 
 - **Scrobbling to Last.fm.** The player now keeps track of what you have
   listened to and shows it as a QR code — hold both shoulder buttons. Scan it
