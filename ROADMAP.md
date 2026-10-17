@@ -1784,6 +1784,75 @@ is the exact mistake that cost three fixes in the stutter hunt above.
 
 # Enhancements
 
+## CUSTOM ACCENT COLOUR -- a picker, not a 13th preset. Requested 2026-10-17
+
+Sits beside the custom EQ below, and has the same shape: an overlay, a live
+preview, and the result saved as one extra entry on a cycle that already
+exists.
+
+### The rendering is ALREADY done, which is most of why this is cheap
+
+`ui_accent` is a bare `uint16_t` of RGB565 (player.c:1735). Every consumer
+reads that variable, not a palette index -- `ui_grad_set()` derives the whole
+background gradient from it, `ui_mix()` and `ui_age_mix()` tone it for the
+meters, the playlist rows, the QR pager, the VU peak zone, the controls
+header. `ui_palette[]` exists only to supply twelve known-good values to that
+one variable.
+
+So the picker does not touch rendering at all. Set `ui_accent`, call
+`ui_grad_set()`, raise `ui_accent_changed`, and the entire UI is already that
+colour -- which also means the preview is free and live while picking.
+
+### The real work is PERSISTENCE, and there is no free slot
+
+`Color` (interact.json id 11, 0x20000004) is an index with `max: 11`. A
+custom colour is 16 bits, not an index. Every other persisted slot is taken:
+Volume, Repeat, Shuffle, Meter, EQ preset, Resume, Saved position, Crossfeed,
+and all four `(internal) list` 32-bit slots, which carry the remembered
+playlist name.
+
+Three ways, none free:
+
+1. **Widen `Color` to carry index-or-colour** (0..11 preset, 12+ meaning
+   RGB565+12). One `max` change, which is the one interact.json edit known to
+   be safe. Cost: Core Settings then shows Color as a 65,000-step slider,
+   which ruins the menu entry people actually use.
+2. **`Color` gains value 12 = CUSTOM, plus a NEW variable for the 16 bits.**
+   The clean design. Cost: a new interact.json variable is not the safe class
+   of edit -- see the openFPGA input.json incident, where a data-file change
+   silently killed all input. **Ship that file change ALONE, not batched with
+   the feature.**
+3. Steal bits from an existing 32-bit slot. Rejected on sight: the four list
+   slots are a name, and packing a colour beside it is the kind of aliasing
+   that shows up months later as a corrupted playlist name.
+
+Option 2, shipped in two steps, is the recommendation.
+
+### The constraint a picker adds that twelve presets did not
+
+The twelve are hand-chosen and implicitly encode "readable". An arbitrary
+pick is not.
+
+`ui_grad_set()` already computes luma (2126R + 7152G + 722B) and scales the
+background from it, so a dark pick darkens the background with it and
+partially self-corrects. What does NOT self-correct is `ui_accent` used as
+**text on the panel** -- `fb_set_color(ui_accent, UI_PANEL)` at the controls
+header, the playlist header and elsewhere. `UI_PANEL` is 0x2945; a pick near
+it disappears, and a very pale pick flattens against white text.
+
+So the picker needs a contrast floor against `UI_PANEL`, enforced while
+choosing rather than reported after. Pick the bound by measuring the twelve
+presets' luma against the panel and taking the dimmest as the floor -- that
+is a numeric check that can be done host-side before any hardware round.
+
+### Operation, to match the EQ overlay
+
+Hold **L** or **R** to open (a tap already cycles the presets, as a tap on
+**Y** cycles EQ presets). **Left/Right** selects channel, **Up/Down** moves
+it, hold again to close. HSV reads better than RGB for picking and the
+conversion is integer-only, so it costs nothing on a CPU with no FPU. Saved
+as **CUSTOM**, joining the cycle a plain L/R tap walks.
+
 ## CUSTOM EQ -- user-set bands, held as a 9th preset. Requested 2026-10-06
 
 **Operation, as asked for:** hold **Y** to open an EQ overlay; **Up/Down**
