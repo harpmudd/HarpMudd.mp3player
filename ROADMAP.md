@@ -970,6 +970,72 @@ until a version is actually tagged, and set `date_release` to the same day.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
+## A track change paints over the controls overlay — FOUND 2026-10-17, for the next bugfix
+
+Reported against v1.8.0: hold Start for the cheatsheet, leave it up, and when
+the playing track ends and the next one loads, the overlay is overpainted. It
+has to stay in front until it is closed.
+
+### Cause — confirmed, and the comment that predicted it
+
+`load_track()` calls `ui_draw_chrome()` directly, as do eight other places.
+That function paints the gradient, the card and the artwork (`ui_art_draw()`
+is INSIDE it), and it ends with:
+
+```c
+    if (pl_ui_open) pl_ui_draw();
+```
+
+whose own comment says why:
+
+> Any caller that repaints mid-browse -- a track auto-advancing, a blank
+> wake, an accent change -- would otherwise leave the player showing...
+> Putting it here rather than in the main loop means EVERY repaint route is
+> covered by construction, **including ones added later**.
+
+The controls overlay is an "added later" that was not added there. The draw
+dispatch short-circuits `ui_draw_dynamic()` while `ctl_open`, which is enough
+for the ordinary frame path, and nothing else was needed for the QR overlay
+BECAUSE QR PAUSES: `paused |= PAUSE_QR` means a track cannot advance
+underneath it. The cheatsheet deliberately does not pause -- that was the
+design call -- and not pausing is exactly what exposes this route.
+
+### The fix — one line, same place
+
+```c
+    if (pl_ui_open) pl_ui_draw();
+    if (ctl_open)   ctl_draw();      /* same reason, same guarantee */
+```
+
+Covers all nine `ui_draw_chrome()` callers by construction. Nothing else is
+needed: `ui_art_draw()` is called inside `ui_draw_chrome()` (so it is already
+ahead of this line), the other `ui_art_draw()` is inside `ui_draw_dynamic()`
+(already short-circuited), and the third is the `pl_ui_restore` path, which
+only runs on close.
+
+Worth re-reading that comment before adding any future overlay. It is the
+second time it has been right.
+
+## Close the controls overlay with Start as well as B — usability, same release
+
+Requested 2026-10-17. Start opens it; Start should close it too, rather than
+only B.
+
+The input gate becomes:
+
+```c
+    if (edge & (KEY_B | KEY_START)) ctl_close();
+```
+
+Safe against the hold that opened it: while `ctl_open`, `keys` is masked to
+0, so the Start block's `if (!(keys & KEY_START)) st_armed = 0u;` disarms on
+the very next pass. The press that closes the overlay therefore cannot also
+fire the tap-stop on its release -- `st_armed` is 0 until a fresh press arms
+it. Re-check that when touching either piece.
+
+The on-screen hint reads `B CLOSES` and has to change with it; measure the
+new string against `CTL_W - 2 * CTL_PAD` before assuming it fits.
+
 ## The previous track's lyrics stay up during a track change — DEFERRED to 1.9.0
 
 Reported 2026-10-16, against the lyrics meter: skip forward while the lyrics
