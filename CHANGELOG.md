@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.8.1 — unreleased
+## v1.8.1 — 17 October 2026
 
 - **The controls cheatsheet closes with Start as well as B.** Start is what
   opens it, so it is the button you reach for to put it away.
