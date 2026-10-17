@@ -970,6 +970,54 @@ until a version is actually tagged, and set `date_release` to the same day.
 Fixed before anything in Enhancements, regardless of how interesting the
 enhancement is.
 
+## Resume still folds track 128+ — the RS_PACK fix was only half applied. FOUND 2026-10-17
+
+Found while costing a bigger playlist limit, not from a report. **Live in
+v1.8.0.**
+
+The comment above `RS_TRACK` describes this bug and says it was fixed by
+splitting the index across bit 25. The READER was widened. The WRITER was
+not:
+
+```c
+#define RS_TRACK(w)   (((w) & 0x7Fu) | ((((w) >> 25) & 1u) << 7))   /* 8 bits */
+
+#define RS_PACK(t, s, p) (((uint32_t)((t) & 0x7Fu))           /* <- 7 bits   */
+                        | ((uint32_t)((s) & 0x1FFFFu) << 7)
+                        | ((uint32_t)((p) ? 1u : 0u) << 24))  /* no bit 25   */
+```
+
+`RS_PACK` masks the track to `0x7F` and never sets bit 25. Verified: there is
+exactly one writer of `resume_word` (player.c:8685, through `RS_PACK`), and
+nothing anywhere shifts by 25 or ORs 0x2000000.
+
+So the original symptom is still there, unchanged: on a playlist longer than
+128 entries, resuming track 200 comes back as track 72. The 8-bit tag guard
+usually catches it -- a mismatched filename discards the position -- so it
+presents as "resume just doesn't work on my big playlist" rather than as a
+wrong song, which is probably why it has not been reported again.
+
+### Fix
+
+One line:
+
+```c
+#define RS_PACK(t, s, p) (((uint32_t)((t) & 0x7Fu)) \
+                        | ((uint32_t)(((t) >> 7) & 1u) << 25) \
+                        | ((uint32_t)((s) & 0x1FFFFu) << 7) \
+                        | ((uint32_t)((p) ? 1u : 0u) << 24))
+```
+
+Backward compatible by construction, which is why the field was split this
+way: every previously saved word has bit 25 clear and reads back as 0..127
+exactly as before. Bit 31 must stay clear -- APF stores these signed.
+
+**Add a check that cannot silently fold again.** The reason this survived a
+"fix" is that both halves looked right in isolation. A build-time
+`_Static_assert` tying the writable field to PL_MAX would have caught it, and
+would catch the next raise too.
+
+
 ## A track change paints over the controls overlay — FOUND 2026-10-17, for the next bugfix
 
 Reported against v1.8.0: hold Start for the cheatsheet, leave it up, and when
