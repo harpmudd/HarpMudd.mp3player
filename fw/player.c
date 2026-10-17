@@ -4088,6 +4088,7 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 }
 
 static void pl_ui_draw(void);   /* defined with the overlay, below */
+static void ctl_draw(void);     /* same -- ui_draw_chrome() repaints it */
 
 /* The codec name as a chip in the card's bottom-right corner.
  *
@@ -4441,6 +4442,16 @@ static void ui_draw_chrome(void)
      * Putting it here rather than in the main loop means EVERY repaint route
      * is covered by construction, including ones added later. */
     if (pl_ui_open) pl_ui_draw();
+    /* The controls overlay is one of those "ones added later", and it was not
+     * added here -- so a track ending under an open cheatsheet repainted the
+     * player straight over it. load_track() calls ui_draw_chrome() directly,
+     * as do eight other places, and the per-frame short-circuit in
+     * ui_draw_dynamic() does nothing for any of them.
+     *
+     * The QR overlay never needed this because it PAUSES: a track cannot
+     * advance underneath it. The cheatsheet deliberately does not pause, and
+     * not pausing is exactly what exposes this route. */
+    if (ctl_open) ctl_draw();
 
 }
 
@@ -5797,7 +5808,7 @@ UI_COLD static void ctl_draw(void)
         /* Right-aligned, because a reader who does not know how to get OUT of
          * a screen they opened by accident is the one failure this must not
          * have. */
-        const char *hint = "B CLOSES";
+        const char *hint = "B / START CLOSES";
         uint32_t hw = fb_text_width(hint, TS_1X);
         fb_set_color(UI_FAINT, UI_PANEL);
         fb_text_clipped(CTL_X + CTL_W - CTL_PAD - hw, y0 + 14u, hint,
@@ -8800,7 +8811,14 @@ static void poll_input(void)
      * setting. `keys` is cleared too, which also disarms the Start hold that
      * opened it -- see the disarm in the Start block. */
     if (ctl_open) {
-        if (edge & KEY_B) ctl_close();
+        /* START as well as B. Start is what opened it, so reaching for it
+         * again to put it away is the gesture people try first.
+         *
+         * It cannot double-fire the tap-stop on release: `keys` is cleared
+         * just below, so the Start block's `if (!(keys & KEY_START))` disarms
+         * on the very next pass, and the tap only fires while armed. The
+         * press that closes this therefore does nothing else on its way up. */
+        if (edge & (KEY_B | KEY_START)) ctl_close();
         edge = 0; fall = 0; keys = 0;
     }
 
