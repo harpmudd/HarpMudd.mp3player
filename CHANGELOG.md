@@ -14,13 +14,11 @@ What changed in each release, newest first.
 - **Lyrics moved to PSRAM**, which is what made room for scrobbling. They
   are parsed as a track loads rather than held in the block RAM the decoders
   need. Nothing changes in use.
-- **Meter refinements.** The meters are taller, the bars are wider, and the
-  VU meter has been rebuilt to look like a real instrument.
+- **Meter refinements.** The meters are taller and the bars wider, the VU
+  meter has a new needle and dial face, and the magic eye is bigger.
 - **A controls cheatsheet, on a hold of Start.** Every button and combo on
-  one screen, so none of it has to be remembered; **B** closes it and the
-  music carries on behind it. Stopping now happens when you release Start
-  rather than when you press it, so that reaching for the list does not stop
-  the track.
+  one screen; **B** closes it. Stop now happens when you release Start
+  rather than when you press it.
 - **The file format shows as a badge** — **MP3** or **FLAC** — in the corner
   of the track card and of the playlist browser, where the browser's follows
   the cursor. It used to be spelled out in the format row; a FLAC's row now
@@ -29,16 +27,9 @@ What changed in each release, newest first.
   catch up when the screen came back. Blanking is off unless you switch it on
   with **Select** + **Down**, so most people will never have seen it.
 - Fixed: **album art stored without a description field showed COVER
-  ERROR** when the picture was perfectly good.
-- Fixed: **the scrolling meters were dimmer on one side than the other.**
-  Bars, mirrored bars and peak dots shaded by column across the whole
-  width, so the middle of the meter sat at about half strength. Only the
-  last few columns fade now, as they leave the screen.
-- Fixed: **switching to the lyrics meter part-way through a track sometimes
-  said NO LYRICS** on a track that has them, and only changing song and back
-  would bring them out. It was looking for the lyrics under the playlist's
-  name rather than the track's, depending on which routine background check
-  had run most recently.
+  ERROR** when the picture was perfectly fine.
+- Fixed: **switching to the lyrics meter mid-track sometimes said NO
+  LYRICS** on a track that has them.
 
 ## v1.7.0 — 12 October 2026
 

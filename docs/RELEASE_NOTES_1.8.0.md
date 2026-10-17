@@ -32,9 +32,8 @@ Your key lives in your own browser.
 **Setup guide:**
 <https://harpmudd.github.io/HarpMudd.mp3player/scrobble/setup.html>
 
-**A controls cheatsheet.** **Hold Start** and every button and combo is
-listed on one screen — nineteen of them, no scrolling. **B** closes it, and
-the music keeps playing behind it.
+**A controls cheatsheet.** **Hold Start** for every button and combo on one
+screen. **B** closes it.
 
 **The file format shows as a badge** — **MP3** or **FLAC** — in the corner
 of the track card and of the playlist browser, where it follows the cursor
@@ -43,11 +42,11 @@ as you scroll.
 ### Changed
 
 **Every meter is taller.** They were drawing into a 72 px band while the
-cassette and the lyrics view used the full 96; now all thirteen do. The
-bars are wider with it, and the VU meter has been rebuilt as a real
-instrument — recessed face, graduated logarithmic scale, white needle,
-machined pivot, red zone above 0. The magic eye is bigger and sits on its
-base again, and the cassette's label now carries the artist.
+cassette and the lyrics view used the full 96; now all thirteen do, and the
+bars are wider with it. The VU meter has a new needle and dial face, with a
+graduated logarithmic scale and a red zone above 0. The magic eye is bigger
+and sits on its base again, and the cassette's label now carries the
+artist.
 
 **The format row drops the codec name**, which the badge now carries. A
 FLAC's row gives its bit depth on its own.
@@ -61,12 +60,11 @@ Nothing changes in use.
 
 ### Fixed
 
-- Switching to the lyrics meter part-way through a track sometimes said
-  **NO LYRICS** on a track that has them.
+- Switching to the lyrics meter mid-track sometimes said **NO LYRICS** on a
+  track that has them.
 - Elapsed time stopped while the screen was blanked and never caught up.
 - Album art stored without a description field showed **COVER ERROR** when
   the picture was fine.
-- The scrolling meters were dimmer on one side than the other.
 
 ### Installing
 
