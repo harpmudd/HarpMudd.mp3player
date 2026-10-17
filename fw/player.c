@@ -4088,7 +4088,6 @@ static void ui_marq_step(ui_marquee_t *m, uint16_t fg)
 }
 
 static void pl_ui_draw(void);   /* defined with the overlay, below */
-static void ctl_draw(void);     /* same -- ui_draw_chrome() repaints it */
 
 /* The codec name as a chip in the card's bottom-right corner.
  *
@@ -4215,6 +4214,25 @@ static void ui_draw_chrome(void)
      * screen back up. ui_blank_wake() calls this again on the way out, so the
      * skipped work is simply deferred rather than lost. */
     if (screen_blank) return;
+
+    /* Same deal under the controls cheatsheet, and for a sharper reason.
+     *
+     * Repainting the overlay AFTER this function was not enough: there is no
+     * back buffer, so scanout catches the middle of it. The gradient and the
+     * card land on the glass, the overlay goes back a moment later, and the
+     * gap reads as black boxes flashing through the panel. Painting a screen
+     * that is about to be covered is work nobody wants to see, and here it is
+     * work they CAN see.
+     *
+     * Skipping the state this function also sets is safe: ui_text_w,
+     * ui_info_y, ui_badge_w, the marquees and the ui_last_* invalidations are
+     * all consumed by ui_draw_dynamic(), which is short-circuited while the
+     * overlay is up -- and ctl_close() runs this function again through
+     * pl_ui_restore, with the new track's data already in place.
+     *
+     * Deferred, exactly as the blank case above is. */
+    if (ctl_open) return;
+
     ui_gradient();
 
     /* When there's no usable title, show the FILENAME.
@@ -4442,16 +4460,14 @@ static void ui_draw_chrome(void)
      * Putting it here rather than in the main loop means EVERY repaint route
      * is covered by construction, including ones added later. */
     if (pl_ui_open) pl_ui_draw();
-    /* The controls overlay is one of those "ones added later", and it was not
-     * added here -- so a track ending under an open cheatsheet repainted the
-     * player straight over it. load_track() calls ui_draw_chrome() directly,
-     * as do eight other places, and the per-frame short-circuit in
-     * ui_draw_dynamic() does nothing for any of them.
+    /* No ctl_draw() here. Redrawing the cheatsheet after the repaint was the
+     * first fix and it left a visible flash -- see the early return at the
+     * top, which skips the repaint outright instead.
      *
-     * The QR overlay never needed this because it PAUSES: a track cannot
-     * advance underneath it. The cheatsheet deliberately does not pause, and
-     * not pausing is exactly what exposes this route. */
-    if (ctl_open) ctl_draw();
+     * The playlist overlay still uses the redraw-after approach above. It is
+     * not worth changing on spec: pl_ui_draw() paints one opaque panel and
+     * nobody has reported a flash from it. If one ever shows, this is the
+     * place it will have come from. */
 
 }
 
