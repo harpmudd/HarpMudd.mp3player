@@ -235,7 +235,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.8.1"
+#define APP_VER "1.8.2"
 /* Dev builds say so ON SCREEN. The default is DEV, and a release has to
  * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
  * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
@@ -1349,8 +1349,25 @@ static uint32_t pl_rng = 1u;             /* shuffle RNG, seeded from cycles() */
  * save merely because a playlist EXISTED, so a standalone mp3 was stored as
  * "playlist track 5" and came back as Phish at 128 seconds. */
 #define RS_PACK(t, s, p) (((uint32_t)((t) & 0x7Fu)) \
+                        | ((uint32_t)(((t) >> 7) & 1u) << 25) \
                         | ((uint32_t)((s) & 0x1FFFFu) << 7) \
                         | ((uint32_t)((p) ? 1u : 0u) << 24))
+
+/* The 8th bit, which the reader above has always expected and this never
+ * wrote. RS_TRACK was widened across bit 25 to fix track 200 coming back as
+ * track 72; only the READ half landed, so the symptom was unchanged and the
+ * comment above described a fix that was not in the build. Verified now by
+ * tools/host/resume_check.py, which round-trips every index 0..255 against
+ * these macros extracted from this file.
+ *
+ * Why it survived a fix: reader and writer each looked correct in isolation.
+ * The assert below is the thing that makes that impossible to repeat -- grow
+ * PL_MAX past what the field can carry and the BUILD fails, rather than
+ * resume quietly returning the wrong song. */
+_Static_assert(PL_MAX <= 256u,
+               "RS_PACK carries 8 bits of track index; widen the field "
+               "(bits 26..30 are free, 31 must stay clear) and PL_MAX "
+               "together, or resume folds silently");
 
 static uint8_t  track_from_pl;    /* playlist started this track, not the user */
 static uint32_t resume_word;      /* the packed point, as published to APF   */
@@ -11535,6 +11552,33 @@ static int read_track_head(void)
 __attribute__((optimize("Os")))
 static int load_track(void)
 {
+    /* WIPE THE LYRICS BOX NOW, not at the end of the load.
+     *
+     * The outgoing track's words otherwise sit on the glass for the whole of
+     * this function -- under the incoming track's title, which is what makes
+     * it read as a bug rather than as a gap. Nothing repaints during a load:
+     * this is blocking and called from the main loop, so ui_draw_dynamic()
+     * cannot run, and the only erase is ui_gradient() inside ui_draw_chrome()
+     * near the END of the function, which on a large cover is a second away.
+     *
+     * CLEARING lrc_n HERE WOULD CHANGE NOTHING VISIBLE, which is where the
+     * first write-up of this went wrong. lrc_load() already runs before that
+     * repaint, so the data is right by the time anything draws. The stale
+     * thing is pixels, and pixels are what this erases.
+     *
+     * Only the lyrics meter. Every other meter has the same stale-frame
+     * window and none of them need it: a frozen waveform reads as paused,
+     * frozen text reads as wrong.
+     *
+     * ui_wave_w() returns the OUTGOING layout's width, since art_shown has
+     * not been updated yet. That is correct rather than lucky -- the box
+     * being erased is the one the previous track drew.
+     *
+     * Not while blanked and not under the cheatsheet, for the reasons
+     * ui_draw_chrome() sets out at its own top. */
+    if (viz_mode == VIZ_LYRICS && !screen_blank && !ctl_open)
+        ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ui_wave_w(), UI_WAVE_FH);
+
     /* Release the FLAC buffer FIRST. This runs before the format is known --
      * detection needs the file's head, which read_track_head() has not fetched
      * yet -- so Helix is rebuilt on every load and handed back below if the

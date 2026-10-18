@@ -6,7 +6,7 @@ scrobbling to Last.fm.
 
 Decoding runs in software, on a RISC-V CPU built into the Pocket's FPGA.
 
-Current version **v1.8.1**. Release history: [CHANGELOG.md](CHANGELOG.md).
+Current version **v1.8.2**. Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Installing
 
