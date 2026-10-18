@@ -2098,6 +2098,77 @@ so the short axis lands under the 92px panel and is magnified. Worth fixing one
 day by choosing the path per axis, but it is not the silent rejection this
 entry claimed, and nobody should go hunting for one.
 
+## ReplayGain — BUILT, SHIPPED OFF. MP3 support is what would unblock it. LOW PRIORITY
+
+`REPLAYGAIN` defaults to 0 and every shipped build has it off. This entry
+exists because the state is easy to misread in both directions: it is not a
+stub, and it is not costing anything.
+
+### It works today, for FLAC. Verified 2026-10-18 by building it.
+
+Built with `-DREPLAYGAIN=1`: compiles and links clean, 160,816 B against the
+shipping 160,068, so **+748 bytes**, leaving 8,000 B of headroom. No warnings,
+nothing rotted -- which was the real risk, since this project has a case of a
+0-shipped flag (`UI_SHOW_SPEED_DIAG`) failing to compile for a month with
+nothing to catch it.
+
+The whole chain is wired:
+
+- `flac.c:280-285` parses `REPLAYGAIN_TRACK_GAIN`, `REPLAYGAIN_ALBUM_GAIN`
+  and `REPLAYGAIN_TRACK_PEAK` out of the Vorbis comments, setting `rg_have`.
+- `rg_update()` is called from the track load at `player.c:11718`.
+- `rg_q8` folds into the gain at `player.c:1095`.
+- **Select + X** cycles off -> album -> track, with a toast.
+
+**NEVER RUN ON HARDWARE.** Compiling proves it is not bit-rotted; it proves
+nothing about correctness. Treat a first enable as a bring-up.
+
+### Standing cost with the flag off: EIGHT BYTES. Do not delete it to reclaim.
+
+149 lines across player.c, flac.c and flac.h are inside `#if REPLAYGAIN` and
+never reach the binary. The only ungated remainder is four fields in
+`flac_t` -- `rg_track_cdb`, `rg_album_cdb`, `rg_peak_q12`, `rg_have`. The
+`#ifndef REPLAYGAIN` above them is a default definition, not a guard, so they
+are always compiled; there is exactly one `flac_t` (the static `fl`), so the
+whole cost is 7 bytes padded to 8. That is 0.09% of headroom.
+
+Removing it buys nothing spendable and throws away the expensive parts: the
+dB->Q8 table (hand-built because there is no FPU and `pow()` was never
+available), the clip-safe peak handling, and the Vorbis parsing.
+
+### Why it is off, and what would change that
+
+Not the code -- the COVERAGE. Measured: ~9% of the library tagged, every real
+value negative, so applying gain makes the tagged minority quieter than the
+untagged majority and introduces an ~8 dB step into a library whose complaint
+was inconsistent loudness. ReplayGain only helps at near-total coverage.
+
+**MP3 support is the thing that fixes coverage**, and it is tractable rather
+than impossible. MP3 gains live in ID3v2 `TXXX` frames -- description
+`REPLAYGAIN_TRACK_GAIN`, value `-7.23 dB`. Both halves already exist
+separately:
+
+- **The frame walker.** `lyrics.inc:350` already walks ID3v2 frames hunting
+  `USLT`, handling the v2.3/v2.4 size encodings and the 512-byte windowing.
+  Matching `TXXX` is the same loop.
+- **The value parser.** `rg_parse_cdb()` in flac.c already turns `-7.23 dB`
+  into centi-decibels.
+
+Remaining work is joining them: a `TXXX` frame carries its description before
+its value, and a file has several `TXXX` frames to walk past.
+
+### Before enabling, measure
+
+The 9% figure is old and the library has grown. **Measure current tag
+coverage first** -- that number decides this, and it is a host-side script
+over the card, not a hardware round. Near-total for the formats supported
+means the argument that killed it no longer holds; still a minority means
+enabling it makes things worse.
+
+One more thing if it is ever turned on: `rg_mode` is a plain static that
+resets to *album* every launch. It would want one of the five free persisted
+slots -- see the register-file entry.
+
 ## ID3v2.2 tags are not read at all — NOT planned, scoped 2026-08-13
 
 Raised while helping a user whose cover would not show. Recording the real
