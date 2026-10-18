@@ -2,6 +2,15 @@
 
 What changed in each release, newest first.
 
+## v1.8.2 — unreleased
+
+- Fixed: **the previous song's lyrics stayed on screen through a track
+  change**, until the new track's artwork had finished loading.
+- Fixed: **resume came back at the wrong track on a playlist longer than
+  128 songs** — it returned to one exactly 128 earlier in the list.
+- Fixed: **LOADING TRACK appeared on a blanked screen and stayed there.**
+  A track change is not supposed to wake a sleeping player.
+
 ## v1.8.1 — 17 October 2026
 
 - **The controls cheatsheet closes with Start as well as B.** Start is what
