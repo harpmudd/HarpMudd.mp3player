@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.8.2 — unreleased
+## v1.8.2 — 18 October 2026
 
 - Fixed: **the previous song's lyrics stayed on screen through a track
   change**, until the new track's artwork had finished loading.
