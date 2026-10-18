@@ -3420,6 +3420,37 @@ static uint8_t  qr_out[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
 static uint8_t  qr_dat[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_VER)];
 
 static uint8_t  qr_ui_open, qr_ui_dirty;
+
+/* Is the PLAYER's own layout what the viewer is looking at, right now?
+ *
+ * Anything that erases or redraws part of that layout from OUTSIDE the normal
+ * frame path has to ask this first -- and the list is longer than it looks. I
+ * missed three of these terms one at a time, each found on hardware, each
+ * presenting as a different bug: a hole punched in the boot splash's meter, a
+ * hole in the controls cheatsheet, a hole in the playlist browser. Same single
+ * erase every time.
+ *
+ * So the condition lives in ONE place. A new overlay adds its flag HERE and
+ * every caller is correct again at once, instead of being found one hardware
+ * round at a time.
+ *
+ *   ui_player_up   the card has actually been painted; the splash clears it
+ *   screen_blank   the screen is black and must stay black -- reaching for a
+ *                  sleeping player must not wake it
+ *   ctl_open       controls cheatsheet
+ *   pl_ui_open     playlist browser
+ *   qr_ui_open     the scrobble code. It pauses, so a track cannot advance
+ *                  underneath it and it arguably cannot matter -- listed so
+ *                  that nobody has to re-derive that to be sure.
+ *
+ * ui_draw_dynamic() does not need this: it short-circuits on the overlays at
+ * its top already. This is for the paths that run during a blocking load,
+ * where nothing else is looking. */
+static inline int ui_player_visible(void)
+{
+    return ui_player_up && !screen_blank && !ctl_open
+                        && !pl_ui_open   && !qr_ui_open;
+}
 static uint8_t  qr_page, qr_pages;      /* 0-based index, total       */
 static uint16_t qr_first, qr_shown;     /* first record and count     */
 
@@ -11600,17 +11631,14 @@ static int load_track(void)
      *
      * Not while blanked and not under the cheatsheet, for the reasons
      * ui_draw_chrome() sets out at its own top. */
-    /* ui_player_up, added after this erase punched a hole in the BOOT
-     * SPLASH. The splash draws its meter across the same rows, so on a launch
-     * with the lyrics meter selected this wiped the meter's left end the
-     * moment the first track loaded. The boundary was exact and gave it away:
-     * art_shown initialises to 1, so ui_wave_w() returns ART_X - UI_MARGIN -
-     * 4 = 252, the erase ran to x 272, and the surviving bars measured
-     * x 272..377.
+    /* ui_player_visible() rather than a hand-rolled list of flags. This one
+     * erase punched a hole in the boot splash, then the controls cheatsheet,
+     * then the playlist browser, because I added the terms one at a time as
+     * hardware found them. See that function.
      *
-     * The flag is the honest condition. There is no previous track's text to
-     * remove unless the player card is the thing on the glass. */
-    if (ui_player_up && viz_mode == VIZ_LYRICS && !screen_blank && !ctl_open)
+     * The condition is simply: there is no previous track's text to remove
+     * unless the player card is what is on the glass. */
+    if (ui_player_visible() && viz_mode == VIZ_LYRICS)
         ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ui_wave_w(), UI_WAVE_FH);
 
     /* Release the FLAC buffer FIRST. This runs before the format is known --

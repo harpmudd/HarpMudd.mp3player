@@ -12,9 +12,12 @@ the filename and throws the position away when it disagrees, so entries
 sharing a name would make the guard unable to tell track 130 from track 2 --
 which is exactly the discrimination under test. Every entry is its own file.
 
-The audio is silence (valid MPEG-1 Layer III frames with empty side info),
-two seconds each, so the whole set is well under a megabyte. Tags give each
-track a number you can read off the screen.
+The audio is silence (valid MPEG-1 Layer III frames with empty side info).
+TEN SECONDS each, not two: resume only restores a position past the two
+second mark (`RS_SECS(resume_word) > 2u`), so two-second tracks make the
+feature untestable -- it would never fire and the fix would look broken.
+Ten gives room to play a few seconds and quit. Tags give each track a
+number you can read off the screen.
 
 Everything lands in ONE folder with its own playlist, so nothing mixes with
 real music and removing it is deleting that folder.
@@ -36,7 +39,7 @@ from make_lang_tests import HDR, FRAME, tag              # noqa: E402
 FOLDER = '_rgtest'
 PLAYLIST = '_rgtest.m3u'
 COUNT = 150              # > 128, with margin either side of the fold
-SECONDS = 2
+SECONDS = 10
 
 
 def silence(seconds):
