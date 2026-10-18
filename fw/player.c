@@ -2902,6 +2902,11 @@ static unsigned char wave_pk[UI_WAVE_N], wave_pk_drawn[UI_WAVE_N];
 /* Shown by default; SELECT hides it. art_x is where the panel currently sits,
  * and FB_W means fully off the right edge. */
 static uint32_t art_x = ART_X, art_shown = 1, art_ready, ui_text_w;
+/* Is the PLAYER on screen, as opposed to the splash? Set when
+ * ui_draw_chrome() actually paints, cleared whenever the splash goes up.
+ * Anything that erases part of the player's layout has to know, because the
+ * splash occupies the same rows and does not want holes punched in it. */
+static uint8_t  ui_player_up;
 /* art_shown is what is on screen; art_pref is what the USER asked for.
  * Keeping them apart is what lets the choice survive a track change: a
  * track with no artwork hides the panel without forgetting that the panel
@@ -4476,6 +4481,8 @@ static void ui_draw_chrome(void)
      *
      * Putting it here rather than in the main loop means EVERY repaint route
      * is covered by construction, including ones added later. */
+    ui_player_up = 1u;      /* the card is on the glass; see the flag's note */
+
     if (pl_ui_open) pl_ui_draw();
     /* No ctl_draw() here. Redrawing the cheatsheet after the repaint was the
      * first fix and it left a visible flash -- see the early return at the
@@ -4619,6 +4626,7 @@ static void ui_splash_card(uint32_t f, uint32_t den)
 
 static void ui_splash(void)
 {
+    ui_player_up = 0u;
     /* Belt and braces against the cheatsheet. The idle path at the track
      * load calls this, and a full-screen splash over an open overlay would
      * be the loudest version of the bleed-through this release is fixing.
@@ -4797,28 +4805,19 @@ static void ui_wave_anim_tick(void)
     ui_wave_frame();
 }
 
-/* Stop, but FINISH THE FILL first.
- *
- * A ~0.5 s drain was tried and removed: it is half a second added to every
- * launch to watch bars fall, and the player repaints the whole screen a
- * moment later anyway. That reasoning still holds and this is not a drain --
- * it costs no time at all.
- *
- * What it fixes: the sweep takes UI_WAVE_N frames and the thing it is
- * decorating can finish sooner. Stopping dead then leaves the meter frozen
- * part-filled -- measured off a boot screenshot at seven of twenty-four
- * columns, the right quarter lit and the rest bare, which reads as a
- * rendering fault rather than as an animation that ran out of road. A
- * partial meter is worse than either a full one or none.
- *
- * So generate the remaining columns and draw one last frame. Instant, and
- * the sweep still plays in full whenever there was time for it. */
+/* Just stop. A ~0.5 s drain was tried and removed: it is half a second added to
+ * every launch to watch bars fall, and the player repaints the whole screen a
+ * moment later anyway. Stopping dead costs nothing and nobody sees the frozen
+ * frame for long. */
+/* A "finish the sweep before stopping" version was added here on 2026-10-18
+ * and reverted the same day. The half-filled boot meter it was aimed at was
+ * not this function's doing at all -- see the lyrics erase in load_track(),
+ * which was painting over the meter's left end. The measurement that pointed
+ * here (seven of twenty-four columns lit) was real; the conclusion drawn from
+ * it was wrong, because it never occurred to me that the erase I had just
+ * added was the thing clearing them. */
 static void ui_wave_anim_stop(void)
 {
-    if (wv_on) {
-        for (uint32_t i = 0; i < UI_WAVE_N; i++) ui_wave_gen();
-        ui_wave_frame();
-    }
     wv_on = 0;
 }
 
@@ -4838,6 +4837,7 @@ static void ui_splash_anim(void)
      * which animate it from inside target_read_slot()'s spin. So this number
      * buys no animation at all; it is dead time in front of work that already
      * animates itself, and it only has to outlast a flicker. */
+    ui_player_up = 0u;      /* the splash owns the screen from here */
     ui_wave_anim_start();
 
     /* 900, up from 150.
@@ -11600,7 +11600,17 @@ static int load_track(void)
      *
      * Not while blanked and not under the cheatsheet, for the reasons
      * ui_draw_chrome() sets out at its own top. */
-    if (viz_mode == VIZ_LYRICS && !screen_blank && !ctl_open)
+    /* ui_player_up, added after this erase punched a hole in the BOOT
+     * SPLASH. The splash draws its meter across the same rows, so on a launch
+     * with the lyrics meter selected this wiped the meter's left end the
+     * moment the first track loaded. The boundary was exact and gave it away:
+     * art_shown initialises to 1, so ui_wave_w() returns ART_X - UI_MARGIN -
+     * 4 = 252, the erase ran to x 272, and the surviving bars measured
+     * x 272..377.
+     *
+     * The flag is the honest condition. There is no previous track's text to
+     * remove unless the player card is the thing on the glass. */
+    if (ui_player_up && viz_mode == VIZ_LYRICS && !screen_blank && !ctl_open)
         ui_bg_restore(UI_MARGIN, UI_WAVE_FY, ui_wave_w(), UI_WAVE_FH);
 
     /* Release the FLAC buffer FIRST. This runs before the format is known --
