@@ -4797,12 +4797,28 @@ static void ui_wave_anim_tick(void)
     ui_wave_frame();
 }
 
-/* Just stop. A ~0.5 s drain was tried and removed: it is half a second added to
- * every launch to watch bars fall, and the player repaints the whole screen a
- * moment later anyway. Stopping dead costs nothing and nobody sees the frozen
- * frame for long. */
+/* Stop, but FINISH THE FILL first.
+ *
+ * A ~0.5 s drain was tried and removed: it is half a second added to every
+ * launch to watch bars fall, and the player repaints the whole screen a
+ * moment later anyway. That reasoning still holds and this is not a drain --
+ * it costs no time at all.
+ *
+ * What it fixes: the sweep takes UI_WAVE_N frames and the thing it is
+ * decorating can finish sooner. Stopping dead then leaves the meter frozen
+ * part-filled -- measured off a boot screenshot at seven of twenty-four
+ * columns, the right quarter lit and the rest bare, which reads as a
+ * rendering fault rather than as an animation that ran out of road. A
+ * partial meter is worse than either a full one or none.
+ *
+ * So generate the remaining columns and draw one last frame. Instant, and
+ * the sweep still plays in full whenever there was time for it. */
 static void ui_wave_anim_stop(void)
 {
+    if (wv_on) {
+        for (uint32_t i = 0; i < UI_WAVE_N; i++) ui_wave_gen();
+        ui_wave_frame();
+    }
     wv_on = 0;
 }
 
@@ -4992,8 +5008,16 @@ static void ui_boot_note(const char *msg)
      *
      * Clearing ui_boot_msg also makes ui_boot_tick() inert, so the dots that
      * follow the label stay away too. ui_boot_x is left unset, which is safe
-     * for the same reason: only the tick reads it. */
-    if (ctl_open) { ui_boot_msg = 0; return; }
+     * for the same reason: only the tick reads it.
+     *
+     * SCREEN_BLANK IS THE SAME HAZARD and was missed first time round. A
+     * track change while the screen is blanked painted "LOADING TRACK" and a
+     * cleared toast band onto a black screen, and they STUCK: ui_draw_chrome()
+     * returns early while blanked, so nothing ever erased them. Reaching for a
+     * sleeping player is not supposed to wake it, and this woke it badly.
+     * Predates the overlay work -- ui_boot_note() never had this guard -- but
+     * it is the identical shape, and the identical fix. */
+    if (ctl_open || screen_blank) { ui_boot_msg = 0; return; }
 
     /* WIPE FIRST. On the splash this row is empty so it never mattered, but in
      * the player it is the transport row -- PLAYING, the repeat and shuffle
