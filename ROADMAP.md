@@ -1561,7 +1561,7 @@ RTL comment that stated it absolutely has been corrected.
 Documented in the README as a known limitation, so a user who does hit it
 knows to pick again rather than assuming the core is broken.
 
-## Seeking a VBR MP3 lands the CLOCK in the wrong place — found 2026-09-10
+## Seeking a VBR MP3 lands the CLOCK in the wrong place — SHIPPED in v1.7.0
 
 Reported as "lyrics lose alignment after a seek", which is where it shows, but
 the lyrics are innocent: they read `ui_sec` and `ui_sec` is what is wrong.
@@ -1803,30 +1803,30 @@ So the picker does not touch rendering at all. Set `ui_accent`, call
 `ui_grad_set()`, raise `ui_accent_changed`, and the entire UI is already that
 colour -- which also means the preview is free and live while picking.
 
-### The real work is PERSISTENCE, and there is no free slot
+### Persistence: CHEAPER than first written here. Corrected 2026-10-18.
 
-`Color` (interact.json id 11, 0x20000004) is an index with `max: 11`. A
-custom colour is 16 bits, not an index. Every other persisted slot is taken:
-Volume, Repeat, Shuffle, Meter, EQ preset, Resume, Saved position, Crossfeed,
-and all four `(internal) list` 32-bit slots, which carry the remembered
-playlist name.
+The first version of this entry said "there is no free slot" and costed three
+awkward ways around it. That was wrong, and wrong in the usual way: it read
+`interact.json`'s current variables and concluded the register file behind
+them was full. It is not. See **The persisted-settings register file** below
+-- rev 21 widened `set_idx` from 3 bits to 4 in `mp3_soc.v`, taking it from 8
+slots to 16, and **five are free**. The next remembered setting costs nothing
+but an `interact.json` entry and no RTL change at all.
 
-Three ways, none free:
+So the design is the obvious one:
 
-1. **Widen `Color` to carry index-or-colour** (0..11 preset, 12+ meaning
-   RGB565+12). One `max` change, which is the one interact.json edit known to
-   be safe. Cost: Core Settings then shows Color as a 65,000-step slider,
-   which ruins the menu entry people actually use.
-2. **`Color` gains value 12 = CUSTOM, plus a NEW variable for the 16 bits.**
-   The clean design. Cost: a new interact.json variable is not the safe class
-   of edit -- see the openFPGA input.json incident, where a data-file change
-   silently killed all input. **Ship that file change ALONE, not batched with
-   the feature.**
-3. Steal bits from an existing 32-bit slot. Rejected on sight: the four list
-   slots are a name, and packing a colour beside it is the kind of aliasing
-   that shows up months later as a corrupted playlist name.
+- `Color` gains value 12 = **CUSTOM**, one `max` change (7 -> 8 is the same
+  shape as the Meter slider's widenings, the known-safe edit).
+- One free slot holds the RGB565 value, through one new `interact.json`
+  variable.
 
-Option 2, shipped in two steps, is the recommendation.
+The only caution left is the file itself, not the budget: a NEW variable is
+not the safe class of `interact.json` edit -- see the openFPGA input.json
+incident, where a data-file change silently killed all input. **Ship the data
+file change on its own, not batched with another one.** That matters here
+because custom EQ also wants an `interact.json` edit (its `EQ preset` max,
+7 -> 8), and landing two in one release is exactly the pattern that made the
+input bug impossible to bisect.
 
 ### The constraint a picker adds that twelve presets did not
 
@@ -3100,7 +3100,12 @@ a regression there is unambiguous. Then build the overlay against a known
 budget. Attempting them together means a link failure mid-feature with two
 suspects, which is how this branch lost most of a day already.
 
-## Hold-A for 1.2x is too easy to trigger by accident
+## Hold-A for 1.2x is too easy to trigger by accident — SHIPPED, SPEED_HOLD_MS
+
+Fixed by giving the 1.2x hold its own threshold instead of sharing the scrub's.
+`SPEED_HOLD_MS` is 1000 ms against `PL_HOLD_MS`'s 400, and the time row now
+carries an indicator while the mode is on, so it is visible as well as harder
+to trigger. Original analysis follows.
 
 A user reported a track playing at "double speed". The likely cause is not a
 decode fault at all -- it is hold-A engaging 1.2x when they meant to pause.
