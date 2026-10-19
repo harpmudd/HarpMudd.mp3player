@@ -2236,7 +2236,18 @@ static uint16_t lrc_n;                  /* lines parsed                       */
  *
  * Volatile by nature: PSRAM does not survive a power cycle, which is why this
  * is a SESSION log and the UI will have to say so. */
-#define SCR_PSR_BASE 24576u     /* words, clear of lrc_text's 16,384..19,967 */
+/* 32768, moved up from 24576 when LRC_TEXT_MAX grew to 8192.
+ *
+ * lrc_text now runs 16,384..24,575, which ended EXACTLY where this
+ * began -- zero margin. lrc_set() does not bounds-check (its callers
+ * do), so a single off-by-one in the lyrics parser would have written
+ * into the scrobble log instead of into slack, and the symptom would
+ * have been corrupted play history rather than anything pointing at
+ * lyrics. The old 4,608-word gap had been absorbing that risk silently.
+ *
+ * 32,768 restores 8,192 words of guard band. PSRAM is 32 MB and nothing
+ * else is in here, so the space costs nothing; the margin is the point. */
+#define SCR_PSR_BASE 32768u     /* words, clear of lrc_text's 16,384..24,575 */
 #define SCR_MAX      128u       /* records -- a long session, not a library  */
 #define SCR_REC      176u       /* words per record, one byte per word       */
 #define SCR_TI_OFF   4u
