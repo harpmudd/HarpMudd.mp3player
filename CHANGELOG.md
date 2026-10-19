@@ -2,7 +2,7 @@
 
 What changed in each release, newest first.
 
-## v1.8.3 — unreleased
+## v1.8.3 — 19 October 2026
 
 - Fixed: **long lyrics stopped part-way through the song.** A sheet of more
   than about 80 lines was cut short with nothing to say so — on one track
