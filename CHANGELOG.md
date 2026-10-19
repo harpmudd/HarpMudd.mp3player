@@ -2,6 +2,14 @@
 
 What changed in each release, newest first.
 
+## v1.8.3 — unreleased
+
+- Fixed: **long lyrics stopped part-way through the song.** A sheet of more
+  than about 80 lines was cut short with nothing to say so — on one track
+  here it stopped two thirds of the way in. Lyrics now hold well over twice
+  as much, and a sheet that still does not fit says so instead of just
+  ending.
+
 ## v1.8.2 — 18 October 2026
 
 - Fixed: **the previous song's lyrics stayed on screen through a track

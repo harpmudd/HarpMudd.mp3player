@@ -29,7 +29,7 @@
 
 static void lrc_clear(void)
 {
-    lrc_n = 0; lrc_synced = 0; lrc_set(0, 0);
+    lrc_n = 0; lrc_synced = 0; lrc_clipped = 0; lrc_set(0, 0);
     /* INVALIDATE THE METER'S REDRAW GATE, which is keyed on the line index.
      *
      * A new track starts at line 0, and a track with no sidecar also sits at
@@ -175,6 +175,16 @@ static void lrc_parse(uint32_t len)
             lrc_n++;
         }
     }
+
+    /* RECORD that it did not fit, before the drop below changes lrc_n.
+     *
+     * Truncation was already detected here and handled silently -- the
+     * partial line is dropped and the sheet simply stops. That is correct
+     * rendering and a terrible explanation: a lyric ending two thirds of the
+     * way through a song reads as the feature breaking, which is exactly how
+     * it was reported. Either cap counts: the buffer filling, or the line
+     * index running out with text still unread. */
+    lrc_clipped = (uint8_t)(cut || (lrc_n >= LRC_LINES && i < len));
 
     /* The last line of a truncated buffer is incomplete by definition:
      * the cut fell inside it, not on the newline that would have ended
@@ -420,4 +430,15 @@ static void lrc_load(void)
      * nothing. */
     uint32_t tn = lrc_tag_load();
     if (tn) lrc_parse(tn);
+}
+
+/* Say it out loud, once, when the sheet was cut short.
+ *
+ * Only while the lyrics meter is actually showing -- on any other meter the
+ * user did not ask about lyrics and does not need to hear that a file they
+ * cannot see was too long. */
+static void lrc_clip_notice(void)
+{
+    if (lrc_clipped && viz_mode == VIZ_LYRICS)
+        ui_toast_msg("LYRICS TOO LONG TO FIT");
 }

@@ -235,7 +235,7 @@ static inline int      pcm_underrun(void) { return PCM_UNDER(REG(R_PCM_ST)); }
 /* Shown on the splash. This is the PRODUCT version, not the RTL/firmware
  * contract above -- they answer different questions and must not be conflated.
  * Keep it in step with the status line in README.md; nothing enforces that. */
-#define APP_VER "1.8.2"
+#define APP_VER "1.8.3"
 /* Dev builds say so ON SCREEN. The default is DEV, and a release has to
  * ask for it with -DAPP_RELEASE=1 -- deliberately that way round. A
  * shipped build wrongly marked "(Dev)" is embarrassing; a dev build
@@ -2139,15 +2139,36 @@ static ui_marquee_t ui_mq_title, ui_mq_artist;
  * 3,082 bytes, so 500 spare covers it while leaving the heap above the
  * build's warning line. Overrunning is no longer silent anyway: a full
  * buffer drops its incomplete last line rather than showing it cut. */
-#define LRC_TEXT_MAX  3584u
-/* 80, not 64. Measured on the card: the longest sheet there is 66 lines, so 64
- * silently dropped the end of it -- and a lyric that stops two lines early
- * reads as a bug, not as a limit.
+/* 8192, up from 3584. Reported from the card: an N.W.A. sheet of 6,992
+ * bytes stopped dead at "[02:51.99] But take off the gun so you can see
+ * what's up" -- which is byte 3,486, the last line that fits. The cap was
+ * set against the sheets that happened to be on the card at the time and a
+ * hip-hop track has four times the words of a pop song.
  *
- * 80 rather than 96 because 96 put the image 64 bytes over the link guard, and
- * 16 lines of headroom over the longest real file is enough. Each line costs 4
- * bytes of index, so this is the cheapest dial in the feature. */
-#define LRC_LINES     80u
+ * Free, and that is why this number: lrc_text sits at PSRAM word 16,384 and
+ * the scrobble log starts at 24,576, so 4,608 words were already lying
+ * unused between them. 8,192 fills the gap exactly and moves no other base.
+ * Past that, SCR_PSR_BASE has to move -- which is cheap too, PSRAM is 32 MB,
+ * but it is a second thing to get right.
+ *
+ * The parse reads one byte per 16-bit word, so this costs ~3 ms at track
+ * load against ~1 ms before. Nothing per frame: the meter draws five rows
+ * however long the sheet is. */
+#define LRC_TEXT_MAX  8192u
+/* 192, up from 80. Raised WITH LRC_TEXT_MAX and sized against it: 8,192
+ * bytes at the ~45 bytes a timed line actually runs to is about 180 lines,
+ * so 192 means neither cap bites noticeably before the other. Leaving this
+ * at 80 would simply have moved the ceiling 14 lines further on and kept the
+ * bug.
+ *
+ * The reasoning the old number carried is still the right reasoning, it was
+ * just calibrated on too small a sample: the longest sheet ON THE CARD was
+ * 66 lines. The N.W.A. file is 136. Measure against the worst case you can
+ * find, not the worst case you have.
+ *
+ * Each line costs 4 bytes of index (lrc_off + lrc_sec), so 192 is 768 bytes
+ * against 320 -- 448 more, out of roughly 8.7 KB of headroom. */
+#define LRC_LINES     192u
 /* Rows one lyric line may wrap to. Three, because 15 lines on this card
  * exceed what two rows hold at the art-panel width however they are
  * broken. The meter shows five rows total, so a three-row line eats its
@@ -2183,6 +2204,7 @@ static inline void lrc_set(uint32_t i, char c)
 
 static uint16_t lrc_off[LRC_LINES];     /* start of each line within lrc_text */
 static uint16_t lrc_sec[LRC_LINES];     /* its stamp in TENTHS, or LRC_NOTIME */
+static uint8_t  lrc_clipped;            /* the sheet did not fit; say so       */
 static uint16_t lrc_drawn = 0xFFFFu;    /* line index currently on screen     */
 static uint16_t lrc_drawn_w;            /* width it was laid out for          */
 static uint32_t lrc_last_t10;           /* last position drawn at, in tenths  */
@@ -2358,6 +2380,7 @@ static const char *lrc_line_at(uint32_t idx)
 static uint8_t  lrc_synced;             /* at least one real timestamp        */
 static uint32_t lrc_index_for(uint32_t t10);  /* all defined in lyrics.inc */
 static void     lrc_load(void);
+static void     lrc_clip_notice(void);  /* defined with lrc_load, below */
 static void     lrc_clear(void);
 static uint32_t lrc_now10(void);
 
@@ -9121,7 +9144,7 @@ static void poll_input(void)
          * that is not the stream -- the fragment-cache stutter -- but it
          * happens ONCE, on a button the user just pressed, instead of on
          * every track load whether they want lyrics or not. */
-        if (viz_mode == VIZ_LYRICS && !lrc_n) lrc_load();
+        if (viz_mode == VIZ_LYRICS && !lrc_n) { lrc_load(); lrc_clip_notice(); }
         /* The cascade skips the split for stages the OUTGOING meter did not
          * read, so their splitter state and accumulators are stale by however
          * long that meter was up. Clear them, or the first window after a
@@ -12024,7 +12047,8 @@ static int load_track(void)
      * lyrics must not cost anything when unused. Switching TO the meter
      * loads them then; see the meter cycle. */
     ld_art = LD_MS(cycles() - tphase); tphase = cycles();
-    if (viz_mode == VIZ_LYRICS) lrc_load(); else lrc_clear();
+    if (viz_mode == VIZ_LYRICS) { lrc_load(); lrc_clip_notice(); }
+    else lrc_clear();
     ld_lrc = LD_MS(cycles() - tphase); tphase = cycles();
 
     /* Panel state follows the TRACK, not the session. art_x is set directly
